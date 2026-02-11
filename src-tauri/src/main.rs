@@ -6,9 +6,11 @@
 
 mod commands;
 mod db;
+mod secure_storage;
 
 use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
+use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -18,7 +20,6 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_sql::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             // LLM commands
             commands::llm::stream_message,
@@ -27,6 +28,11 @@ fn main() {
             save_message_cmd,
             get_sessions_cmd,
             delete_session_cmd,
+            // Secure storage commands
+            save_api_key,
+            get_api_key,
+            delete_api_key,
+            has_api_key,
         ])
         .setup(|app| {
             // Initialize database

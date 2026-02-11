@@ -82,7 +82,7 @@ const modelOptions = computed(() => {
               <template #feedback>
                 <n-text depth="3" style="font-size: 12px;">
                   <n-icon :size="12" style="margin-right: 4px;"><CheckmarkCircle /></n-icon>
-                  API Key 仅存储在本地，使用系统密钥链加密
+                  API Key 使用系统密钥链加密存储（Windows Credential / macOS Keychain / Linux Secret Service）
                 </n-text>
               </template>
             </n-form-item>

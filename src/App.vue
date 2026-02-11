@@ -14,8 +14,10 @@ const getTheme = (): GlobalTheme | null => {
   return settings.darkMode ? darkTheme : null;
 };
 
-onMounted(() => {
+onMounted(async () => {
   settings.initTheme();
+  // Load API keys from secure storage (system keyring)
+  await settings.loadAllApiKeys();
 });
 </script>
 

@@ -4,6 +4,42 @@
 
 ---
 
+## 📅 2026-02-11 API Key 安全加密存储
+
+### 🔐 安全增强
+
+#### 系统密钥链存储 (keyring)
+使用系统原生密钥链服务替代 localStorage 明文存储：
+
+**存储位置**:
+- **Windows**: Windows Credential Manager (凭据管理器)
+- **macOS**: Keychain (钥匙串)
+- **Linux**: Secret Service API / libsecret
+
+**实现细节**:
+- `src-tauri/src/secure_storage.rs`: 封装 keyring 操作
+  - `save_api_key`: 保存 API Key 到系统密钥链
+  - `get_api_key`: 从系统密钥链读取
+  - `delete_api_key`: 删除存储的 API Key
+  - `has_api_key`: 检查是否存在
+
+- `src/stores/settings.ts`: 前端集成
+  - `saveApiKeyToSecureStorage()`: 保存时调用后端命令
+  - `loadApiKeyFromSecureStorage()`: 加载时调用后端命令
+  - `loadAllApiKeys()`: 应用启动时批量加载
+  - Pinia persist 配置排除 `apiKey` 字段，确保不落盘
+
+- `src/App.vue`: 启动时加载所有 API Key
+- `src/views/SettingsView.vue`: 更新提示文案，说明使用系统密钥链
+
+**安全优势**:
+| 存储方式 | 安全性 | 加密 |
+|---------|--------|------|
+| localStorage (旧) | ❌ 低 | ❌ 明文 |
+| 系统密钥链 (新) | ✅ 高 | ✅ 系统级加密 |
+
+---
+
 ## 📅 2026-02-11 质量修复与功能改进
 
 ### 🔧 修复的问题
@@ -140,7 +176,7 @@
 2. **应用图标缺失**: 需要添加精美应用图标
 3. ~~**流式输出未实现**: 消息一次性返回，非实时流式~~ ✅ 2026-02-10 已修复
 4. ~~**历史记录未持久化**: 目前存储在内存，重启后丢失~~ ✅ 2026-02-10 已修复
-5. **API Key 安全存储**: 当前使用 localStorage 明文存储，需改为加密存储
+5. ~~**API Key 安全存储**: 当前使用 localStorage 明文存储，需改为加密存储~~ ✅ 2026-02-11 已修复（改用系统密钥链）
 
 ---
 

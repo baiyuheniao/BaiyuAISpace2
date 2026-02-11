@@ -4,6 +4,7 @@
 
 import { ref, computed } from "vue";
 import { defineStore } from "pinia";
+import { invoke } from "@tauri-apps/api/core";
 
 export interface LLMProvider {
   id: string;
@@ -310,10 +311,52 @@ export const useSettingsStore = defineStore(
       return providers.value.find((p) => p.id === activeProvider.value) || providers.value[0];
     });
 
-    const updateProvider = (providerId: string, updates: Partial<LLMProvider>) => {
+    // Secure API Key storage using system keyring
+    const saveApiKeyToSecureStorage = async (providerId: string, apiKey: string) => {
+      try {
+        await invoke("save_api_key", { provider: providerId, apiKey });
+        // Update local state but don't persist to localStorage
+        const idx = providers.value.findIndex((p) => p.id === providerId);
+        if (idx !== -1) {
+          providers.value[idx].apiKey = apiKey;
+        }
+      } catch (error) {
+        console.error("Failed to save API key to secure storage:", error);
+      }
+    };
+
+    const loadApiKeyFromSecureStorage = async (providerId: string): Promise<string | null> => {
+      try {
+        const apiKey = await invoke<string | null>("get_api_key", { provider: providerId });
+        if (apiKey) {
+          const idx = providers.value.findIndex((p) => p.id === providerId);
+          if (idx !== -1) {
+            providers.value[idx].apiKey = apiKey;
+          }
+        }
+        return apiKey;
+      } catch (error) {
+        console.error("Failed to load API key from secure storage:", error);
+        return null;
+      }
+    };
+
+    const loadAllApiKeys = async () => {
+      for (const provider of providers.value) {
+        await loadApiKeyFromSecureStorage(provider.id);
+      }
+    };
+
+    const updateProvider = async (providerId: string, updates: Partial<LLMProvider>) => {
       const idx = providers.value.findIndex((p) => p.id === providerId);
       if (idx !== -1) {
-        providers.value[idx] = { ...providers.value[idx], ...updates };
+        // If updating API key, save to secure storage
+        if (updates.apiKey !== undefined) {
+          await saveApiKeyToSecureStorage(providerId, updates.apiKey);
+        }
+        // Update other fields normally
+        const { apiKey, ...otherUpdates } = updates;
+        providers.value[idx] = { ...providers.value[idx], ...otherUpdates };
       }
     };
 
@@ -330,12 +373,24 @@ export const useSettingsStore = defineStore(
       currentProvider,
       updateProvider,
       setActiveProvider,
+      loadAllApiKeys,
+      saveApiKeyToSecureStorage,
+      loadApiKeyFromSecureStorage,
     };
   },
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "providers", "activeProvider"],
+      // Note: apiKey is NOT persisted to localStorage, only to system keyring
+      paths: ["darkMode", "activeProvider", "providers"],
+      beforeRestore: (context) => {
+        // Clear apiKey from persisted data to ensure security
+        if (context.store.providers) {
+          context.store.providers.forEach((p: LLMProvider) => {
+            p.apiKey = "";
+          });
+        }
+      },
     },
   }
 );
