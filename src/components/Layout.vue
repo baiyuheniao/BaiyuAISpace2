@@ -9,7 +9,7 @@ import { NLayout, NLayoutSider, NMenu, NButton, NAvatar, NTooltip } from "naive-
 import type { MenuOption } from "naive-ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
-import { Chatbubbles, Time, Settings, Moon, Sunny, Add, Sparkles } from "@vicons/ionicons5";
+import { Chatbubbles, Time, Settings, Moon, Sunny, Add, Sparkles, Library } from "@vicons/ionicons5";
 
 const route = useRoute();
 const router = useRouter();
@@ -23,6 +23,11 @@ const menuOptions: MenuOption[] = [
     label: "对话",
     key: "Chat",
     icon: () => h(Chatbubbles),
+  },
+  {
+    label: "知识库",
+    key: "KnowledgeBase",
+    icon: () => h(Library),
   },
   {
     label: "历史记录",

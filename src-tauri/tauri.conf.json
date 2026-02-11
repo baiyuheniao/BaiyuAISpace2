@@ -46,8 +46,9 @@
     }
   },
   "plugins": {
-    "sql": {
-      "preload": ["sqlite:app.db"]
+    "dialog": {
+      "open": true,
+      "save": true
     }
   }
 }

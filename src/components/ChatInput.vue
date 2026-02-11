@@ -3,20 +3,56 @@
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
-import { NButton, NIcon, NSpace, NText, NTooltip } from "naive-ui";
+import { ref, computed, onMounted } from "vue";
+import { 
+  NButton, 
+  NIcon, 
+  NSpace, 
+  NText, 
+  NTooltip, 
+  NSelect,
+  NSwitch,
+  NBadge,
+  NPopconfirm,
+  NTag
+} from "naive-ui";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore } from "@/stores/settings";
-import { Send, Sparkles } from "@vicons/ionicons5";
+import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
+import { Send, Sparkles, Library, Close } from "@vicons/ionicons5";
 
 const chat = useChatStore();
 const settings = useSettingsStore();
+const kbStore = useKnowledgeBaseStore();
 
 const inputValue = ref("");
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+const showRagSelector = ref(false);
 
 const canSend = computed(() => {
   return inputValue.value.trim().length > 0 && !chat.isLoading;
+});
+
+// Knowledge base options for selector
+const kbOptions = computed(() => {
+  return [
+    { label: "不使用知识库", value: "" },
+    ...kbStore.knowledgeBases.map(kb => ({
+      label: `${kb.name} (${kb.document_count} 文档)`,
+      value: kb.id,
+    }))
+  ];
+});
+
+// Selected KB name for display
+const selectedKbName = computed(() => {
+  if (!chat.selectedKnowledgeBaseId) return null;
+  const kb = kbStore.knowledgeBases.find(k => k.id === chat.selectedKnowledgeBaseId);
+  return kb?.name;
+});
+
+onMounted(() => {
+  kbStore.loadKnowledgeBases();
 });
 
 const handleSend = async () => {
@@ -48,17 +84,47 @@ const handleInput = () => {
     inputRef.value.style.height = Math.min(inputRef.value.scrollHeight, 200) + "px";
   }
 };
+
+const handleKbChange = (value: string) => {
+  if (value === "") {
+    chat.selectKnowledgeBaseForRag(null);
+    chat.toggleRag(false);
+  } else {
+    chat.selectKnowledgeBaseForRag(value);
+    chat.toggleRag(true);
+  }
+};
+
+const handleDisableRag = () => {
+  chat.toggleRag(false);
+  chat.selectKnowledgeBaseForRag(null);
+};
 </script>
 
 <template>
   <div class="chat-input-wrapper">
+    <!-- RAG Indicator -->
+    <div v-if="chat.ragEnabled && selectedKbName" class="rag-indicator">
+      <n-tag type="success" size="small" closable @close="handleDisableRag">
+        <template #icon>
+          <n-icon><Library /></n-icon>
+        </template>
+        知识库: {{ selectedKbName }}
+      </n-tag>
+      <n-text v-if="chat.lastRetrievalResult" depth="3" class="rag-result-info">
+        检索到 {{ chat.lastRetrievalResult.chunks.length }} 个片段
+      </n-text>
+    </div>
+
     <div class="input-container">
       <div class="input-box">
         <textarea
           ref="inputRef"
           v-model="inputValue"
           class="chat-input"
-          placeholder="输入消息，按 Enter 发送..."
+          :placeholder="chat.ragEnabled 
+            ? '输入问题，将基于知识库回答...' 
+            : '输入消息，按 Enter 发送...'"
           rows="1"
           :disabled="chat.isLoading"
           @keydown="handleKeydown"
@@ -67,6 +133,29 @@ const handleInput = () => {
       </div>
 
       <div class="input-actions">
+        <!-- RAG Selector -->
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="large"
+              :type="chat.ragEnabled ? 'success' : 'default'"
+              class="rag-btn"
+              @click="showRagSelector = !showRagSelector"
+            >
+              <template #icon>
+                <n-badge v-if="chat.ragEnabled" dot type="success">
+                  <n-icon><Library /></n-icon>
+                </n-badge>
+                <n-icon v-else><Library /></n-icon>
+              </template>
+            </n-button>
+          </template>
+          {{ chat.ragEnabled ? '更改知识库' : '启用知识库' }}
+        </n-tooltip>
+
+        <!-- Send Button -->
         <n-tooltip placement="top">
           <template #trigger>
             <n-button
@@ -88,6 +177,27 @@ const handleInput = () => {
       </div>
     </div>
 
+    <!-- RAG Selector Popover -->
+    <div v-if="showRagSelector" class="rag-selector">
+      <div class="rag-selector-header">
+        <n-text strong>选择知识库</n-text>
+        <n-button quaternary circle size="small" @click="showRagSelector = false">
+          <template #icon>
+            <n-icon><Close /></n-icon>
+          </template>
+        </n-button>
+      </div>
+      <n-select
+        :value="chat.selectedKnowledgeBaseId || ''"
+        :options="kbOptions"
+        placeholder="选择要使用的知识库"
+        @update:value="handleKbChange"
+      />
+      <n-text depth="3" class="rag-hint">
+        选择知识库后，AI 将基于文档内容回答问题
+      </n-text>
+    </div>
+
     <div class="input-footer">
       <n-space align="center" :size="16">
         <n-text depth="3" class="hint-text">
@@ -101,6 +211,15 @@ const handleInput = () => {
             {{ settings.currentProvider.name }} · {{ settings.currentProvider.selectedModel }}
           </n-text>
         </n-space>
+        <template v-if="chat.ragEnabled">
+          <n-text depth="3" class="divider">|</n-text>
+          <n-space align="center" :size="4">
+            <n-icon :size="14" color="#18a058"><Library /></n-icon>
+            <n-text depth="3" class="rag-text">
+              RAG 已启用
+            </n-text>
+          </n-space>
+        </template>
       </n-space>
     </div>
   </div>
@@ -111,6 +230,19 @@ const handleInput = () => {
   padding: 20px 32px 24px;
   max-width: 900px;
   margin: 0 auto;
+  position: relative;
+}
+
+.rag-indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.rag-result-info {
+  font-size: 12px;
 }
 
 .input-container {
@@ -163,7 +295,16 @@ const handleInput = () => {
 .input-actions {
   display: flex;
   align-items: center;
+  gap: 8px;
   padding-bottom: 2px;
+}
+
+.rag-btn {
+  transition: all 0.2s;
+}
+
+.rag-btn:hover {
+  background: rgba(24, 160, 88, 0.1);
 }
 
 .send-btn {
@@ -178,6 +319,33 @@ const handleInput = () => {
 
 .send-btn:disabled {
   opacity: 0.4;
+}
+
+.rag-selector {
+  position: absolute;
+  bottom: 100%;
+  left: 32px;
+  right: 32px;
+  margin-bottom: 8px;
+  background: var(--n-color);
+  border: 1px solid var(--n-border-color);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  z-index: 100;
+}
+
+.rag-selector-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.rag-hint {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
 }
 
 .input-footer {
@@ -198,6 +366,11 @@ const handleInput = () => {
 }
 
 .model-text {
+  font-size: 12px;
+  color: #18a058;
+}
+
+.rag-text {
   font-size: 12px;
   color: #18a058;
 }

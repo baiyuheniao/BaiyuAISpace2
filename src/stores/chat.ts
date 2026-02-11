@@ -7,6 +7,7 @@ import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSettingsStore } from "./settings";
+import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
 
 export interface Message {
   id: string;
@@ -55,6 +56,7 @@ interface DbSession {
 
 export const useChatStore = defineStore("chat", () => {
   const settings = useSettingsStore();
+  const kbStore = useKnowledgeBaseStore();
   
   // Current session
   const currentSession = ref<ChatSession | null>(null);
@@ -62,6 +64,11 @@ export const useChatStore = defineStore("chat", () => {
   const currentStreamContent = ref("");
   const sessions = ref<ChatSession[]>([]);
   let unlistenFn: UnlistenFn | null = null;
+  
+  // RAG settings
+  const ragEnabled = ref(false);
+  const selectedKnowledgeBaseId = ref<string | null>(null);
+  const lastRetrievalResult = ref<RetrievalResult | null>(null);
 
   // Load all sessions from database
   const loadSessionsFromDb = async () => {
@@ -182,14 +189,39 @@ export const useChatStore = defineStore("chat", () => {
     await setupStreamListener();
   };
 
-  // Send message with streaming
+  // Send message with streaming (with optional RAG)
   const sendMessage = async (content: string) => {
     if (!currentSession.value) return;
+
+    let enhancedContent = content;
+    let retrievalContext = "";
+
+    // RAG: Retrieve from knowledge base if enabled
+    if (ragEnabled.value && selectedKnowledgeBaseId.value) {
+      const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
+      if (kb) {
+        const providerConfig = settings.providers.find(p => p.id === kb.embedding_provider);
+        if (providerConfig?.apiKey) {
+          const result = await kbStore.searchKnowledgeBase(
+            selectedKnowledgeBaseId.value,
+            content,
+            providerConfig.apiKey
+          );
+          
+          if (result && result.chunks.length > 0) {
+            lastRetrievalResult.value = result;
+            // Build context from retrieved chunks
+            retrievalContext = buildRagContext(result);
+            enhancedContent = `${retrievalContext}\n\n问题：${content}`;
+          }
+        }
+      }
+    }
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content,
+      content,  // Show original content to user
       timestamp: Date.now(),
     };
 
@@ -218,19 +250,34 @@ export const useChatStore = defineStore("chat", () => {
       );
       const apiKey = providerConfig?.apiKey || "";
 
+      // Prepare messages for API (use enhanced content with RAG context)
+      const apiMessages = currentSession.value.messages
+        .filter(m => !m.streaming && !m.error)
+        .map((m, index) => {
+          // Replace the last user message content with enhanced content if RAG is used
+          if (ragEnabled.value && index === currentSession.value!.messages.length - 2) {
+            return {
+              id: m.id,
+              role: m.role,
+              content: enhancedContent,
+              timestamp: m.timestamp,
+              error: m.error,
+            };
+          }
+          return {
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp,
+            error: m.error,
+          };
+        });
+
       // Call Rust backend with streaming
       await invoke("stream_message", {
         request: {
           sessionId: currentSession.value.id,
-          messages: currentSession.value.messages
-            .filter(m => !m.streaming && !m.error)
-            .map((m) => ({
-              id: m.id,
-              role: m.role,
-              content: m.content,
-              timestamp: m.timestamp,
-              error: m.error,
-            })),
+          messages: apiMessages,
           provider: currentSession.value.provider,
           model: currentSession.value.model,
           apiKey: apiKey,
@@ -253,6 +300,34 @@ export const useChatStore = defineStore("chat", () => {
       isLoading.value = false;
       currentStreamContent.value = "";
     }
+  };
+
+  // Build RAG context from retrieved chunks
+  const buildRagContext = (result: RetrievalResult): string => {
+    if (result.chunks.length === 0) return "";
+    
+    const contextParts = ["基于以下参考文档回答问题："];
+    
+    result.chunks.forEach((chunk, index) => {
+      contextParts.push(`\n[文档 ${index + 1}: ${chunk.document_filename}]\n${chunk.chunk.content}`);
+    });
+    
+    contextParts.push("\n---");
+    return contextParts.join("\n");
+  };
+
+  // Toggle RAG
+  const toggleRag = (enabled: boolean) => {
+    ragEnabled.value = enabled;
+    if (!enabled) {
+      selectedKnowledgeBaseId.value = null;
+      lastRetrievalResult.value = null;
+    }
+  };
+
+  // Select knowledge base for RAG
+  const selectKnowledgeBaseForRag = (kbId: string | null) => {
+    selectedKnowledgeBaseId.value = kbId;
   };
 
   // Delete session
@@ -283,11 +358,16 @@ export const useChatStore = defineStore("chat", () => {
     sessions,
     isLoading,
     currentStreamContent,
+    ragEnabled,
+    selectedKnowledgeBaseId,
+    lastRetrievalResult,
     createSession,
     loadSession,
     sendMessage,
     deleteSession,
     clearSession,
     loadSessionsFromDb,
+    toggleRag,
+    selectKnowledgeBaseForRag,
   };
 });
