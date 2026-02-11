@@ -212,6 +212,12 @@ export const useChatStore = defineStore("chat", () => {
       };
       currentSession.value.messages.push(assistantMessage);
 
+      // Get API key from settings
+      const providerConfig = settings.providers.find(
+        p => p.id === currentSession.value!.provider
+      );
+      const apiKey = providerConfig?.apiKey || "";
+
       // Call Rust backend with streaming
       await invoke("stream_message", {
         request: {
@@ -227,6 +233,7 @@ export const useChatStore = defineStore("chat", () => {
             })),
           provider: currentSession.value.provider,
           model: currentSession.value.model,
+          apiKey: apiKey,
         },
       });
 

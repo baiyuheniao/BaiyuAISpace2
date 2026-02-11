@@ -34,6 +34,7 @@ pub struct SendMessageRequest {
     pub messages: Vec<ChatMessage>,
     pub provider: String,
     pub model: String,
+    pub api_key: String,
 }
 
 // Stream event for frontend
@@ -236,7 +237,7 @@ pub async fn stream_message(
     request: SendMessageRequest,
     app_handle: AppHandle,
 ) -> Result<(), LLMError> {
-    let api_key = get_api_key(&request.provider).await?;
+    let api_key = get_api_key(&request)?;
     let message_id = uuid::Uuid::new_v4().to_string();
     
     let url = build_url(&request.provider, "", &request.model);
@@ -319,10 +320,9 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), LLMError> {
     Ok(())
 }
 
-async fn get_api_key(_provider: &str) -> Result<String, LLMError> {
-    let env_var = format!("{}_API_KEY", _provider.to_uppercase());
-    if let Ok(key) = std::env::var(&env_var) {
-        return Ok(key);
+fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
+    if request.api_key.is_empty() {
+        return Err(LLMError::MissingApiKey);
     }
-    Err(LLMError::MissingApiKey)
+    Ok(request.api_key.clone())
 }

@@ -150,7 +150,7 @@ const modelOptions = computed(() => {
             <div class="about-item">
               <span class="about-label">GitHub</span>
               <n-text underline class="about-link">
-                baiyuheniao/BaiyuAISpace
+                baiyuheniao/BaiyuAISpace2
               </n-text>
             </div>
           </div>

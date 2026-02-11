@@ -3,8 +3,8 @@
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { NAvatar, NIcon, NSpin, NAlert } from "naive-ui";
+import { computed, ref } from "vue";
+import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 import { marked } from "marked";
 import { markedHighlight } from "marked-highlight";
 import hljs from "highlight.js";
@@ -44,6 +44,21 @@ const formatTime = (timestamp: number) => {
     hour: "2-digit",
     minute: "2-digit",
   });
+};
+
+// Copy functionality
+const copied = ref(false);
+
+const handleCopy = async () => {
+  try {
+    await navigator.clipboard.writeText(props.message.content);
+    copied.value = true;
+    setTimeout(() => {
+      copied.value = false;
+    }, 2000);
+  } catch (err) {
+    console.error("Failed to copy:", err);
+  }
 };
 </script>
 
@@ -88,9 +103,14 @@ const formatTime = (timestamp: number) => {
 
       <!-- Actions -->
       <div v-if="!isUser && !message.streaming" class="message-actions">
-        <button class="action-btn" title="复制">
-          <n-icon :size="14"><Copy /></n-icon>
-        </button>
+        <n-tooltip placement="top" :show="copied">
+          <template #trigger>
+            <button class="action-btn" title="复制" @click="handleCopy">
+              <n-icon :size="14"><Copy /></n-icon>
+            </button>
+          </template>
+          <span>已复制!</span>
+        </n-tooltip>
       </div>
     </div>
   </div>
