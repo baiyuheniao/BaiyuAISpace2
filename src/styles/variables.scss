@@ -1,0 +1,27 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+// Colors
+$primary-color: #18a058;
+$primary-color-hover: #36ad6a;
+$primary-color-pressed: #0c7a43;
+
+// Dark mode colors
+$dark-bg: #101014;
+$dark-card: #18181c;
+$dark-border: #ffffff10;
+
+// Light mode colors
+$light-bg: #f5f5f5;
+$light-card: #ffffff;
+$light-border: #e0e0e6;
+
+// Transitions
+$transition-duration: 0.3s;
+$transition-timing: ease-in-out;
+
+// Layout
+$sidebar-width: 260px;
+$header-height: 60px;
+$chat-input-height: 120px;

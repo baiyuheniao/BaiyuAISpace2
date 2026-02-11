@@ -1,0 +1,89 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+// Custom scrollbar
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #8884;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8888;
+}
+
+// Code block styles
+pre {
+  margin: 12px 0;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-size: 0.9em;
+}
+
+// Markdown content styles
+.markdown-body {
+  line-height: 1.6;
+
+  p {
+    margin: 8px 0;
+  }
+
+  ul,
+  ol {
+    margin: 8px 0;
+    padding-left: 24px;
+  }
+
+  blockquote {
+    margin: 12px 0;
+    padding: 8px 16px;
+    border-left: 4px solid $primary-color;
+    background: rgba($primary-color, 0.05);
+    border-radius: 0 4px 4px 0;
+  }
+
+  table {
+    border-collapse: collapse;
+    margin: 12px 0;
+    width: 100%;
+
+    th,
+    td {
+      border: 1px solid $light-border;
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    th {
+      background: rgba($primary-color, 0.1);
+    }
+  }
+}
