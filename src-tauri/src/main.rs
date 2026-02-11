@@ -6,11 +6,13 @@
 
 mod commands;
 mod db;
+mod knowledge_base;
 mod secure_storage;
 
 use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
+use knowledge_base::commands::{KbState, init_knowledge_base};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -33,6 +35,15 @@ fn main() {
             get_api_key,
             delete_api_key,
             has_api_key,
+            // Knowledge base commands
+            knowledge_base::commands::create_knowledge_base,
+            knowledge_base::commands::list_knowledge_bases,
+            knowledge_base::commands::delete_knowledge_base,
+            knowledge_base::commands::import_document,
+            knowledge_base::commands::list_documents,
+            knowledge_base::commands::delete_document,
+            knowledge_base::commands::search_knowledge_base,
+            knowledge_base::commands::get_embedding_models,
         ])
         .setup(|app| {
             // Initialize database
@@ -44,8 +55,26 @@ fn main() {
                 }
             });
             
+            // Initialize knowledge base tables
+            let conn = rusqlite::Connection::open(&db.path).expect("Failed to open DB");
+            if let Err(e) = init_knowledge_base(&conn) {
+                log::error!("Failed to initialize knowledge base tables: {}", e);
+            }
+            
+            // Initialize vector store
+            let app_data_dir = app.handle().path().app_data_dir().expect("Failed to get app data dir");
+            let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap().to_string();
+            
+            let vector_store = runtime.block_on(async {
+                knowledge_base::db::VectorStore::new(&vector_db_path).await
+                    .expect("Failed to initialize vector store")
+            });
+            
             app.manage(DbState(Arc::new(Mutex::new(db))));
-            log::info!("Database initialized and managed");
+            app.manage(KbState { 
+                vector_store: Arc::new(vector_store) 
+            });
+            log::info!("Database and vector store initialized");
             
             Ok(())
         })
