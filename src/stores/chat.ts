@@ -24,6 +24,7 @@ export interface ChatSession {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  apiConfigId: string;
   provider: string;
   model: string;
 }
@@ -35,7 +36,6 @@ interface StreamChunk {
   done: boolean;
 }
 
-// Database interfaces
 interface DbMessage {
   id: string;
   role: string;
@@ -58,19 +58,16 @@ export const useChatStore = defineStore("chat", () => {
   const settings = useSettingsStore();
   const kbStore = useKnowledgeBaseStore();
   
-  // Current session
   const currentSession = ref<ChatSession | null>(null);
   const isLoading = ref(false);
   const currentStreamContent = ref("");
   const sessions = ref<ChatSession[]>([]);
   let unlistenFn: UnlistenFn | null = null;
   
-  // RAG settings
   const ragEnabled = ref(false);
   const selectedKnowledgeBaseId = ref<string | null>(null);
   const lastRetrievalResult = ref<RetrievalResult | null>(null);
 
-  // Load all sessions from database
   const loadSessionsFromDb = async () => {
     try {
       const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
@@ -88,13 +85,13 @@ export const useChatStore = defineStore("chat", () => {
           timestamp: m.timestamp,
           error: m.error,
         })),
+        apiConfigId: s.id,
       }));
     } catch (error) {
       console.error("Failed to load sessions:", error);
     }
   };
 
-  // Setup stream listener
   const setupStreamListener = async () => {
     if (unlistenFn) {
       unlistenFn();
@@ -114,7 +111,6 @@ export const useChatStore = defineStore("chat", () => {
         isLoading.value = false;
         currentStreamContent.value = "";
         
-        // Save the completed message to database
         await saveMessageToDb(lastMessage);
         await saveSessionToDb();
       } else {
@@ -124,7 +120,6 @@ export const useChatStore = defineStore("chat", () => {
     });
   };
 
-  // Save session to database
   const saveSessionToDb = async () => {
     if (!currentSession.value) return;
     
@@ -144,7 +139,6 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  // Save message to database
   const saveMessageToDb = async (message: Message) => {
     if (!currentSession.value) return;
     
@@ -165,16 +159,22 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  // Create new session
-  const createSession = async (provider: string, model: string): Promise<ChatSession> => {
+  const createSession = async (apiConfigId: string): Promise<ChatSession | null> => {
+    const config = settings.apiConfigs.find(c => c.id === apiConfigId);
+    if (!config) {
+      console.error("API config not found:", apiConfigId);
+      return null;
+    }
+
     const session: ChatSession = {
       id: crypto.randomUUID(),
       title: "新对话",
       messages: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      provider,
-      model,
+      apiConfigId,
+      provider: config.provider,
+      model: config.model,
     };
     currentSession.value = session;
     await setupStreamListener();
@@ -183,34 +183,36 @@ export const useChatStore = defineStore("chat", () => {
     return session;
   };
 
-  // Load session
   const loadSession = async (session: ChatSession) => {
     currentSession.value = session;
     await setupStreamListener();
   };
 
-  // Send message with streaming (with optional RAG)
   const sendMessage = async (content: string) => {
     if (!currentSession.value) return;
+
+    const config = settings.apiConfigs.find(c => c.id === currentSession.value!.apiConfigId);
+    if (!config) {
+      console.error("API config not found for session");
+      return;
+    }
 
     let enhancedContent = content;
     let retrievalContext = "";
 
-    // RAG: Retrieve from knowledge base if enabled
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
       const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
       if (kb) {
-        const providerConfig = settings.providers.find(p => p.id === kb.embedding_provider);
-        if (providerConfig?.apiKey) {
+        const kbConfig = settings.apiConfigs.find(c => c.provider === kb.embedding_provider);
+        if (kbConfig?.apiKey) {
           const result = await kbStore.searchKnowledgeBase(
             selectedKnowledgeBaseId.value,
             content,
-            providerConfig.apiKey
+            kbConfig.apiKey
           );
           
           if (result && result.chunks.length > 0) {
             lastRetrievalResult.value = result;
-            // Build context from retrieved chunks
             retrievalContext = buildRagContext(result);
             enhancedContent = `${retrievalContext}\n\n问题：${content}`;
           }
@@ -221,7 +223,7 @@ export const useChatStore = defineStore("chat", () => {
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content,  // Show original content to user
+      content,
       timestamp: Date.now(),
     };
 
@@ -230,7 +232,6 @@ export const useChatStore = defineStore("chat", () => {
     isLoading.value = true;
     currentStreamContent.value = "";
 
-    // Save user message immediately
     await saveMessageToDb(userMessage);
     await saveSessionToDb();
 
@@ -244,17 +245,9 @@ export const useChatStore = defineStore("chat", () => {
       };
       currentSession.value.messages.push(assistantMessage);
 
-      // Get API key from settings
-      const providerConfig = settings.providers.find(
-        p => p.id === currentSession.value!.provider
-      );
-      const apiKey = providerConfig?.apiKey || "";
-
-      // Prepare messages for API (use enhanced content with RAG context)
       const apiMessages = currentSession.value.messages
         .filter(m => !m.streaming && !m.error)
         .map((m, index) => {
-          // Replace the last user message content with enhanced content if RAG is used
           if (ragEnabled.value && index === currentSession.value!.messages.length - 2) {
             return {
               id: m.id,
@@ -273,18 +266,16 @@ export const useChatStore = defineStore("chat", () => {
           };
         });
 
-      // Call Rust backend with streaming
       await invoke("stream_message", {
         request: {
           sessionId: currentSession.value.id,
           messages: apiMessages,
-          provider: currentSession.value.provider,
-          model: currentSession.value.model,
-          apiKey: apiKey,
+          provider: config.provider,
+          model: config.model,
+          apiKey: config.apiKey,
         },
       });
 
-      // Update title if first message
       if (currentSession.value.messages.length === 2) {
         currentSession.value.title = content.slice(0, 30) + (content.length > 30 ? "..." : "");
         await saveSessionToDb();
@@ -302,7 +293,6 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  // Build RAG context from retrieved chunks
   const buildRagContext = (result: RetrievalResult): string => {
     if (result.chunks.length === 0) return "";
     
@@ -316,7 +306,6 @@ export const useChatStore = defineStore("chat", () => {
     return contextParts.join("\n");
   };
 
-  // Toggle RAG
   const toggleRag = (enabled: boolean) => {
     ragEnabled.value = enabled;
     if (!enabled) {
@@ -325,12 +314,10 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  // Select knowledge base for RAG
   const selectKnowledgeBaseForRag = (kbId: string | null) => {
     selectedKnowledgeBaseId.value = kbId;
   };
 
-  // Delete session
   const deleteSession = async (sessionId: string) => {
     try {
       await invoke("delete_session_cmd", { sessionId });
@@ -343,7 +330,6 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  // Clear current session
   const clearSession = () => {
     if (unlistenFn) {
       unlistenFn();

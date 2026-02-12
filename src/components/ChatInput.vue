@@ -14,12 +14,20 @@ import {
   NSwitch,
   NBadge,
   NPopconfirm,
-  NTag
+  NTag,
+  NDivider
 } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
-import { useSettingsStore } from "@/stores/settings";
+import { useSettingsStore, PRESET_PROVIDERS } from "@/stores/settings";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
-import { Send, Sparkles, Library, Close } from "@vicons/ionicons5";
+import { 
+  Send, 
+  Sparkles, 
+  Library, 
+  Close, 
+  ServerOutline,
+  ChevronDown
+} from "@vicons/ionicons5";
 
 const chat = useChatStore();
 const settings = useSettingsStore();
@@ -28,9 +36,23 @@ const kbStore = useKnowledgeBaseStore();
 const inputValue = ref("");
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const showRagSelector = ref(false);
+const showApiSelector = ref(false);
 
 const canSend = computed(() => {
-  return inputValue.value.trim().length > 0 && !chat.isLoading;
+  return inputValue.value.trim().length > 0 && !chat.isLoading && settings.activeConfig;
+});
+
+// API Config options
+const apiConfigOptions = computed(() => {
+  return settings.apiConfigs.map(config => ({
+    label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider})`,
+    value: config.id,
+  }));
+});
+
+// Current API Config info
+const currentApiConfig = computed(() => {
+  return settings.activeConfig;
 });
 
 // Knowledge base options for selector
@@ -59,8 +81,12 @@ const handleSend = async () => {
   const content = inputValue.value.trim();
   if (!content || chat.isLoading) return;
 
+  if (!settings.activeConfig) {
+    return;
+  }
+
   if (!chat.currentSession) {
-    chat.createSession(settings.currentProvider.id, settings.currentProvider.selectedModel);
+    await chat.createSession(settings.activeConfig.id);
   }
 
   inputValue.value = "";
@@ -99,10 +125,43 @@ const handleDisableRag = () => {
   chat.toggleRag(false);
   chat.selectKnowledgeBaseForRag(null);
 };
+
+const handleApiChange = (configId: string) => {
+  settings.setActiveConfig(configId);
+  showApiSelector.value = false;
+};
 </script>
 
 <template>
   <div class="chat-input-wrapper">
+    <!-- API Config Indicator -->
+    <div v-if="currentApiConfig" class="api-indicator">
+      <n-tag 
+        type="info" 
+        size="small" 
+        :bordered="false"
+        class="api-tag"
+        @click="showApiSelector = !showApiSelector"
+      >
+        <template #icon>
+          <n-icon><ServerOutline /></n-icon>
+        </template>
+        {{ currentApiConfig.name }}
+        <n-icon :size="12" class="chevron-icon"><ChevronDown /></n-icon>
+      </n-tag>
+      <n-text depth="3" class="model-text">
+        {{ currentApiConfig.model }}
+      </n-text>
+    </div>
+    <div v-else class="api-indicator">
+      <n-tag type="warning" size="small" :bordered="false">
+        <template #icon>
+          <n-icon><ServerOutline /></n-icon>
+        </template>
+        未选择 API 配置
+      </n-tag>
+    </div>
+
     <!-- RAG Indicator -->
     <div v-if="chat.ragEnabled && selectedKbName" class="rag-indicator">
       <n-tag type="success" size="small" closable @close="handleDisableRag">
@@ -122,11 +181,13 @@ const handleDisableRag = () => {
           ref="inputRef"
           v-model="inputValue"
           class="chat-input"
-          :placeholder="chat.ragEnabled 
-            ? '输入问题，将基于知识库回答...' 
-            : '输入消息，按 Enter 发送...'"
+          :placeholder="!currentApiConfig 
+            ? '请先前往设置创建 API 配置...'
+            : chat.ragEnabled 
+              ? '输入问题，将基于知识库回答...' 
+              : '输入消息，按 Enter 发送...'"
           rows="1"
-          :disabled="chat.isLoading"
+          :disabled="chat.isLoading || !currentApiConfig"
           @keydown="handleKeydown"
           @input="handleInput"
         />
@@ -177,9 +238,30 @@ const handleDisableRag = () => {
       </div>
     </div>
 
+    <!-- API Selector Popover -->
+    <div v-if="showApiSelector" class="selector-popover api-selector">
+      <div class="selector-header">
+        <n-text strong>选择 API 配置</n-text>
+        <n-button quaternary circle size="small" @click="showApiSelector = false">
+          <template #icon>
+            <n-icon><Close /></n-icon>
+          </template>
+        </n-button>
+      </div>
+      <n-select
+        :value="settings.activeConfigId || ''"
+        :options="apiConfigOptions"
+        placeholder="选择要使用的 API 配置"
+        @update:value="handleApiChange"
+      />
+      <n-text v-if="apiConfigOptions.length === 0" depth="3" class="selector-hint">
+        暂无 API 配置，请前往设置创建
+      </n-text>
+    </div>
+
     <!-- RAG Selector Popover -->
-    <div v-if="showRagSelector" class="rag-selector">
-      <div class="rag-selector-header">
+    <div v-if="showRagSelector" class="selector-popover rag-selector">
+      <div class="selector-header">
         <n-text strong>选择知识库</n-text>
         <n-button quaternary circle size="small" @click="showRagSelector = false">
           <template #icon>
@@ -193,7 +275,7 @@ const handleDisableRag = () => {
         placeholder="选择要使用的知识库"
         @update:value="handleKbChange"
       />
-      <n-text depth="3" class="rag-hint">
+      <n-text depth="3" class="selector-hint">
         选择知识库后，AI 将基于文档内容回答问题
       </n-text>
     </div>
@@ -204,13 +286,6 @@ const handleDisableRag = () => {
           <span style="margin-right: 4px;">⌨️</span>
           Enter 发送 · Shift+Enter 换行
         </n-text>
-        <n-text depth="3" class="divider">|</n-text>
-        <n-space align="center" :size="6">
-          <n-icon :size="14" color="#18a058"><Sparkles /></n-icon>
-          <n-text depth="3" class="model-text">
-            {{ settings.currentProvider.name }} · {{ settings.currentProvider.selectedModel }}
-          </n-text>
-        </n-space>
         <template v-if="chat.ragEnabled">
           <n-text depth="3" class="divider">|</n-text>
           <n-space align="center" :size="4">
@@ -227,10 +302,36 @@ const handleDisableRag = () => {
 
 <style scoped lang="scss">
 .chat-input-wrapper {
-  padding: 20px 32px 24px;
+  padding: 16px 32px 24px;
   max-width: 900px;
   margin: 0 auto;
   position: relative;
+}
+
+.api-indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.api-tag {
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+.chevron-icon {
+  margin-left: 4px;
+  transition: transform 0.2s;
+}
+
+.model-text {
+  font-size: 12px;
 }
 
 .rag-indicator {
@@ -321,7 +422,7 @@ const handleDisableRag = () => {
   opacity: 0.4;
 }
 
-.rag-selector {
+.selector-popover {
   position: absolute;
   bottom: 100%;
   left: 32px;
@@ -335,14 +436,22 @@ const handleDisableRag = () => {
   z-index: 100;
 }
 
-.rag-selector-header {
+.api-selector {
+  z-index: 101;
+}
+
+.rag-selector {
+  z-index: 100;
+}
+
+.selector-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
 }
 
-.rag-hint {
+.selector-hint {
   display: block;
   margin-top: 8px;
   font-size: 12px;
@@ -363,11 +472,6 @@ const handleDisableRag = () => {
 .divider {
   font-size: 12px;
   opacity: 0.5;
-}
-
-.model-text {
-  font-size: 12px;
-  color: #18a058;
 }
 
 .rag-text {
