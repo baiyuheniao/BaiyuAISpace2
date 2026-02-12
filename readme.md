@@ -193,17 +193,17 @@ src-tauri/target/release/bundle/
 
 | 提供商 | 国家/地区 | 代表模型 | 特点 |
 |--------|----------|---------|------|
-| **OpenAI** | 🇺🇸 美国 | **gpt-5**, **gpt-4.1**, gpt-4o, o3, o4-mini | 行业标杆，功能全面 |
-| **Anthropic** | 🇺🇸 美国 | claude-3-5-sonnet, claude-3-opus | 长文本、代码能力强 |
+| **OpenAI** | 🇺🇸 美国 | **gpt-5.3-codex**, **gpt-5**, **gpt-4.1**, gpt-4o, o3, o4-mini | 行业标杆，功能全面 |
+| **Anthropic** | 🇺🇸 美国 | **claude-3-7-sonnet**, claude-3-5-sonnet, claude-3-opus | 长文本、代码能力强 |
 | **Google** | 🇺🇸 美国 | gemini-2.0-pro, gemini-1.5-pro | 多模态、上下文长 |
 | **Azure OpenAI** | 🇺🇸 美国 | gpt-4o, gpt-4 | 企业级、合规性好 |
 | **Mistral AI** | 🇫🇷 法国 | mistral-large, codestral | 欧洲开源先锋 |
 | **Moonshot (Kimi)** | 🇨🇳 中国 | **kimi-k2.5** (K2.5), **kimi-k2-thinking**, moonshot-v1 | 长文本（256K） |
 | **智谱 AI (GLM)** | 🇨🇳 中国 | glm-4-plus, **glm-4-air-250414**, glm-4-flash | 中文理解强 |
-| **阿里 (通义)** | 🇨🇳 中国 | qwen-max, **qwen-plus-latest**, qwen-coder-plus | 开源模型优秀 |
+| **阿里 (通义)** | 🇨🇳 中国 | **qwen3-235b**, qwen-max, **qwen-plus-latest**, qwen-coder-plus | 开源模型优秀 |
 | **百度 (文心)** | 🇨🇳 中国 | ernie-4.0, ernie-4.0-turbo | 中文生态完善 |
 | **字节 (豆包)** | 🇨🇳 中国 | doubao-pro-256k, doubao-pro-32k | 性价比高 |
-| **DeepSeek** | 🇨🇳 中国 | deepseek-chat, **deepseek-reasoner (R1)** | 推理能力强，价格低 |
+| **DeepSeek** | 🇨🇳 中国 | **deepseek-v3.2**, deepseek-chat, **deepseek-reasoner (R1)** | 推理能力强，价格低 |
 | **硅基流动 (SiliconFlow)** | 🇨🇳 中国 | Qwen2.5, Llama-3.1, **DeepSeek-V3/R1** | 多模型聚合，价格优惠 |
 | **MiniMax** | 🇨🇳 中国 | abab6.5s, abab6.5 | 多模态、语音合成 |
 | **零一万物 (Yi)** | 🇨🇳 中国 | yi-large, yi-medium | 开源+商用 |

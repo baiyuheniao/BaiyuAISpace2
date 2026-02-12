@@ -26,9 +26,10 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
     apiKey: "",
     baseUrl: "https://api.openai.com/v1",
     models: [
-      "gpt-5",
-      "gpt-5.1",
+      "gpt-5.3-codex",
       "gpt-5.2",
+      "gpt-5.1",
+      "gpt-5",
       "gpt-5-mini",
       "gpt-4.1",
       "gpt-4.1-mini",
@@ -49,13 +50,14 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
     apiKey: "",
     baseUrl: "https://api.anthropic.com/v1",
     models: [
+      "claude-3-7-sonnet-20250219",
       "claude-3-5-sonnet-20241022",
       "claude-3-5-haiku-20241022",
       "claude-3-opus-20240229",
       "claude-3-sonnet-20240229",
       "claude-3-haiku-20240307",
     ],
-    selectedModel: "claude-3-5-sonnet-20241022",
+    selectedModel: "claude-3-7-sonnet-20250219",
     modelsUrl: "https://docs.anthropic.com/claude/docs/models-overview",
   },
   {
@@ -150,6 +152,14 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
     apiKey: "",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     models: [
+      "qwen3-235b-a22b",
+      "qwen3-30b-a3b",
+      "qwen3-32b",
+      "qwen3-14b",
+      "qwen3-8b",
+      "qwen3-4b",
+      "qwen3-1.5b",
+      "qwen3-0.6b",
       "qwen-max",
       "qwen-max-latest",
       "qwen-plus",
@@ -161,7 +171,7 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
       "qwen-vl-plus",
       "qwen-audio-turbo",
     ],
-    selectedModel: "qwen-max",
+    selectedModel: "qwen3-235b-a22b",
     modelsUrl: "https://help.aliyun.com/zh/model-studio/models",
   },
   {
@@ -207,11 +217,12 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
     models: [
+      "deepseek-v3.2",
       "deepseek-chat",
       "deepseek-reasoner",
       "deepseek-coder",
     ],
-    selectedModel: "deepseek-chat",
+    selectedModel: "deepseek-v3.2",
     modelsUrl: "https://platform.deepseek.com/api-docs/models",
   },
   {
@@ -278,7 +289,7 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
 ];
 
 // Storage version - increment when providers list changes significantly
-const STORAGE_VERSION = "2";
+const STORAGE_VERSION = "3";
 const STORAGE_VERSION_KEY = "baiyu-aispace-version";
 
 // Check and clear old storage if version mismatch
