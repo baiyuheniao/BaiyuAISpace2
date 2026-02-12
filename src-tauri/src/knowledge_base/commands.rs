@@ -6,14 +6,15 @@ use super::types::*;
 use super::document::{parse_document, calculate_file_hash, split_text, estimate_tokens};
 use super::embedding::{generate_embeddings, get_embedding_dimension};
 use super::db::{VectorStore, init_sqlite_tables};
-use super::retrieval::{Retriever, build_context};
+use super::retrieval::Retriever;
 use tauri::State;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use uuid::Uuid;
 
 pub struct KbState {
     pub vector_store: Arc<VectorStore>,
+    pub db_path: String,
 }
 
 /// Initialize knowledge base tables
@@ -239,7 +240,7 @@ pub async fn import_document(
     
     // Generate embeddings in batches
     let mut all_chunk_ids = Vec::new();
-    let mut all_embeddings = Vec::new();
+    let _all_embeddings: Vec<Vec<f32>> = Vec::new();
     
     for (i, chunk_text) in chunks.iter().enumerate() {
         let chunk_id = Uuid::new_v4().to_string();
@@ -261,6 +262,12 @@ pub async fn import_document(
                 &now.to_string(),
             ],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+        
+        // Also insert into FTS5 for keyword search (ignore errors if FTS5 not available)
+        let _ = conn.execute(
+            "INSERT INTO chunks_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
+            [chunk_text],
+        );
         
         all_chunk_ids.push(chunk_id);
     }
@@ -376,6 +383,12 @@ pub async fn delete_document(
     // Delete vectors
     kb_state.vector_store.delete_document_vectors(&kb_id, &doc_id).await?;
     
+    // Delete from FTS5 (must delete before deleting chunks since we need rowid)
+    let _ = conn.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
+        [&doc_id],
+    );
+    
     // Delete from SQLite (cascade will delete chunks)
     conn.execute(
         "DELETE FROM documents WHERE id = ?1",
@@ -400,7 +413,7 @@ pub async fn search_knowledge_base(
     api_key: String,
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
-    let retriever = Retriever::new(kb_state.vector_store.clone());
+    let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
     retriever.retrieve(request, &api_key).await
 }
 

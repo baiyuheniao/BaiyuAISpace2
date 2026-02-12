@@ -3,7 +3,6 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::commands::llm::{ChatMessage, ChatSession};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;

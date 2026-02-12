@@ -100,7 +100,7 @@ fn build_url(provider: &str, base_url: &str, model: &str) -> String {
         "azure" => base_url.to_string(),
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         _ => {
-            if let Some((url, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
+            if let Some((url, _, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
                 url.to_string()
             } else {
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))

@@ -4,6 +4,46 @@
 
 ---
 
+## 📅 2026-02-12 RAG 功能完善完成
+
+### ✅ 核心功能增强
+
+**修改范围**：知识库检索 (RAG) 核心功能
+
+#### 后端 (Rust)
+
+1. **向量存储 (`db.rs`)**
+   - 实现 SQLite BLOB 向量存储（替代空实现）
+   - 新增 `vectors` 表结构
+   - 实现 `cosine_similarity` 相似度计算
+   - 支持向量插入和 Top-K 相似度搜索
+
+2. **检索逻辑 (`retrieval.rs`)**
+   - 修复 `Retriever::new()` 调用（添加 `db_path` 参数）
+   - 从数据库动态读取知识库配置（解决硬编码 provider/model 问题）
+   - 实现 `enrich_chunks` 补全元数据（chunk_index, document_filename）
+   - 实现 `keyword_search`：FTS5 全文检索 + LIKE 降级
+   - 完善 `hybrid_search`：RRF (Reciprocal Rank Fusion) 融合算法
+   - 添加相似度阈值过滤
+
+3. **命令接口 (`commands.rs`)**
+   - 更新 `KbState` 结构（添加 `db_path`）
+   - 修复 `search_knowledge_base` 调用
+   - 导入文档时同步插入 FTS5 索引
+   - 删除文档时同步删除 FTS5 记录
+
+**技术方案**：
+- 向量存储：SQLite BLOB + 暴力扫描 + 余弦相似度
+- 关键词搜索：SQLite FTS5 (可选) → LIKE 降级
+- 混合检索：RRF 融合算法
+- 适用规模：< 10万 chunks（个人/小团队场景）
+
+**待优化项**：
+- [ ] 大规模数据考虑引入 HNSW 近似检索
+- [ ] 关键词搜索中文分词优化
+
+---
+
 ## 📅 2026-02-11 RAG 知识库前端界面 + 对话集成
 
 ### ✨ 新功能
@@ -584,4 +624,4 @@ messages:
 
 ---
 
-*最后更新: 2026-02-10*
+*最后更新: 2026-02-12*

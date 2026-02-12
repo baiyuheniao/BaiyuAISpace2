@@ -71,9 +71,13 @@ fn main() {
                     .expect("Failed to initialize vector store")
             });
             
+            // Clone path before moving db
+            let db_path = db.path.clone();
+            
             app.manage(DbState(Arc::new(Mutex::new(db))));
             app.manage(KbState { 
-                vector_store: Arc::new(vector_store) 
+                vector_store: Arc::new(vector_store),
+                db_path,
             });
             log::info!("Database and vector store initialized");
             

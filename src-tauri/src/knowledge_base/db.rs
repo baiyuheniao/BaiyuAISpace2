@@ -3,72 +3,57 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::types::*;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
+/// Vector store using SQLite with cosine similarity search
 pub struct VectorStore {
-    db: Arc<Mutex<lancedb::Connection>>,
+    db_path: String,
 }
 
 impl VectorStore {
     pub async fn new(db_path: &str) -> Result<Self, KnowledgeBaseError> {
-        let conn = lancedb::connect(db_path)
-            .execute()
-            .await
+        // Ensure directory exists
+        std::fs::create_dir_all(db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
+
         Ok(Self {
-            db: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_string(),
         })
     }
 
     /// Create vector table for a knowledge base
     pub async fn create_kb_table(&self, kb_id: &str, dim: i32) -> Result<(), KnowledgeBaseError> {
-        let db = self.db.lock().await;
-        
-        // Check if table exists
-        let table_name = format!("kb_{}", kb_id);
-        match db.open_table(&table_name).execute().await {
-            Ok(_) => {
-                log::info!("Vector table {} already exists", table_name);
-                Ok(())
-            }
-            Err(_) => {
-                // Table doesn't exist, create it
-                use arrow_array::{ArrayRef, Float32Array, StringArray, RecordBatch};
-                use std::sync::Arc;
-                
-                // Create empty table with schema
-                // Schema: vector (fixed size list), chunk_id, document_id, content
-                let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-                    arrow::datatypes::Field::new(
-                        "vector",
-                        arrow::datatypes::DataType::FixedSizeList(
-                            Arc::new(arrow::datatypes::Field::new(
-                                "item",
-                                arrow::datatypes::DataType::Float32,
-                                true,
-                            )),
-                            dim,
-                        ),
-                        true,
-                    ),
-                    arrow::datatypes::Field::new("chunk_id", arrow::datatypes::DataType::Utf8, true),
-                    arrow::datatypes::Field::new("document_id", arrow::datatypes::DataType::Utf8, true),
-                    arrow::datatypes::Field::new("content", arrow::datatypes::DataType::Utf8, true),
-                ]));
-                
-                let batch = RecordBatch::new_empty(schema);
-                
-                db.create_table(&table_name, batch.into())
-                    .execute()
-                    .await
-                    .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-                
-                log::info!("Created vector table: {}", table_name);
-                Ok(())
-            }
-        }
+        let conn = self.get_conn()?;
+
+        // Create vectors table if not exists
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS vectors (
+                chunk_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                kb_id TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+            )
+            "#,
+            [],
+        )
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Create index for faster lookups
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vectors_kb ON vectors(kb_id)",
+            [],
+        )
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vectors_doc ON vectors(document_id)",
+            [],
+        )
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        log::info!("Created vector table for knowledge base: {} (dim: {})", kb_id, dim);
+        Ok(())
     }
 
     /// Insert vectors
@@ -77,115 +62,163 @@ impl VectorStore {
         kb_id: &str,
         vectors: Vec<(String, String, String, Vec<f32>)>, // (chunk_id, document_id, content, vector)
     ) -> Result<(), KnowledgeBaseError> {
-        let db = self.db.lock().await;
-        let table_name = format!("kb_{}", kb_id);
-        
-        let table = db.open_table(&table_name)
-            .execute()
-            .await
+        let conn = self.get_conn()?;
+
+        let count = vectors.len();
+        for (chunk_id, document_id, _content, vector) in vectors {
+            // Serialize vector to bytes (f32 array)
+            let vector_bytes = vector_to_bytes(&vector);
+
+            conn.execute(
+                r#"
+                INSERT OR REPLACE INTO vectors (chunk_id, document_id, kb_id, vector)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                rusqlite::params![chunk_id, document_id, kb_id, vector_bytes],
+            )
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        // Build record batch
-        use arrow_array::{ArrayRef, Float32Array, StringArray, FixedSizeListArray, RecordBatch};
-        use arrow::datatypes::Int32Type;
-        use std::sync::Arc;
-        
-        let chunk_ids: ArrayRef = Arc::new(StringArray::from(
-            vectors.iter().map(|v| v.0.clone()).collect::<Vec<_>>()
-        ));
-        let document_ids: ArrayRef = Arc::new(StringArray::from(
-            vectors.iter().map(|v| v.1.clone()).collect::<Vec<_>>()
-        ));
-        let contents: ArrayRef = Arc::new(StringArray::from(
-            vectors.iter().map(|v| v.2.clone()).collect::<Vec<_>>()
-        ));
-        
-        // Build vector array
-        let dim = vectors.first().map(|v| v.3.len()).unwrap_or(0) as i32;
-        let vector_values: Vec<f32> = vectors.iter().flat_map(|v| v.3.clone()).collect();
-        let vector_array = Float32Array::from(vector_values);
-        let vector_list = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-            vec![Some(vector_array.iter().map(|v| v).collect::<Vec<_>>()); vectors.len()],
-            dim,
-        );
-        
-        let batch = RecordBatch::try_from_iter(vec![
-            ("vector", Arc::new(vector_list) as ArrayRef),
-            ("chunk_id", chunk_ids),
-            ("document_id", document_ids),
-            ("content", contents),
-        ]).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        table.add(batch.into())
-            .execute()
-            .await
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        log::info!("Inserted {} vectors into {}", vectors.len(), table_name);
+        }
+
+        log::info!("Inserted {} vectors for knowledge base: {}", count, kb_id);
         Ok(())
     }
 
-    /// Vector search
+    /// Vector search using cosine similarity
     pub async fn search(
         &self,
         kb_id: &str,
         query_vector: Vec<f32>,
         top_k: i32,
     ) -> Result<Vec<(String, String, String, f32)>, KnowledgeBaseError> {
-        let db = self.db.lock().await;
-        let table_name = format!("kb_{}", kb_id);
-        
-        let table = db.open_table(&table_name)
-            .execute()
-            .await
+        let conn = self.get_conn()?;
+
+        // Query all vectors for this knowledge base
+        // For better performance with large datasets, consider using approximate methods
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT v.chunk_id, v.document_id, c.content, v.vector
+                FROM vectors v
+                JOIN chunks c ON v.chunk_id = c.id
+                WHERE v.kb_id = ?1
+                "#,
+            )
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        let results = table
-            .search(query_vector)
-            .limit(top_k as usize)
-            .execute()
-            .await
-            .map_err(|e| KnowledgeBaseError::RetrievalError(e.to_string()))?;
-        
-        // Parse results
-        let mut chunks = Vec::new();
-        // Note: LanceDB returns a RecordBatch, we need to extract columns
-        // This is simplified - actual implementation needs proper column extraction
-        
-        log::info!("Vector search returned results from {}", table_name);
-        Ok(chunks)
+
+        let rows = stmt
+            .query_map([kb_id], |row| {
+                let chunk_id: String = row.get(0)?;
+                let document_id: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let vector_bytes: Vec<u8> = row.get(3)?;
+                let vector = bytes_to_vector(&vector_bytes);
+                Ok((chunk_id, document_id, content, vector))
+            })
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Calculate cosine similarity for all vectors
+        let mut scored_results: Vec<(String, String, String, f32)> = Vec::new();
+        for row in rows {
+            let (chunk_id, document_id, content, vector) =
+                row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+            let similarity = cosine_similarity(&query_vector, &vector);
+            scored_results.push((chunk_id, document_id, content, similarity));
+        }
+
+        // Sort by similarity (descending) and take top_k
+        scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+        scored_results.truncate(top_k as usize);
+
+        log::info!(
+            "Vector search for {} returned {} results",
+            kb_id,
+            scored_results.len()
+        );
+        Ok(scored_results)
     }
 
     /// Delete vectors by document_id
-    pub async fn delete_document_vectors(&self, kb_id: &str, document_id: &str) -> Result<(), KnowledgeBaseError> {
-        let db = self.db.lock().await;
-        let table_name = format!("kb_{}", kb_id);
-        
-        let table = db.open_table(&table_name)
-            .execute()
-            .await
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        table.delete(&format!("document_id = '{}'", document_id))
-            .await
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        log::info!("Deleted vectors for document {} from {}", document_id, table_name);
+    pub async fn delete_document_vectors(
+        &self,
+        kb_id: &str,
+        document_id: &str,
+    ) -> Result<(), KnowledgeBaseError> {
+        let conn = self.get_conn()?;
+
+        conn.execute(
+            "DELETE FROM vectors WHERE kb_id = ?1 AND document_id = ?2",
+            [kb_id, document_id],
+        )
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        log::info!("Deleted vectors for document: {} in {}", document_id, kb_id);
         Ok(())
     }
 
     /// Drop knowledge base table
     pub async fn drop_kb_table(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
-        let db = self.db.lock().await;
-        let table_name = format!("kb_{}", kb_id);
-        
-        db.drop_table(&table_name)
-            .await
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        log::info!("Dropped vector table: {}", table_name);
+        let conn = self.get_conn()?;
+
+        conn.execute(
+            "DELETE FROM vectors WHERE kb_id = ?1",
+            [kb_id],
+        )
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        log::info!("Dropped vectors for knowledge base: {}", kb_id);
         Ok(())
     }
+
+    /// Get SQLite connection
+    fn get_conn(&self) -> Result<rusqlite::Connection, KnowledgeBaseError> {
+        // The vectors are stored in the main SQLite database
+        // We need to get the main db path from the app
+        // For now, we'll derive it from the vector db path
+        let main_db_path = std::path::Path::new(&self.db_path)
+            .parent()
+            .map(|p| p.join("app.db"))
+            .ok_or_else(|| KnowledgeBaseError::DatabaseError("Invalid db path".to_string()))?;
+
+        rusqlite::Connection::open(&main_db_path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))
+    }
+}
+
+/// Convert vector (f32 array) to bytes
+fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
+    vector
+        .iter()
+        .flat_map(|&f| f.to_le_bytes())
+        .collect()
+}
+
+/// Convert bytes back to vector (f32 array)
+fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(chunk);
+            f32::from_le_bytes(arr)
+        })
+        .collect()
+}
+
+/// Calculate cosine similarity between two vectors
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot_product / (norm_a * norm_b)
 }
 
 /// SQLite schema for metadata
@@ -230,7 +263,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // Chunks table
+    // Chunks table - stores actual content for keyword search
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS chunks (
@@ -245,6 +278,32 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         "#,
         [],
     )?;
+
+    // Vectors table - stores embedding vectors
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS vectors (
+            chunk_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            kb_id TEXT NOT NULL,
+            vector BLOB NOT NULL,
+            FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+        )
+        "#,
+        [],
+    )?;
+
+    // FTS5 virtual table for full-text search (optional, if FTS5 is available)
+    let _ = conn.execute(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            content,
+            content_rowid=rowid,
+            tokenize='porter'
+        )
+        "#,
+        [],
+    );
 
     // Indexes
     conn.execute(
@@ -261,6 +320,20 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunk_kb ON chunks(kb_id)",
+        [],
+    )?;
+    // Index for keyword search
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunk_content ON chunks(content)",
+        [],
+    )?;
+    // Indexes for vectors
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vectors_kb ON vectors(kb_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vectors_doc ON vectors(document_id)",
         [],
     )?;
 

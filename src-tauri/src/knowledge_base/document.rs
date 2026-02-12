@@ -25,7 +25,7 @@ impl DocumentFormat {
             "xlsx" | "xls" | "csv" => Some(DocumentFormat::Excel),
             "md" | "markdown" => Some(DocumentFormat::Markdown),
             "html" | "htm" => Some(DocumentFormat::Html),
-            "txt" | "text" | "rs" | "js" | "ts" | "py" | "java" | "c" | "cpp" | "h" | "go" | "rs" => Some(DocumentFormat::Txt),
+            "txt" | "text" | "rs" | "js" | "ts" | "py" | "java" | "c" | "cpp" | "h" | "go" => Some(DocumentFormat::Txt),
             _ => None,
         }
     }
@@ -168,8 +168,6 @@ async fn parse_word(file_path: &str) -> Result<String, KnowledgeBaseError> {
 /// Extract text from DOCX XML
 fn extract_text_from_docx_xml(xml: &str) -> String {
     let mut result = String::new();
-    let mut in_tag = false;
-    let mut in_text = false;
     
     // Simple XML text extraction
     for chunk in xml.split("<w:t") {
@@ -240,7 +238,6 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
 /// Split text into chunks
 pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
     let mut chunks = Vec::new();
-    let mut start = 0;
     
     // Try to split at paragraph boundaries first
     let paragraphs: Vec<&str> = text.split("\n\n").collect();

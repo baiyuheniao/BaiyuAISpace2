@@ -45,10 +45,5 @@
       "timestampUrl": ""
     }
   },
-  "plugins": {
-    "dialog": {
-      "open": true,
-      "save": true
-    }
-  }
+  "plugins": {}
 }
