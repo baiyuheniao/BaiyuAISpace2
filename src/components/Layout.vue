@@ -46,7 +46,12 @@ const handleMenuUpdate = (key: string) => {
 };
 
 const handleNewChat = () => {
-  chat.createSession(settings.currentProvider.id, settings.currentProvider.selectedModel);
+  if (!settings.activeConfigId) {
+    // No API config, redirect to settings
+    router.push({ name: "Settings" });
+    return;
+  }
+  chat.createSession(settings.activeConfigId);
   router.push({ name: "Chat" });
 };
 </script>

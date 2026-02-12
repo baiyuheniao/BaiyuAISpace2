@@ -37,7 +37,10 @@ onMounted(async () => {
   await chat.loadSessionsFromDb();
   
   if (!chat.currentSession) {
-    await chat.createSession(settings.currentProvider.id, settings.currentProvider.selectedModel);
+    // Create session with active API config if available
+    if (settings.activeConfigId) {
+      await chat.createSession(settings.activeConfigId);
+    }
   } else {
     // Setup stream listener for existing session
     await chat.loadSession(chat.currentSession);
@@ -67,8 +70,13 @@ onMounted(async () => {
           </div>
           <h2 class="empty-title">开始新的对话</h2>
           <p class="empty-desc">
-            使用 <n-text code>{{ settings.currentProvider.name }}</n-text> 的 
-            <n-text code>{{ settings.currentProvider.selectedModel }}</n-text> 模型
+            <template v-if="settings.activeConfig">
+              使用 <n-text code>{{ settings.activeConfig.name }}</n-text> 的 
+              <n-text code>{{ settings.activeConfig.model }}</n-text> 模型
+            </template>
+            <template v-else>
+              请先前往设置创建 API 配置
+            </template>
           </p>
           <div class="empty-tips">
             <div class="tip-item">

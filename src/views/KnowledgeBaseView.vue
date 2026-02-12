@@ -152,17 +152,17 @@ const handleBack = () => {
 const handleImport = async () => {
   if (!kbStore.currentKb) return;
   
-  // Get API key from settings
-  const provider = settingsStore.providers.find(
-    p => p.id === kbStore.currentKb!.embedding_provider
+  // Get API config for embedding provider
+  const config = settingsStore.apiConfigs.find(
+    c => c.provider === kbStore.currentKb!.embedding_provider
   );
-  if (!provider?.apiKey) {
-    message.error(`请先在设置中配置 ${kbStore.currentKb.embedding_provider} 的 API Key`);
+  if (!config?.apiKey) {
+    message.error(`请先在设置中创建 ${kbStore.currentKb.embedding_provider} 的 API 配置并填写 API Key`);
     return;
   }
 
   importing.value = true;
-  const success = await kbStore.selectAndImportDocument(kbStore.currentKb.id, provider.apiKey);
+  const success = await kbStore.selectAndImportDocument(kbStore.currentKb.id, config.apiKey);
   importing.value = false;
   
   if (success) {
