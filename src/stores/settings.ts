@@ -391,6 +391,35 @@ export const useSettingsStore = defineStore(
           });
         }
       },
+      afterRestore: (context) => {
+        // Merge persisted providers with hardcoded list to ensure new providers are added
+        // and user settings (like selectedModel) are preserved for existing providers
+        const hardcodedProviders = context.store.$state.providers as LLMProvider[];
+        const persistedProviders = context.store.providers as LLMProvider[];
+        
+        if (!persistedProviders || persistedProviders.length === 0) {
+          // No persisted data, use hardcoded list
+          return;
+        }
+        
+        // Create a map of persisted providers by ID
+        const persistedMap = new Map(persistedProviders.map(p => [p.id, p]));
+        
+        // Merge: use hardcoded as base, override with persisted user settings
+        context.store.providers = hardcodedProviders.map(hp => {
+          const pp = persistedMap.get(hp.id);
+          if (pp) {
+            // Provider exists in persisted data, preserve user's selectedModel and apiKey
+            return {
+              ...hp,
+              selectedModel: pp.selectedModel || hp.selectedModel,
+              apiKey: "", // Always clear apiKey from persistence for security
+            };
+          }
+          // New provider from hardcoded list
+          return hp;
+        });
+      },
     },
   }
 );
