@@ -277,6 +277,23 @@ const DEFAULT_PROVIDERS: LLMProvider[] = [
   },
 ];
 
+// Storage version - increment when providers list changes significantly
+const STORAGE_VERSION = "2";
+const STORAGE_VERSION_KEY = "baiyu-aispace-version";
+
+// Check and clear old storage if version mismatch
+const checkStorageVersion = () => {
+  const storedVersion = localStorage.getItem(STORAGE_VERSION_KEY);
+  if (storedVersion !== STORAGE_VERSION) {
+    console.log(`Storage version changed from ${storedVersion} to ${STORAGE_VERSION}, clearing old data...`);
+    localStorage.removeItem("baiyu-aispace-settings");
+    localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
+  }
+};
+
+// Run version check on module load
+checkStorageVersion();
+
 export const useSettingsStore = defineStore(
   "settings",
   () => {
@@ -302,6 +319,10 @@ export const useSettingsStore = defineStore(
 
     // LLM Providers - initialized with default list
     const providers = ref<LLMProvider[]>(JSON.parse(JSON.stringify(DEFAULT_PROVIDERS)));
+    
+    // Debug: log providers count
+    console.log(`[SettingsStore] Initialized with ${providers.value.length} providers:`, 
+      providers.value.map(p => p.name).join(", "));
 
     const activeProvider = ref<string>("openai");
 
