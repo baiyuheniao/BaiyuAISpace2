@@ -28,14 +28,14 @@
 
 ## 🎯 项目简介
 
-**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的轻量级 LLM 客户端。它支持调用主流云端大模型 API，提供精美的聊天界面和流畅的交互体验。
+**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的 LLM 客户端。它支持调用主流云端大模型 API，提供精美的聊天界面和流畅的交互体验。
 
 **核心设计理念：**
-- 🪶 **极轻量级**：安装包 < 20MB，内存占用 < 500MB
+- 🪶 **极轻量级**：在低资源平台上也能有不错的性能表现
 - 🖥️ **真跨平台**：一套代码同时支持 Windows、macOS、Linux
 - 🔒 **隐私优先**：API 密钥本地加密存储，数据不出设备
 - ⚡ **极速响应**：Rust 原生后端，毫秒级延迟
-- 🎨 **精美界面**：现代化 UI 设计，支持深色模式
+- 🎨 **精美界面**：现代化 UI 设计，有深色
 
 ---
 
@@ -195,19 +195,19 @@ src-tauri/target/release/bundle/
 |--------|----------|---------|------|
 | **OpenAI** | 🇺🇸 美国 | **gpt-5.3-codex**, **gpt-5**, **gpt-4.1**, gpt-4o, o3, o4-mini | 行业标杆，功能全面 |
 | **Anthropic** | 🇺🇸 美国 | **claude-3-7-sonnet**, claude-3-5-sonnet, claude-3-opus | 长文本、代码能力强 |
-| **Google** | 🇺🇸 美国 | gemini-2.0-pro, gemini-1.5-pro | 多模态、上下文长 |
+| **Google** | 🇺🇸 美国 | gemini-3.0-pro | 多模态、上下文长 |
 | **Azure OpenAI** | 🇺🇸 美国 | gpt-4o, gpt-4 | 企业级、合规性好 |
 | **Mistral AI** | 🇫🇷 法国 | mistral-large, codestral | 欧洲开源先锋 |
-| **Moonshot (Kimi)** | 🇨🇳 中国 | **kimi-k2.5** (K2.5), **kimi-k2-thinking**, moonshot-v1 | 长文本（256K） |
-| **智谱 AI (GLM)** | 🇨🇳 中国 | glm-4-plus, **glm-4-air-250414**, glm-4-flash | 中文理解强 |
-| **阿里 (通义)** | 🇨🇳 中国 | **qwen3-235b**, qwen-max, **qwen-plus-latest**, qwen-coder-plus | 开源模型优秀 |
+| **Moonshot (Kimi)** | 🇨🇳 中国 | **kimi-k2.5** (K2.5), **kimi-k2-thinking** | 长文本，强中文场景代码 |
+| **智谱 AI (GLM)** | 🇨🇳 中国 | glm-4-plus, **glm-4-air-250414**, glm-4-flash | 中文通用能力强 |
+| **阿里 (通义)** | 🇨🇳 中国 | **qwen3-235b**, qwen-max, **qwen-plus-latest**, qwen-coder-plus | 同参数性能更好 |
 | **百度 (文心)** | 🇨🇳 中国 | ernie-4.0, ernie-4.0-turbo | 中文生态完善 |
 | **字节 (豆包)** | 🇨🇳 中国 | doubao-pro-256k, doubao-pro-32k | 性价比高 |
-| **DeepSeek** | 🇨🇳 中国 | **deepseek-v3.2**, deepseek-chat, **deepseek-reasoner (R1)** | 推理能力强，价格低 |
+| **DeepSeek** | 🇨🇳 中国 | **deepseek-v3.2**, **deepseek-reasoner (R1)** | 价格便宜 |
 | **硅基流动 (SiliconFlow)** | 🇨🇳 中国 | Qwen2.5, Llama-3.1, **DeepSeek-V3/R1** | 多模型聚合，价格优惠 |
-| **MiniMax** | 🇨🇳 中国 | abab6.5s, abab6.5 | 多模态、语音合成 |
+| **MiniMax** | 🇨🇳 中国 | abab6.5s, abab6.5 | 多模态、语音合成、Agent能力顶尖 |
 | **零一万物 (Yi)** | 🇨🇳 中国 | yi-large, yi-medium | 开源+商用 |
-| **自定义** | 🌐 全球 | 任意 OpenAI 兼容接口 | 灵活配置 Base URL |
+| **自定义** | 🌐 全球 | 任意 OpenAI 兼容接口 | 灵活配置 Base URL，更自由 |
 
 > 💡 **提示**：模型更新频繁，各服务商的完整模型列表请查看官方文档。如需添加新模型，可在设置中直接输入模型名称。
 
@@ -243,13 +243,7 @@ Rust：
 ## 📜 许可证
 
 本软件采用 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0) 开源。
-
-### 简单人话版
-- ✅ **你可以**：自由使用、修改、商用，甚至嵌入到闭源软件中
-- ✅ **你必须**：如果你修改了本项目的**现有文件**，请公开你的修改
-- ✅ **你可以**：添加新文件并选择**任意许可证**（包括闭源商业许可）
-- ❌ **你不能**：删除许可证声明或假装这是你原创的软件
-
+**注意·本项目还有BaiyuAISpace 许可证补充条款**
 ---
 
 ## 🤝 贡献指南
