@@ -11,35 +11,38 @@ import {
   NText, 
   NTooltip, 
   NSelect,
-  NSwitch,
   NBadge,
-  NPopconfirm,
   NTag,
-  NDivider
 } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore, PRESET_PROVIDERS } from "@/stores/settings";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
+import { useMCPStore } from "@/stores/mcp";
 import { 
   Send, 
-  Sparkles, 
   Library, 
   Close, 
   ServerOutline,
-  ChevronDown
+  ChevronDown,
+  Cube,
 } from "@vicons/ionicons5";
 
 const chat = useChatStore();
 const settings = useSettingsStore();
 const kbStore = useKnowledgeBaseStore();
+const mcp = useMCPStore();
 
 const inputValue = ref("");
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const attachedFiles = ref<File[]>([]);
 const showRagSelector = ref(false);
 const showApiSelector = ref(false);
 
 const canSend = computed(() => {
-  return inputValue.value.trim().length > 0 && !chat.isLoading && settings.activeConfig;
+  const hasContent = inputValue.value.trim().length > 0;
+  const hasFiles = attachedFiles.value.length > 0;
+  return (hasContent || hasFiles) && !chat.isLoading && settings.activeConfig;
 });
 
 // API Config options
@@ -73,13 +76,29 @@ const selectedKbName = computed(() => {
   return kb?.name;
 });
 
+// Enabled MCP servers count
+const enabledMcpServersCount = computed(() => {
+  return mcp.servers.filter(s => s.enabled).length;
+});
+
+// Available MCP tools count
+const availableMcpToolsCount = computed(() => {
+  return mcp.availableTools.length;
+});
+
+// Available knowledge bases
+const availableKbCount = computed(() => {
+  return kbStore.knowledgeBases.length;
+});
+
 onMounted(() => {
   kbStore.loadKnowledgeBases();
+  mcp.loadServers();
 });
 
 const handleSend = async () => {
   const content = inputValue.value.trim();
-  if (!content || chat.isLoading) return;
+  if ((!content && attachedFiles.value.length === 0) || chat.isLoading) return;
 
   if (!settings.activeConfig) {
     return;
@@ -89,12 +108,22 @@ const handleSend = async () => {
     await chat.createSession(settings.activeConfig.id);
   }
 
+  // Build message content with files
+  let messageContent = content;
+  if (attachedFiles.value.length > 0) {
+    const fileInfo = attachedFiles.value
+      .map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`)
+      .join(' ');
+    messageContent = messageContent ? `${messageContent}\n${fileInfo}` : fileInfo;
+  }
+
   inputValue.value = "";
+  attachedFiles.value = [];
   if (inputRef.value) {
     inputRef.value.style.height = "60px";
   }
 
-  await chat.sendMessage(content);
+  await chat.sendMessage(messageContent);
 };
 
 const handleKeydown = (e: KeyboardEvent) => {
@@ -129,6 +158,51 @@ const handleDisableRag = () => {
 const handleApiChange = (configId: string) => {
   settings.setActiveConfig(configId);
   showApiSelector.value = false;
+};
+
+const handleMcpToggle = () => {
+  chat.mcpEnabled = !chat.mcpEnabled;
+};
+
+const handleDisableMcp = () => {
+  chat.mcpEnabled = false;
+};
+
+const handleFileSelect = () => {
+  fileInputRef.value?.click();
+};
+
+const handleFilesSelected = (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const files = target.files;
+  
+  if (!files) return;
+
+  const supportedFormats = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/mpeg'];
+  
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (supportedFormats.includes(file.type)) {
+      // Check if file already attached
+      if (!attachedFiles.value.find(f => f.name === file.name && f.size === file.size)) {
+        attachedFiles.value.push(file);
+      }
+    }
+  }
+  
+  // Reset input
+  target.value = '';
+};
+
+const removeAttachedFile = (index: number) => {
+  attachedFiles.value.splice(index, 1);
+};
+
+const getFileDisplayName = (file: File): string => {
+  const maxLength = 20;
+  return file.name.length > maxLength 
+    ? file.name.substring(0, maxLength) + '...' 
+    : file.name;
 };
 </script>
 
@@ -175,6 +249,16 @@ const handleApiChange = (configId: string) => {
       </n-text>
     </div>
 
+    <!-- MCP Indicator -->
+    <div v-if="chat.mcpEnabled && enabledMcpServersCount > 0" class="mcp-indicator">
+      <n-tag type="warning" size="small" closable @close="handleDisableMcp">
+        <template #icon>
+          <n-icon><Cube /></n-icon>
+        </template>
+        MCP: {{ enabledMcpServersCount }} 服务 / {{ availableMcpToolsCount }} 工具
+      </n-tag>
+    </div>
+
     <div class="input-container">
       <div class="input-box">
         <textarea
@@ -194,6 +278,61 @@ const handleApiChange = (configId: string) => {
       </div>
 
       <div class="input-actions">
+        <!-- File Upload -->
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          accept="image/*,video/mp4,video/webm,video/mpeg"
+          style="display: none"
+          @change="handleFilesSelected"
+        />
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              tertiary
+              circle
+              size="large"
+              class="file-btn"
+              @click="handleFileSelect"
+            >
+              <template #icon>
+                <n-icon>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                </n-icon>
+              </template>
+            </n-button>
+          </template>
+          添加图片/视频 ({{ attachedFiles.length }})
+        </n-tooltip>
+
+        <!-- MCP Toggle -->
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="large"
+              :type="chat.mcpEnabled && enabledMcpServersCount > 0 ? 'warning' : 'default'"
+              class="mcp-btn"
+              :disabled="enabledMcpServersCount === 0"
+              @click="handleMcpToggle"
+            >
+              <template #icon>
+                <n-badge v-if="chat.mcpEnabled && enabledMcpServersCount > 0" :value="availableMcpToolsCount" color="warning">
+                  <n-icon><Cube /></n-icon>
+                </n-badge>
+                <n-icon v-else><Cube /></n-icon>
+              </template>
+            </n-button>
+          </template>
+          {{ chat.mcpEnabled ? '禁用 MCP' : '启用 MCP' }}{{ enabledMcpServersCount > 0 ? ` (${enabledMcpServersCount} 服务)` : '(无可用服务)' }}
+        </n-tooltip>
+
         <!-- RAG Selector -->
         <n-tooltip placement="top">
           <template #trigger>
@@ -202,6 +341,7 @@ const handleApiChange = (configId: string) => {
               circle
               size="large"
               :type="chat.ragEnabled ? 'success' : 'default'"
+              :disabled="availableKbCount === 0"
               class="rag-btn"
               @click="showRagSelector = !showRagSelector"
             >
@@ -213,7 +353,7 @@ const handleApiChange = (configId: string) => {
               </template>
             </n-button>
           </template>
-          {{ chat.ragEnabled ? '更改知识库' : '启用知识库' }}
+          {{ availableKbCount === 0 ? '无可用知识库' : chat.ragEnabled ? '更改知识库' : '启用知识库' }}
         </n-tooltip>
 
         <!-- Send Button -->
@@ -235,6 +375,32 @@ const handleApiChange = (configId: string) => {
           </template>
           发送消息
         </n-tooltip>
+      </div>
+    </div>
+
+    <!-- Attached Files Display -->
+    <div v-if="attachedFiles.length > 0" class="attached-files">
+      <div class="files-label">已附加的文件：</div>
+      <div class="files-list">
+        <div v-for="(file, index) in attachedFiles" :key="index" class="file-item">
+          <n-tag 
+            closable 
+            @close="removeAttachedFile(index)"
+            class="file-tag"
+          >
+            <template #icon>
+              <n-icon :size="14">
+                <svg v-if="file.type.startsWith('image/')" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" />
+                </svg>
+                <svg v-else-if="file.type.startsWith('video/')" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M18 3H6c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 10l-4-3v6l4-3z" />
+                </svg>
+              </n-icon>
+            </template>
+            {{ getFileDisplayName(file) }}
+          </n-tag>
+        </div>
       </div>
     </div>
 
@@ -344,6 +510,21 @@ const handleApiChange = (configId: string) => {
 
 .rag-result-info {
   font-size: 12px;
+}
+
+.mcp-indicator {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.mcp-btn {
+  transition: all 0.2s;
+}
+
+.mcp-btn:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.1);
 }
 
 .input-container {
@@ -478,4 +659,39 @@ const handleApiChange = (configId: string) => {
   font-size: 12px;
   color: #18a058;
 }
+
+.attached-files {
+  margin-top: 12px;
+  padding: 8px 4px;
+}
+
+.files-label {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  margin-bottom: 6px;
+}
+
+.files-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file-item {
+  display: inline-block;
+}
+
+.file-tag {
+  font-size: 12px;
+  max-width: 200px;
+}
+
+.file-btn {
+  transition: all 0.2s;
+}
+
+.file-btn:hover {
+  background: rgba(24, 160, 88, 0.1);
+}
+
 </style>

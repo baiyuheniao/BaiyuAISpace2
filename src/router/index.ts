@@ -17,6 +17,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/KnowledgeBaseView.vue"),
   },
   {
+    path: "/mcp",
+    name: "MCP",
+    component: () => import("@/views/MCPView.vue"),
+  },
+  {
     path: "/history",
     name: "History",
     component: () => import("@/views/HistoryView.vue"),

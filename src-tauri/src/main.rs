@@ -45,6 +45,14 @@ fn main() {
             knowledge_base::commands::delete_document,
             knowledge_base::commands::search_knowledge_base,
             knowledge_base::commands::get_embedding_models,
+            // MCP commands
+            commands::mcp::create_mcp_server,
+            commands::mcp::list_mcp_servers,
+            commands::mcp::delete_mcp_server,
+            commands::mcp::get_mcp_tools,
+            commands::mcp::get_all_mcp_tools,
+            commands::mcp::call_mcp_tool,
+            commands::mcp::test_mcp_connection,
         ])
         .setup(|app| {
             // Initialize database

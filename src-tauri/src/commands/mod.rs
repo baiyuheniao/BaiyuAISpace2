@@ -3,3 +3,4 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 pub mod llm;
+pub mod mcp;

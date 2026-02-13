@@ -3,8 +3,7 @@
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
 <script setup lang="ts">
-import { ref, onMounted, h } from "vue";
-import { useRouter } from "vue-router";
+import { ref, onMounted } from "vue";
 import {
   NLayout,
   NLayoutSider,
@@ -24,16 +23,16 @@ import {
   NSelect,
   NSpace,
   NPopconfirm,
-  NTooltip,
   NIcon,
-  NUpload,
   NBreadcrumb,
   NBreadcrumbItem,
   NRadioGroup,
   NRadio,
   NSlider,
+  NCard,
+  NDescriptions,
+  NDescriptionsItem,
   useMessage,
-  useDialog,
 } from "naive-ui";
 import {
   Add,
@@ -43,15 +42,11 @@ import {
   SettingsOutline,
   ArrowBack,
   Library,
-  SearchOutline,
-  ServerOutline,
 } from "@vicons/ionicons5";
 import { useKnowledgeBaseStore, type KnowledgeBase, type Document } from "@/stores/knowledgeBase";
 import { useSettingsStore } from "@/stores/settings";
 
-const router = useRouter();
 const message = useMessage();
-const dialog = useDialog();
 const kbStore = useKnowledgeBaseStore();
 const settingsStore = useSettingsStore();
 
@@ -245,13 +240,7 @@ const getStatusTag = (status: Document["status"]) => {
             v-else-if="kbStore.knowledgeBases.length === 0"
             description="暂无知识库"
             class="kb-empty"
-          >
-            <template #extra>
-              <n-button @click="showCreateModal = true">
-                创建知识库
-              </n-button>
-            </template>
-          </n-empty>
+          />
 
           <n-list v-else hoverable clickable>
             <n-list-item
@@ -625,6 +614,7 @@ const getStatusTag = (status: Document["status"]) => {
   font-size: 13px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -661,6 +651,7 @@ const getStatusTag = (status: Document["status"]) => {
   font-size: 13px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   color: var(--n-text-color-3);

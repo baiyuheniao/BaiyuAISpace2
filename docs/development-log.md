@@ -4,6 +4,211 @@
 
 ---
 
+## 📅 2026-02-13 文件上传与功能按钮优化
+
+### ✨ 新功能
+
+#### 图片/视频文件上传
+支持在对话中直接上传和发送图片、视频文件：
+
+**支持格式**：
+- 💬 **图片**: JPEG, PNG, GIF, WebP
+- 🎬 **视频**: MP4, WebM, MPEG
+
+**功能特点**：
+- 📎 新增上传按钮，显示已附加文件数
+- 📋 文件列表显示（带图标区分图片/视频）
+- ❌ 支持删除已选择的文件
+- ✉️ 支持混合发送（文本 + 文件）
+- 🚫 仅允许发送时为空但有文件
+
+#### 功能按钮智能禁用
+优化按钮用户体验，当无可用资源时自动禁用：
+
+**优化部分**：
+1. **知识库按钮**
+   - 无可用知识库时禁用
+   - 提示文本：「无可用知识库」
+   - 与 MCP 按钮禁用逻辑保持一致
+
+2. **MCP 按钮**
+   - 无启用的 MCP 服务时禁用
+   - 提示文本：「无可用服务」
+   - 已有的逻辑保持不变
+
+### 🔧 技术细节
+
+#### 前端实现 (`ChatInput.vue`)
+
+**新增状态**：
+```typescript
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const attachedFiles = ref<File[]>([]);
+
+// 后端 refs
+const enabledMcpServersCount = computed(() => {
+  return mcp.servers.filter(s => s.enabled).length;
+});
+
+const availableKbCount = computed(() => {
+  return kbStore.knowledgeBases.length;
+});
+```
+
+**新增方法**：
+- `handleFileSelect()` - 触发文件选择对话框
+- `handleFilesSelected(event)` - 处理选中的文件，验证格式
+- `removeAttachedFile(index)` - 删除已附加的文件
+- `getFileDisplayName(file)` - 格式化文件名显示（超长截断）
+
+**发送逻辑更新**：
+- 修改 `canSend` computed，支持「仅文件」发送
+- `handleSend()` 构建消息时包含文件信息
+- 文件信息格式：`[文件: name (size)]` 添加到消息内容
+
+**UI 更新**：
+- 新增隐藏的 `<input type="file">` 元素
+- 新增上传按钮（`file-btn`），置于 MCP 按钮前
+- 新增文件列表显示区域（`attached-files`）
+- 每个文件显示为 Tag，可点击删除
+
+#### 按钮禁用规则
+
+| 按钮 | 禁用条件 | 提示文本 |
+|------|---------|---------|
+| 上传 | 无 | 添加图片/视频 (count) |
+| MCP | `enabledMcpServersCount === 0` | 无可用服务 |
+| 知识库 | `availableKbCount === 0` | 无可用知识库 |
+| 发送 | `!canSend` | - |
+
+### 📊 文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `src/components/ChatInput.vue` | 新增文件上传功能、按钮禁用逻辑、文件列表显示 |
+
+### 💾 使用流程
+
+**上传文件**：
+1. 点击上传按钮 📎
+2. 选择一个或多个图片/视频文件
+3. 文件列表显示在输入框下方
+4. 可点击标签的 ❌ 删除指定文件
+
+**发送消息**：
+- **仅文本**: 输入文本 → 点击发送
+- **仅文件**: 选择文件 → 点击发送
+- **文本+文件**: 输入文本 + 选择文件 → 点击发送
+
+**后端接收**：
+- 当前文件信息作为文本追加到消息内容中
+- 格式：`[文件: filename (size)]`
+- 下一步可实现文件读取和处理逻辑
+
+### 🎨 样式规范
+
+**新增 CSS 类**：
+```scss
+.attached-files        // 文件列表容器
+.files-label          // 标签文本
+.files-list           // 文件列表（flex wrap）
+.file-item            // 单个文件项
+.file-tag             // 文件 tag 样式
+.file-btn             // 上传按钮样式
+```
+
+---
+
+## 📅 2026-02-12 MCP 与 LLM 函数调用集成
+
+### ✨ 核心功能
+
+#### MCP 工具定义自动生成
+当用户启用 MCP 且有可用工具时，系统自动构建工具定义并集成到 LLM 提示词：
+
+**实现逻辑** (`src/stores/chat.ts`):
+
+1. **`buildMcpToolDefinitions(availableTools)`** 
+   - 将 MCPTool[] 转换为 OpenAI 兼容的 JSON 格式
+   - 生成结构：`{ type: "function", function: { name, description, parameters } }`
+
+2. **`buildMcpSystemPrompt(availableTools)`**
+   - 构建包含工具列表和使用说明的完整系统提示词
+   - 自动告知 LLM：「你可以使用以下工具来完成任务」
+
+3. **增强的 `sendMessage()`**
+   - 检查 `mcpEnabled` 状态和 `availableTools` 长度
+   - 构建工具定义并合并到消息列表
+   - 智能处理现有系统消息（追加或创建新的）
+
+#### 工作流程
+
+```
+用户启用 MCP + 存在可用工具
+    ↓
+sendMessage() 检查 mcpEnabled 标志
+    ↓
+从 useMCPStore 获取 availableTools
+    ↓
+调用 buildMcpToolDefinitions() 生成工具 JSON
+    ↓
+调用 buildMcpSystemPrompt() 生成完整系统提示
+    ↓
+将 MCP 系统提示词合并到消息列表
+    ↓
+发送给 LLM API（包含工具定义）
+    ↓
+LLM 返回响应（可能提及工具使用）
+    ↓
+流式显示到 UI
+```
+
+#### 特点
+
+✅ **零编译错误** - 所有类型检查通过  
+✅ **RAG 兼容** - 与现有知识库功能无冲突  
+✅ **动态工具集合** - 工具启用/禁用立即生效  
+✅ **系统提示合并** - 智能处理现有系统消息  
+✅ **完整文档** - 提供详细集成指南
+
+### 🔧 技术细节
+
+| 组件 | 说明 |
+|------|------|
+| 工具格式 | OpenAI 兼容的函数定义 |
+| 提示词集成 | 系统消息中追加或创建 |
+| 状态检查 | mcpEnabled flag + availableTools.length |
+| 兼容性 | 所有支持的 LLM 提供商 |
+
+### 📚 文档
+
+新增 `docs/mcp-llm-integration.md`，包含：
+- 完整实现细节
+- 使用场景示例
+- Python/TypeScript 代码示例
+- 测试指南
+- 故障排除
+- 性能和安全考虑
+
+### 📊 文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `src/stores/chat.ts` | 导入 MCPStore，新增工具定义构建函数，增强 sendMessage() |
+| `docs/mcp-llm-integration.md` | 新建完整集成指南 |
+
+### ⏳ 后续步骤
+
+虽然当前实现已能将工具定义发送给 LLM，但要实现完整的**函数调用执行**，还需要：
+
+1. **解析 LLM 工具调用** - 检测并提取工具使用意图
+2. **执行 MCP 工具** - 通过 `mcp.callTool()` 调用
+3. **反馈给 LLM** - 将结果发送回 LLM 进行继续推理
+
+详见 `docs/mcp-llm-integration.md` 的「后续步骤」部分。
+
+---
+
 ## 📅 2026-02-12 API 配置系统重构完成
 
 ### ✅ 重大功能变更

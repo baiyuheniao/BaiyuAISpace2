@@ -23,6 +23,7 @@ import {
   NModal,
   NIcon,
   NText,
+  NEmpty,
   useMessage
 } from "naive-ui";
 import { 
@@ -37,7 +38,7 @@ import {
   InformationCircleOutline,
   Add,
   TrashOutline,
-  Edit,
+  CreateOutline,
   CheckmarkCircle,
   LinkOutline,
   CubeOutline
@@ -226,7 +227,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                   <n-space>
                     <n-button quaternary circle size="small" @click.stop="openEditModal(config)">
                       <template #icon>
-                        <n-icon><Edit /></n-icon>
+                        <n-icon><CreateOutline /></n-icon>
                       </template>
                     </n-button>
                     <n-popconfirm 

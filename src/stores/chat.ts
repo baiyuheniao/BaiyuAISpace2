@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSettingsStore } from "./settings";
 import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
+import { useMCPStore, type MCPTool } from "./mcp";
 
 export interface Message {
   id: string;
@@ -67,6 +68,8 @@ export const useChatStore = defineStore("chat", () => {
   const ragEnabled = ref(false);
   const selectedKnowledgeBaseId = ref<string | null>(null);
   const lastRetrievalResult = ref<RetrievalResult | null>(null);
+  
+  const mcpEnabled = ref(false);
 
   const loadSessionsFromDb = async () => {
     try {
@@ -197,9 +200,12 @@ export const useChatStore = defineStore("chat", () => {
       return;
     }
 
+    const mcp = useMCPStore();
+
     let enhancedContent = content;
     let retrievalContext = "";
 
+    // Handle RAG if enabled
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
       const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
       if (kb) {
@@ -245,7 +251,8 @@ export const useChatStore = defineStore("chat", () => {
       };
       currentSession.value.messages.push(assistantMessage);
 
-      const apiMessages = currentSession.value.messages
+      // Build messages with MCP support
+      let apiMessages = currentSession.value.messages
         .filter(m => !m.streaming && !m.error)
         .map((m, index) => {
           if (ragEnabled.value && index === currentSession.value!.messages.length - 2) {
@@ -265,6 +272,29 @@ export const useChatStore = defineStore("chat", () => {
             error: m.error,
           };
         });
+
+      // Add MCP system prompt if enabled with available tools
+      if (mcpEnabled.value && mcp.availableTools.length > 0) {
+        const mcpSystemPrompt = buildMcpSystemPrompt(mcp.availableTools);
+        
+        // Check if first message is system message
+        if (apiMessages.length > 0 && apiMessages[0].role === "system") {
+          // Append MCP info to existing system message
+          apiMessages[0] = {
+            ...apiMessages[0],
+            content: apiMessages[0].content + "\n\n" + mcpSystemPrompt,
+          };
+        } else {
+          // Insert new system message at the beginning
+          apiMessages.unshift({
+            id: crypto.randomUUID(),
+            role: "system",
+            content: mcpSystemPrompt,
+            timestamp: Date.now(),
+            error: undefined,
+          });
+        }
+      }
 
       await invoke("stream_message", {
         request: {
@@ -304,6 +334,41 @@ export const useChatStore = defineStore("chat", () => {
     
     contextParts.push("\n---");
     return contextParts.join("\n");
+  };
+
+  const buildMcpToolDefinitions = (availableTools: MCPTool[]): string => {
+    if (availableTools.length === 0) return "";
+
+    const toolsJson = availableTools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema,
+      },
+    }));
+
+    const toolDefString = JSON.stringify(toolsJson, null, 2);
+    
+    return `## 可用工具
+
+你可以使用以下工具来完成任务。每个工具都有特定的功能和参数要求。
+
+\`\`\`json
+${toolDefString}
+\`\`\`
+
+使用工具时，你可以调用它们来获取信息或执行操作。`;
+  };
+
+  const buildMcpSystemPrompt = (availableTools: MCPTool[]): string => {
+    const toolDefs = buildMcpToolDefinitions(availableTools);
+    
+    return `你是一个有能力的AI助手，可以使用各种工具来帮助用户完成任务。
+
+${toolDefs}
+
+当你需要使用工具时，请清楚地说明你打算使用哪个工具以及为什么。你可以组合多个工具来解决更复杂的问题。`;
   };
 
   const toggleRag = (enabled: boolean) => {
@@ -347,6 +412,7 @@ export const useChatStore = defineStore("chat", () => {
     ragEnabled,
     selectedKnowledgeBaseId,
     lastRetrievalResult,
+    mcpEnabled,
     createSession,
     loadSession,
     sendMessage,
