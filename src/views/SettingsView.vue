@@ -29,7 +29,8 @@ import {
 import { 
   useSettingsStore, 
   PRESET_PROVIDERS, 
-  type ApiConfig 
+  type ApiConfig,
+  type EmbeddingApiConfig
 } from "@/stores/settings";
 import { 
   ServerOutline, 
@@ -47,12 +48,17 @@ import {
 const settings = useSettingsStore();
 const message = useMessage();
 
-// Modal state
+// LLM API Config Modal state
 const showCreateModal = ref(false);
 const showEditModal = ref(false);
 const editingConfig = ref<ApiConfig | null>(null);
 
-// Form state
+// Embedding API Config Modal state
+const showEmbeddingCreateModal = ref(false);
+const showEmbeddingEditModal = ref(false);
+const editingEmbeddingConfig = ref<EmbeddingApiConfig | null>(null);
+
+// LLM API Form state
 const formData = ref({
   name: "",
   provider: "openai",
@@ -61,7 +67,16 @@ const formData = ref({
   apiKey: "",
 });
 
-// Reset form
+// Embedding API Form state
+const embeddingFormData = ref({
+  name: "",
+  provider: "openai",
+  baseUrl: PRESET_PROVIDERS.openai.baseUrl,
+  model: "text-embedding-3-small",
+  apiKey: "",
+});
+
+// Reset LLM API form
 const resetForm = () => {
   formData.value = {
     name: "",
@@ -72,13 +87,24 @@ const resetForm = () => {
   };
 };
 
-// Open create modal
+// Reset Embedding API form
+const resetEmbeddingForm = () => {
+  embeddingFormData.value = {
+    name: "",
+    provider: "openai",
+    baseUrl: PRESET_PROVIDERS.openai.baseUrl,
+    model: "",
+    apiKey: "",
+  };
+};
+
+// Open LLM API create modal
 const openCreateModal = () => {
   resetForm();
   showCreateModal.value = true;
 };
 
-// Open edit modal
+// Open LLM API edit modal
 const openEditModal = (config: ApiConfig) => {
   editingConfig.value = config;
   formData.value = {
@@ -91,10 +117,35 @@ const openEditModal = (config: ApiConfig) => {
   showEditModal.value = true;
 };
 
-// Handle provider change - auto fill base URL
+// Open Embedding API create modal
+const openEmbeddingCreateModal = () => {
+  resetEmbeddingForm();
+  showEmbeddingCreateModal.value = true;
+};
+
+// Open Embedding API edit modal
+const openEmbeddingEditModal = (config: EmbeddingApiConfig) => {
+  editingEmbeddingConfig.value = config;
+  embeddingFormData.value = {
+    name: config.name,
+    provider: config.provider,
+    baseUrl: config.baseUrl,
+    model: config.model,
+    apiKey: config.apiKey,
+  };
+  showEmbeddingEditModal.value = true;
+};
+
+// Handle LLM provider change - auto fill base URL
 const handleProviderChange = (provider: string) => {
   formData.value.provider = provider;
   formData.value.baseUrl = PRESET_PROVIDERS[provider]?.baseUrl || "";
+};
+
+// Handle Embedding provider change - auto fill base URL
+const handleEmbeddingProviderChange = (provider: string) => {
+  embeddingFormData.value.provider = provider;
+  embeddingFormData.value.baseUrl = PRESET_PROVIDERS[provider]?.baseUrl || "";
 };
 
 // Create new config
@@ -163,6 +214,72 @@ const handleSetActive = (configId: string) => {
   message.success("已设为当前使用配置");
 };
 
+// Create Embedding API config
+const handleEmbeddingCreate = async () => {
+  if (!embeddingFormData.value.name.trim()) {
+    message.error("请输入配置名称");
+    return;
+  }
+  if (!embeddingFormData.value.model.trim()) {
+    message.error("请输入 Embedding 模型名称");
+    return;
+  }
+  if (!embeddingFormData.value.apiKey.trim()) {
+    message.error("请输入 API Key");
+    return;
+  }
+
+  settings.createEmbeddingApiConfig(
+    embeddingFormData.value.name,
+    embeddingFormData.value.provider,
+    embeddingFormData.value.model,
+    embeddingFormData.value.apiKey,
+    embeddingFormData.value.baseUrl
+  );
+
+  message.success("Embedding API 配置已创建");
+  showEmbeddingCreateModal.value = false;
+  resetEmbeddingForm();
+};
+
+// Update Embedding API config
+const handleEmbeddingUpdate = async () => {
+  if (!editingEmbeddingConfig.value) return;
+  
+  if (!embeddingFormData.value.name.trim()) {
+    message.error("请输入配置名称");
+    return;
+  }
+  if (!embeddingFormData.value.model.trim()) {
+    message.error("请输入 Embedding 模型名称");
+    return;
+  }
+
+  settings.updateEmbeddingApiConfig(editingEmbeddingConfig.value.id, {
+    name: embeddingFormData.value.name,
+    provider: embeddingFormData.value.provider,
+    baseUrl: embeddingFormData.value.baseUrl,
+    model: embeddingFormData.value.model,
+    apiKey: embeddingFormData.value.apiKey,
+  });
+
+  message.success("Embedding API 配置已更新");
+  showEmbeddingEditModal.value = false;
+  editingEmbeddingConfig.value = null;
+};
+
+// Delete Embedding API config
+const handleEmbeddingDelete = (configId: string) => {
+  settings.deleteEmbeddingApiConfig(configId);
+  message.success("Embedding API 配置已删除");
+};
+
+// Set active Embedding API config
+const handleSetEmbeddingActive = (configId: string) => {
+  settings.setActiveEmbeddingApiConfig(configId);
+  message.success("已设为当前 Embedding 配置");
+};
+
 // Provider options
 const providerOptions = computed(() => settings.presetProviderOptions);
 </script>
@@ -176,12 +293,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           设置
         </h1>
 
-        <!-- API Configurations -->
+        <!-- LLM API Configurations -->
         <n-card class="settings-card" :bordered="false">
           <template #header>
             <div class="card-header">
               <n-icon :size="20" depth="3"><KeyOutline /></n-icon>
-              <span>API 配置</span>
+              <span>对话模型 API 配置</span>
               <n-button type="primary" size="small" @click="openCreateModal">
                 <template #icon>
                   <n-icon><Add /></n-icon>
@@ -250,16 +367,96 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             </n-list-item>
           </n-list>
 
-          <n-empty v-else description="暂无 API 配置">
-            <template #extra>
-              <n-button @click="openCreateModal">创建配置</n-button>
-            </template>
-          </n-empty>
+          <n-empty v-else description="暂无 API 配置" />
 
           <template #footer v-if="settings.apiConfigs.length > 0">
             <n-text depth="3" style="font-size: 12px;">
               <n-icon :size="12" style="margin-right: 4px;"><CheckmarkCircle /></n-icon>
               API Key 使用系统密钥链加密存储（Windows Credential / macOS Keychain / Linux Secret Service）
+            </n-text>
+          </template>
+        </n-card>
+
+        <!-- Embedding API Configurations -->
+        <n-card class="settings-card" :bordered="false">
+          <template #header>
+            <div class="card-header">
+              <n-icon :size="20" depth="3"><DocumentTextOutline /></n-icon>
+              <span>Embedding 向量模型 API 配置</span>
+              <n-button type="primary" size="small" @click="openEmbeddingCreateModal">
+                <template #icon>
+                  <n-icon><Add /></n-icon>
+                </template>
+                新建配置
+              </n-button>
+            </div>
+          </template>
+
+          <!-- Embedding Config List -->
+          <n-list v-if="settings.embeddingApiConfigs.length > 0" hoverable clickable>
+            <n-list-item 
+              v-for="config in settings.embeddingApiConfigs" 
+              :key="config.id"
+              @click="handleSetEmbeddingActive(config.id)"
+            >
+              <n-thing>
+                <template #header>
+                  <n-space align="center">
+                    <span>{{ config.name }}</span>
+                    <n-tag 
+                      v-if="config.id === settings.activeEmbeddingApiConfigId" 
+                      type="success" 
+                      size="small"
+                    >
+                      当前使用
+                    </n-tag>
+                  </n-space>
+                </template>
+                <template #description>
+                  <n-space vertical size="small">
+                    <n-text depth="3">
+                      <n-icon :size="14" style="margin-right: 4px;"><CubeOutline /></n-icon>
+                      模型: {{ config.model }}
+                    </n-text>
+                    <n-text depth="3">
+                      <n-icon :size="14" style="margin-right: 4px;"><LinkOutline /></n-icon>
+                      {{ PRESET_PROVIDERS[config.provider]?.name || config.provider }}
+                    </n-text>
+                  </n-space>
+                </template>
+                <template #header-extra>
+                  <n-space>
+                    <n-button quaternary circle size="small" @click.stop="openEmbeddingEditModal(config)">
+                      <template #icon>
+                        <n-icon><CreateOutline /></n-icon>
+                      </template>
+                    </n-button>
+                    <n-popconfirm 
+                      @positive-click="handleEmbeddingDelete(config.id)"
+                      positive-text="删除"
+                      negative-text="取消"
+                    >
+                      <template #trigger>
+                        <n-button quaternary circle size="small" type="error" @click.stop>
+                          <template #icon>
+                            <n-icon><TrashOutline /></n-icon>
+                          </template>
+                        </n-button>
+                      </template>
+                      确定删除 Embedding API 配置 "{{ config.name }}"？
+                    </n-popconfirm>
+                  </n-space>
+                </template>
+              </n-thing>
+            </n-list-item>
+          </n-list>
+
+          <n-empty v-else description="暂无 Embedding API 配置" />
+
+          <template #footer v-if="settings.embeddingApiConfigs.length > 0">
+            <n-text depth="3" style="font-size: 12px;">
+              <n-icon :size="12" style="margin-right: 4px;"><CheckmarkCircle /></n-icon>
+              Embedding API 用于知识库的文档向量化和检索查询
             </n-text>
           </template>
         </n-card>
@@ -450,6 +647,135 @@ const providerOptions = computed(() => settings.presetProviderOptions);
         </n-space>
       </template>
     </n-modal>
+
+    <!-- Embedding Create Modal -->
+    <n-modal
+      v-model:show="showEmbeddingCreateModal"
+      title="新建 Embedding API 配置"
+      preset="card"
+      style="width: 500px"
+      :mask-closable="false"
+    >
+      <n-form label-placement="left" label-width="100px">
+        <n-form-item label="配置名称" required>
+          <n-input 
+            v-model:value="embeddingFormData.name" 
+            placeholder="例如：OpenAI Embedding"
+          />
+        </n-form-item>
+
+        <n-form-item label="服务商" required>
+          <n-select
+            :value="embeddingFormData.provider"
+            :options="providerOptions"
+            @update:value="handleEmbeddingProviderChange"
+            placeholder="选择服务商"
+          />
+        </n-form-item>
+
+        <n-form-item label="Base URL" required>
+          <n-input 
+            v-model:value="embeddingFormData.baseUrl" 
+            placeholder="https://api.openai.com/v1"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">
+              已自动填入 {{ PRESET_PROVIDERS[embeddingFormData.provider]?.name }} 默认地址
+            </n-text>
+          </template>
+        </n-form-item>
+
+        <n-form-item label="Embedding 模型" required>
+          <n-input 
+            v-model:value="embeddingFormData.model" 
+            placeholder="例如：text-embedding-3-small, embedding-2, bge-large-zh..."
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">
+              输入 Embedding 模型名称，可参考服务商官方文档
+            </n-text>
+          </template>
+        </n-form-item>
+
+        <n-form-item label="API Key" required>
+          <n-input 
+            v-model:value="embeddingFormData.apiKey" 
+            type="password"
+            show-password-on="click"
+            placeholder="输入 API Key"
+          />
+        </n-form-item>
+      </n-form>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showEmbeddingCreateModal = false">取消</n-button>
+          <n-button type="primary" @click="handleEmbeddingCreate">创建</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- Embedding Edit Modal -->
+    <n-modal
+      v-model:show="showEmbeddingEditModal"
+      title="编辑 Embedding API 配置"
+      preset="card"
+      style="width: 500px"
+      :mask-closable="false"
+    >
+      <n-form label-placement="left" label-width="100px">
+        <n-form-item label="配置名称" required>
+          <n-input 
+            v-model:value="embeddingFormData.name" 
+            placeholder="例如：OpenAI Embedding"
+          />
+        </n-form-item>
+
+        <n-form-item label="服务商" required>
+          <n-select
+            :value="embeddingFormData.provider"
+            :options="providerOptions"
+            @update:value="handleEmbeddingProviderChange"
+            placeholder="选择服务商"
+          />
+        </n-form-item>
+
+        <n-form-item label="Base URL" required>
+          <n-input 
+            v-model:value="embeddingFormData.baseUrl" 
+            placeholder="https://api.openai.com/v1"
+          />
+        </n-form-item>
+
+        <n-form-item label="Embedding 模型" required>
+          <n-input 
+            v-model:value="embeddingFormData.model" 
+            placeholder="例如：text-embedding-3-small, embedding-2..."
+          />
+        </n-form-item>
+
+        <n-form-item label="API Key">
+          <n-input 
+            v-model:value="embeddingFormData.apiKey" 
+            type="password"
+            show-password-on="click"
+            placeholder="留空表示不修改"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">
+              留空表示保持原 API Key 不变
+            </n-text>
+          </template>
+        </n-form-item>
+      </n-form>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showEmbeddingEditModal = false">取消</n-button>
+          <n-button type="primary" @click="handleEmbeddingUpdate">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
 </template>
 
@@ -523,13 +849,13 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 }
 
 .about-link {
-  color: #18a058;
+  color: var(--n-text-color-1);
   cursor: pointer;
   font-size: 14px;
 }
 
 .about-link:hover {
-  color: #36ad6a;
+  color: var(--n-text-color-2);
 }
 
 .footer-text {

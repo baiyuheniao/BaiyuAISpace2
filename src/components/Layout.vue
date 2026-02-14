@@ -5,11 +5,12 @@
 <script setup lang="ts">
 import { computed, h } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { NLayout, NLayoutSider, NMenu, NButton, NAvatar, NTooltip } from "naive-ui";
+import { NLayout, NLayoutSider, NMenu, NButton } from "naive-ui";
 import type { MenuOption } from "naive-ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
-import { Chatbubbles, Time, Settings, Moon, Sunny, Add, Sparkles, Library, Cube } from "@vicons/ionicons5";
+import { Chatbubbles, Time, Settings, Add, Library, Cube } from "@vicons/ionicons5";
+import logoImg from "../../assets/logo.png";
 
 const route = useRoute();
 const router = useRouter();
@@ -20,27 +21,27 @@ const activeKey = computed(() => route.name as string);
 
 const menuOptions: MenuOption[] = [
   {
-    label: "Chat_对话",
+    label: "Chat/对话",
     key: "Chat",
     icon: () => h(Chatbubbles),
   },
   {
-    label: "MCP_模型工具",
-    key: "MCP",
-    icon: () => h(Cube),
-  },
-  {
-    label: "RAG_知识库",
+    label: "RAG/知识库",
     key: "KnowledgeBase",
     icon: () => h(Library),
   },
   {
-    label: "History_历史记录",
+    label: "MCP/模型工具",
+    key: "MCP",
+    icon: () => h(Cube),
+  },
+  {
+    label: "History/历史记录",
     key: "History",
     icon: () => h(Time),
   },
   {
-    label: "Settings_设置",
+    label: "Settings/设置",
     key: "Settings",
     icon: () => h(Settings),
   },
@@ -76,9 +77,7 @@ const handleNewChat = () => {
         <!-- Logo -->
         <div class="logo-section">
           <div class="logo">
-            <n-avatar round :size="40" class="logo-avatar">
-              <n-icon :size="24"><Sparkles /></n-icon>
-            </n-avatar>
+            <img :src="logoImg" alt="BaiyuAI" class="logo-img" />
             <span class="logo-text">BaiyuAI</span>
           </div>
         </div>
@@ -115,41 +114,17 @@ const handleNewChat = () => {
 
         <!-- Bottom Actions -->
         <div class="bottom-section">
-          <n-space vertical :size="12">
-            <!-- Theme Toggle -->
-            <n-tooltip placement="right">
-              <template #trigger>
-                <n-button
-                  quaternary
-                  round
-                  class="action-btn"
-                  @click="settings.toggleTheme"
-                >
-                  <template #icon>
-                    <n-icon :size="20">
-                      <Sunny v-if="settings.darkMode" />
-                      <Moon v-else />
-                    </n-icon>
-                  </template>
-                  <span class="action-text">
-                    {{ settings.darkMode ? '浅色模式' : '深色模式' }}
-                  </span>
-                </n-button>
-              </template>
-              {{ settings.darkMode ? '切换到浅色模式' : '切换到深色模式' }}
-            </n-tooltip>
 
-            <!-- User Info -->
-            <div class="user-info">
-              <n-avatar round :size="32" class="user-avatar">
-                <n-icon :size="18"><Settings /></n-icon>
-              </n-avatar>
-              <div class="user-text">
-                <n-text strong>用户</n-text>
-                <n-text depth="3" class="user-status">在线</n-text>
-              </div>
+          <!-- User Info at bottom -->
+          <div class="user-info">
+            <n-avatar round :size="32" class="user-avatar">
+              <n-icon :size="18"><Settings /></n-icon>
+            </n-avatar>
+            <div class="user-text">
+              <n-text strong>用户</n-text>
+              <n-text depth="3" class="user-status">在线</n-text>
             </div>
-          </n-space>
+          </div>
         </div>
       </div>
     </n-layout-sider>
@@ -193,18 +168,20 @@ const handleNewChat = () => {
   padding: 0 8px;
 }
 
-.logo-avatar {
-  background: linear-gradient(135deg, #18a058 0%, #36ad6a 100%);
-  box-shadow: 0 4px 12px rgba(24, 160, 88, 0.3);
+.logo-img {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  object-fit: contain;
+  image-rendering: crisp-edges;
+  background: var(--n-color-embed);
+  padding: 4px;
 }
 
 .logo-text {
   font-size: 22px;
   font-weight: 700;
-  background: linear-gradient(135deg, #18a058 0%, #36ad6a 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--n-text-color);
 }
 
 .new-chat-section {
@@ -213,13 +190,16 @@ const handleNewChat = () => {
 }
 
 .new-chat-btn {
-  box-shadow: 0 4px 12px rgba(24, 160, 88, 0.3);
+  background: #000000;
+  border-color: #000000;
+  color: #ffffff;
   transition: all 0.3s ease;
 }
 
 .new-chat-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(24, 160, 88, 0.4);
+  background: #1a1a1a;
+  border-color: #1a1a1a;
 }
 
 .menu-section {
@@ -230,6 +210,9 @@ const handleNewChat = () => {
   margin-top: auto;
   padding-top: 16px;
   border-top: 1px solid var(--n-border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .action-btn {
@@ -257,7 +240,7 @@ const handleNewChat = () => {
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  background: #000000;
 }
 
 .user-text {

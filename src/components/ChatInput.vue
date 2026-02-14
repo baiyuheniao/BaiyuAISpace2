@@ -455,7 +455,7 @@ const getFileDisplayName = (file: File): string => {
         <template v-if="chat.ragEnabled">
           <n-text depth="3" class="divider">|</n-text>
           <n-space align="center" :size="4">
-            <n-icon :size="14" color="#18a058"><Library /></n-icon>
+            <n-icon :size="14" color="#000000"><Library /></n-icon>
             <n-text depth="3" class="rag-text">
               RAG 已启用
             </n-text>
@@ -524,7 +524,7 @@ const getFileDisplayName = (file: File): string => {
 }
 
 .mcp-btn:hover:not(:disabled) {
-  background: rgba(245, 158, 11, 0.1);
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .input-container {
@@ -540,8 +540,8 @@ const getFileDisplayName = (file: File): string => {
 }
 
 .input-container:focus-within {
-  border-color: rgba(24, 160, 88, 0.5);
-  box-shadow: 0 4px 20px rgba(24, 160, 88, 0.1);
+  border-color: rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
 }
 
 .input-box {
@@ -586,17 +586,17 @@ const getFileDisplayName = (file: File): string => {
 }
 
 .rag-btn:hover {
-  background: rgba(24, 160, 88, 0.1);
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .send-btn {
-  box-shadow: 0 4px 12px rgba(24, 160, 88, 0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   transition: all 0.2s;
 }
 
 .send-btn:not(:disabled):hover {
   transform: scale(1.05);
-  box-shadow: 0 6px 16px rgba(24, 160, 88, 0.4);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
 }
 
 .send-btn:disabled {
@@ -657,7 +657,7 @@ const getFileDisplayName = (file: File): string => {
 
 .rag-text {
   font-size: 12px;
-  color: #18a058;
+  color: var(--n-text-color-1);
 }
 
 .attached-files {
@@ -691,7 +691,7 @@ const getFileDisplayName = (file: File): string => {
 }
 
 .file-btn:hover {
-  background: rgba(24, 160, 88, 0.1);
+  background: rgba(0, 0, 0, 0.05);
 }
 
 </style>

@@ -36,22 +36,18 @@ pub async fn create_knowledge_base(
     let now = chrono::Utc::now().timestamp_millis();
     let chunk_size = request.chunk_size.unwrap_or(1000);
     let chunk_overlap = request.chunk_overlap.unwrap_or(200);
-    let embedding_dim = get_embedding_dimension(&request.embedding_provider, &request.embedding_model);
     
     conn.execute(
         r#"
         INSERT INTO knowledge_bases 
-        (id, name, description, embedding_provider, embedding_model, embedding_dim, 
-         chunk_size, chunk_overlap, created_at, updated_at, document_count)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)
+        (id, name, description, embedding_api_config_id, chunk_size, chunk_overlap, created_at, updated_at, document_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
         "#,
         [
             &id,
             &request.name,
             &request.description,
-            &request.embedding_provider,
-            &request.embedding_model,
-            &embedding_dim.to_string(),
+            &request.embedding_api_config_id,
             &chunk_size.to_string(),
             &chunk_overlap.to_string(),
             &now.to_string(),
@@ -65,9 +61,7 @@ pub async fn create_knowledge_base(
         id,
         name: request.name,
         description: request.description,
-        embedding_provider: request.embedding_provider,
-        embedding_model: request.embedding_model,
-        embedding_dim,
+        embedding_api_config_id: request.embedding_api_config_id,
         chunk_size,
         chunk_overlap,
         created_at: now,
@@ -86,7 +80,7 @@ pub async fn list_knowledge_bases(
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
     
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, embedding_provider, embedding_model, embedding_dim, 
+        "SELECT id, name, description, embedding_api_config_id, 
          chunk_size, chunk_overlap, created_at, updated_at, document_count 
          FROM knowledge_bases ORDER BY updated_at DESC"
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -96,14 +90,12 @@ pub async fn list_knowledge_bases(
             id: row.get(0)?,
             name: row.get(1)?,
             description: row.get(2)?,
-            embedding_provider: row.get(3)?,
-            embedding_model: row.get(4)?,
-            embedding_dim: row.get(5)?,
-            chunk_size: row.get(6)?,
-            chunk_overlap: row.get(7)?,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
-            document_count: row.get(10)?,
+            embedding_api_config_id: row.get(3)?,
+            chunk_size: row.get(4)?,
+            chunk_overlap: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            document_count: row.get(8)?,
         })
     }).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
     
@@ -144,6 +136,8 @@ pub async fn delete_knowledge_base(
 pub async fn import_document(
     kb_id: String,
     file_path: String,
+    embedding_provider: String,
+    embedding_model: String,
     api_key: String,
     db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
@@ -154,7 +148,7 @@ pub async fn import_document(
     
     // Get knowledge base config
     let kb: KnowledgeBase = conn.query_row(
-        "SELECT id, name, description, embedding_provider, embedding_model, embedding_dim, 
+        "SELECT id, name, description, embedding_api_config_id, 
          chunk_size, chunk_overlap, created_at, updated_at, document_count 
          FROM knowledge_bases WHERE id = ?1",
         [&kb_id],
@@ -163,14 +157,12 @@ pub async fn import_document(
                 id: row.get(0)?,
                 name: row.get(1)?,
                 description: row.get(2)?,
-                embedding_provider: row.get(3)?,
-                embedding_model: row.get(4)?,
-                embedding_dim: row.get(5)?,
-                chunk_size: row.get(6)?,
-                chunk_overlap: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                document_count: row.get(10)?,
+                embedding_api_config_id: row.get(3)?,
+                chunk_size: row.get(4)?,
+                chunk_overlap: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                document_count: row.get(8)?,
             })
         }
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -272,12 +264,12 @@ pub async fn import_document(
         all_chunk_ids.push(chunk_id);
     }
     
-    // Generate embeddings for all chunks
+    // Generate embeddings for all chunks using provided embedding config
     let embeddings = generate_embeddings(
         chunks.clone(),
-        &kb.embedding_provider,
+        &embedding_provider,
         &api_key,
-        &kb.embedding_model,
+        &embedding_model,
     ).await?;
     
     // Prepare vectors for insertion
@@ -410,11 +402,13 @@ pub async fn delete_document(
 #[tauri::command]
 pub async fn search_knowledge_base(
     request: RetrievalRequest,
+    embedding_provider: String,
+    embedding_model: String,
     api_key: String,
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
     let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
-    retriever.retrieve(request, &api_key).await
+    retriever.retrieve(request, &embedding_provider, &embedding_model, &api_key).await
 }
 
 /// Get available embedding models

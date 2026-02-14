@@ -21,17 +21,19 @@ impl Retriever {
     pub async fn retrieve(
         &self,
         request: RetrievalRequest,
+        embedding_provider: &str,
+        embedding_model: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
         match request.retrieval_mode {
             RetrievalMode::Vector => {
-                self.vector_search(&request, api_key).await
+                self.vector_search(&request, embedding_provider, embedding_model, api_key).await
             }
             RetrievalMode::Keyword => {
                 self.keyword_search(&request).await
             }
             RetrievalMode::Hybrid => {
-                self.hybrid_search(&request, api_key).await
+                self.hybrid_search(&request, embedding_provider, embedding_model, api_key).await
             }
         }
     }
@@ -40,17 +42,16 @@ impl Retriever {
     async fn vector_search(
         &self,
         request: &RetrievalRequest,
+        embedding_provider: &str,
+        embedding_model: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
-        // Get knowledge base config from SQLite
-        let kb = self.get_knowledge_base(&request.kb_id).await?;
-        
-        // Generate query embedding using the KB's configured provider/model
+        // Generate query embedding using provided embedding config
         let query_vector = generate_single_embedding(
             &request.query, 
-            &kb.embedding_provider, 
+            embedding_provider, 
             api_key, 
-            &kb.embedding_model
+            embedding_model
         ).await?;
         
         // Search vector store
@@ -105,6 +106,8 @@ impl Retriever {
     async fn hybrid_search(
         &self,
         request: &RetrievalRequest,
+        embedding_provider: &str,
+        embedding_model: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
         // Get results from both methods with larger top_k for better fusion
@@ -114,7 +117,7 @@ impl Retriever {
         let mut keyword_request = request.clone();
         keyword_request.top_k = request.top_k * 2;
         
-        let vector_result = self.vector_search(&vector_request, api_key).await?;
+        let vector_result = self.vector_search(&vector_request, embedding_provider, embedding_model, api_key).await?;
         let keyword_result = self.keyword_search(&keyword_request).await?;
         
         // Merge and rerank using RRF
@@ -147,7 +150,7 @@ impl Retriever {
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
             
             conn.query_row(
-                "SELECT id, name, description, embedding_provider, embedding_model, embedding_dim, 
+                "SELECT id, name, description, embedding_api_config_id, 
                  chunk_size, chunk_overlap, created_at, updated_at, document_count 
                  FROM knowledge_bases WHERE id = ?1",
                 [&kb_id],
@@ -156,14 +159,12 @@ impl Retriever {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         description: row.get(2)?,
-                        embedding_provider: row.get(3)?,
-                        embedding_model: row.get(4)?,
-                        embedding_dim: row.get(5)?,
-                        chunk_size: row.get(6)?,
-                        chunk_overlap: row.get(7)?,
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                        document_count: row.get(10)?,
+                        embedding_api_config_id: row.get(3)?,
+                        chunk_size: row.get(4)?,
+                        chunk_overlap: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        document_count: row.get(8)?,
                     })
                 }
             ).map_err(|e| KnowledgeBaseError::NotFound(format!("Knowledge base not found: {}", e)))

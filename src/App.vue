@@ -3,16 +3,16 @@
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, computed } from "vue";
 import { darkTheme, type GlobalTheme, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider } from "naive-ui";
 import { useSettingsStore } from "@/stores/settings";
 import Layout from "@/components/Layout.vue";
 
 const settings = useSettingsStore();
 
-const getTheme = (): GlobalTheme | null => {
+const currentTheme = computed<GlobalTheme | null>(() => {
   return settings.darkMode ? darkTheme : null;
-};
+});
 
 onMounted(async () => {
   settings.initTheme();
@@ -22,7 +22,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider :theme="getTheme()" class="full-height">
+  <n-config-provider :theme="currentTheme" class="full-height">
     <n-dialog-provider>
       <n-message-provider>
         <n-notification-provider>
@@ -73,6 +73,6 @@ html, body, #app {
 
 /* Selection color */
 ::selection {
-  background: rgba(24, 160, 88, 0.3);
+  background: rgba(0, 0, 0, 0.2);
 }
 </style>

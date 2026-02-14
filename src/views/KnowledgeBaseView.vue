@@ -3,7 +3,7 @@
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import {
   NLayout,
   NLayoutSider,
@@ -60,18 +60,21 @@ const activeTab = ref("documents"); // documents, settings
 const createForm = ref({
   name: "",
   description: "",
-  embedding_provider: "openai",
-  embedding_model: "text-embedding-3-small",
+  embeddingApiConfigId: "", // 选择 Embedding API 配置
   chunk_size: 1000,
   chunk_overlap: 200,
 });
 
-const embeddingOptions = [
-  { label: "OpenAI text-embedding-3-small", value: "text-embedding-3-small", provider: "openai", dim: 1536 },
-  { label: "OpenAI text-embedding-3-large", value: "text-embedding-3-large", provider: "openai", dim: 3072 },
-  { label: "智谱 embedding-2", value: "embedding-2", provider: "zhipu", dim: 1024 },
-  { label: "硅基流动 bge-large-zh", value: "BAAI/bge-large-zh-v1.5", provider: "siliconflow", dim: 1024 },
-];
+// Embedding API 配置选项
+const embeddingApiConfigOptions = computed(() => {
+  return [
+    { label: "请选择 Embedding API 配置", value: "" },
+    ...settingsStore.embeddingApiConfigs.map(config => ({
+      label: `${config.name} (${config.model})`,
+      value: config.id,
+    }))
+  ];
+});
 
 // Retrieval mode options
 const retrievalModeOptions = [
@@ -90,15 +93,17 @@ const handleCreate = async () => {
     message.error("请输入知识库名称");
     return;
   }
+  if (!createForm.value.embeddingApiConfigId) {
+    message.error("请选择 Embedding API 配置");
+    return;
+  }
 
   creating.value = true;
-  const selectedModel = embeddingOptions.find(m => m.value === createForm.value.embedding_model);
   
   const result = await kbStore.createKnowledgeBase({
     name: createForm.value.name,
     description: createForm.value.description,
-    embedding_provider: selectedModel?.provider || "openai",
-    embedding_model: createForm.value.embedding_model,
+    embedding_api_config_id: createForm.value.embeddingApiConfigId,
     chunk_size: createForm.value.chunk_size,
     chunk_overlap: createForm.value.chunk_overlap,
   });
@@ -112,8 +117,7 @@ const handleCreate = async () => {
     createForm.value = {
       name: "",
       description: "",
-      embedding_provider: "openai",
-      embedding_model: "text-embedding-3-small",
+      embeddingApiConfigId: "",
       chunk_size: 1000,
       chunk_overlap: 200,
     };
@@ -148,16 +152,21 @@ const handleImport = async () => {
   if (!kbStore.currentKb) return;
   
   // Get API config for embedding provider
-  const config = settingsStore.apiConfigs.find(
-    c => c.provider === kbStore.currentKb!.embedding_provider
+  const embeddingConfig = settingsStore.embeddingApiConfigs.find(
+    c => c.id === kbStore.currentKb!.embedding_api_config_id
   );
-  if (!config?.apiKey) {
-    message.error(`请先在设置中创建 ${kbStore.currentKb.embedding_provider} 的 API 配置并填写 API Key`);
+  if (!embeddingConfig?.apiKey) {
+    message.error("请先在设置中创建 Embedding API 配置并填写 API Key");
     return;
   }
 
   importing.value = true;
-  const success = await kbStore.selectAndImportDocument(kbStore.currentKb.id, config.apiKey);
+  const success = await kbStore.selectAndImportDocument(
+    kbStore.currentKb.id,
+    embeddingConfig.provider,
+    embeddingConfig.model,
+    embeddingConfig.apiKey
+  );
   importing.value = false;
   
   if (success) {
@@ -192,6 +201,12 @@ const formatSize = (bytes: number) => {
 // Format date
 const formatDate = (timestamp: number) => {
   return kbStore.formatDate(timestamp);
+};
+
+// Get embedding config name by id
+const getEmbeddingConfigName = (configId: string): string => {
+  const config = settingsStore.embeddingApiConfigs.find(c => c.id === configId);
+  return config ? `${config.name} (${config.model})` : "未知配置";
 };
 
 // Get status tag
@@ -262,7 +277,7 @@ const getStatusTag = (status: Document["status"]) => {
                         {{ kb.document_count }} 个文档
                       </n-tag>
                       <n-tag size="small" type="default">
-                        {{ kb.embedding_model }}
+                        {{ getEmbeddingConfigName(kb.embedding_api_config_id) }}
                       </n-tag>
                     </n-space>
                   </n-space>
@@ -460,11 +475,8 @@ const getStatusTag = (status: Document["status"]) => {
             <n-descriptions-item label="名称">
               {{ kbStore.currentKb.name }}
             </n-descriptions-item>
-            <n-descriptions-item label="Embedding 模型">
-              {{ kbStore.currentKb.embedding_model }}
-            </n-descriptions-item>
-            <n-descriptions-item label="向量维度">
-              {{ kbStore.currentKb.embedding_dim }}
+            <n-descriptions-item label="Embedding API">
+              {{ getEmbeddingConfigName(kbStore.currentKb.embedding_api_config_id) }}
             </n-descriptions-item>
             <n-descriptions-item label="文档数量">
               {{ kbStore.currentKb.document_count }}
@@ -519,12 +531,17 @@ const getStatusTag = (status: Document["status"]) => {
         />
       </n-form-item>
 
-      <n-form-item label="Embedding" required>
+      <n-form-item label="Embedding API" required>
         <n-select
-          v-model:value="createForm.embedding_model"
-          :options="embeddingOptions.map(o => ({ label: o.label, value: o.value }))"
-          placeholder="选择 Embedding 模型"
+          v-model:value="createForm.embeddingApiConfigId"
+          :options="embeddingApiConfigOptions"
+          placeholder="选择 Embedding API 配置"
         />
+        <template #feedback>
+          <n-text depth="3" style="font-size: 12px;">
+            在「设置」中添加 Embedding API 配置，支持任意 OpenAI 兼容的嵌入模型
+          </n-text>
+        </template>
       </n-form-item>
 
       <n-form-item label="分块大小">
@@ -691,5 +708,14 @@ const getStatusTag = (status: Document["status"]) => {
   display: flex;
   align-items: center;
   justify-content: center;
+  height: 100%;
+  padding-top: 160px;
+}
+
+/* Mobile responsive adjustments */
+@media (max-width: 768px) {
+  .kb-empty-content {
+    padding-top: 0;
+  }
 }
 </style>

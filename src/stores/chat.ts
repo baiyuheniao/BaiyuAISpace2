@@ -209,12 +209,14 @@ export const useChatStore = defineStore("chat", () => {
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
       const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
       if (kb) {
-        const kbConfig = settings.apiConfigs.find(c => c.provider === kb.embedding_provider);
-        if (kbConfig?.apiKey) {
+        const embeddingConfig = settings.embeddingApiConfigs.find(c => c.id === kb.embedding_api_config_id);
+        if (embeddingConfig?.apiKey) {
           const result = await kbStore.searchKnowledgeBase(
             selectedKnowledgeBaseId.value,
             content,
-            kbConfig.apiKey
+            embeddingConfig.provider,
+            embeddingConfig.model,
+            embeddingConfig.apiKey
           );
           
           if (result && result.chunks.length > 0) {

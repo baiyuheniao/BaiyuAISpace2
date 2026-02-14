@@ -81,8 +81,19 @@ export interface ApiConfig {
   createdAt: number;
 }
 
+// Embedding API Configuration interface - same structure as ApiConfig
+export interface EmbeddingApiConfig {
+  id: string;
+  name: string;
+  provider: string;
+  baseUrl: string;
+  model: string; // User manually inputs embedding model name
+  apiKey: string;
+  createdAt: number;
+}
+
 // Storage version - increment when schema changes
-const STORAGE_VERSION = "4";
+const STORAGE_VERSION = "6";
 const STORAGE_VERSION_KEY = "baiyu-aispace-version";
 
 // Check and clear old storage if version mismatch
@@ -124,10 +135,28 @@ export const useSettingsStore = defineStore(
     const apiConfigs = ref<ApiConfig[]>([]);
     const activeConfigId = ref<string | null>(null);
 
+    // Embedding API Configurations - separate from LLM configs
+    const embeddingApiConfigs = ref<EmbeddingApiConfig[]>([]);
+    const activeEmbeddingApiConfigId = ref<string | null>(null);
+
     // Get active config
     const activeConfig = computed(() => {
       if (!activeConfigId.value) return null;
       return apiConfigs.value.find((c) => c.id === activeConfigId.value) || null;
+    });
+
+    // Get active embedding API config
+    const activeEmbeddingApiConfig = computed(() => {
+      if (!activeEmbeddingApiConfigId.value) return null;
+      return embeddingApiConfigs.value.find((c) => c.id === activeEmbeddingApiConfigId.value) || null;
+    });
+
+    // Get embedding API config options for dropdown
+    const embeddingApiConfigOptions = computed(() => {
+      return embeddingApiConfigs.value.map((config) => ({
+        label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider} - ${config.model})`,
+        value: config.id,
+      }));
     });
 
     // Get preset provider options for dropdown
@@ -210,6 +239,94 @@ export const useSettingsStore = defineStore(
       activeConfigId.value = configId;
     };
 
+    // Create a new Embedding API config
+    const createEmbeddingApiConfig = (
+      name: string,
+      provider: string,
+      model: string,
+      apiKey: string,
+      customBaseUrl?: string
+    ): EmbeddingApiConfig => {
+      const preset = PRESET_PROVIDERS[provider];
+      const config: EmbeddingApiConfig = {
+        id: crypto.randomUUID(),
+        name,
+        provider,
+        baseUrl: customBaseUrl || preset?.baseUrl || "",
+        model,
+        apiKey,
+        createdAt: Date.now(),
+      };
+      embeddingApiConfigs.value.push(config);
+      
+      // Save API key to secure storage with prefix
+      saveApiKeyToSecureStorage(`emb_${config.id}`, apiKey);
+      
+      // If first config, set as active
+      if (embeddingApiConfigs.value.length === 1) {
+        activeEmbeddingApiConfigId.value = config.id;
+      }
+      
+      return config;
+    };
+
+    // Update an existing Embedding API config
+    const updateEmbeddingApiConfig = (configId: string, updates: Partial<EmbeddingApiConfig>) => {
+      const idx = embeddingApiConfigs.value.findIndex((c) => c.id === configId);
+      if (idx === -1) return;
+
+      const config = embeddingApiConfigs.value[idx];
+      
+      // If API key is updated, save to secure storage
+      if (updates.apiKey !== undefined && updates.apiKey !== config.apiKey) {
+        saveApiKeyToSecureStorage(`emb_${configId}`, updates.apiKey);
+      }
+      
+      embeddingApiConfigs.value[idx] = { ...config, ...updates };
+    };
+
+    // Delete an Embedding API config
+    const deleteEmbeddingApiConfig = (configId: string) => {
+      embeddingApiConfigs.value = embeddingApiConfigs.value.filter((c) => c.id !== configId);
+      
+      // If active config is deleted, switch to another
+      if (activeEmbeddingApiConfigId.value === configId) {
+        activeEmbeddingApiConfigId.value = embeddingApiConfigs.value.length > 0 ? embeddingApiConfigs.value[0].id : null;
+      }
+      
+      // Delete from secure storage
+      deleteApiKeyFromSecureStorage(`emb_${configId}`);
+    };
+
+    // Set active embedding API config
+    const setActiveEmbeddingApiConfig = (configId: string | null) => {
+      activeEmbeddingApiConfigId.value = configId;
+    };
+
+    // Load embedding API key from secure storage
+    const loadEmbeddingApiKeyForConfig = async (configId: string): Promise<string | null> => {
+      try {
+        const apiKey = await invoke<string | null>("get_api_key", { provider: `emb_${configId}` });
+        if (apiKey) {
+          const idx = embeddingApiConfigs.value.findIndex((c) => c.id === configId);
+          if (idx !== -1) {
+            embeddingApiConfigs.value[idx].apiKey = apiKey;
+          }
+        }
+        return apiKey;
+      } catch (error) {
+        console.error("Failed to load embedding API key:", error);
+        return null;
+      }
+    };
+
+    // Load all embedding API keys from secure storage
+    const loadAllEmbeddingApiKeys = async () => {
+      for (const config of embeddingApiConfigs.value) {
+        await loadEmbeddingApiKeyForConfig(config.id);
+      }
+    };
+
     // Load API key from secure storage for a config
     const loadApiKeyForConfig = async (configId: string): Promise<string | null> => {
       try {
@@ -272,12 +389,23 @@ export const useSettingsStore = defineStore(
       setActiveConfig,
       loadAllApiKeys,
       getDefaultBaseUrl,
+      // Embedding API configs
+      embeddingApiConfigs,
+      activeEmbeddingApiConfigId,
+      activeEmbeddingApiConfig,
+      embeddingApiConfigOptions,
+      createEmbeddingApiConfig,
+      updateEmbeddingApiConfig,
+      deleteEmbeddingApiConfig,
+      setActiveEmbeddingApiConfig,
+      loadEmbeddingApiKeyForConfig,
+      loadAllEmbeddingApiKeys,
     };
   },
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "apiConfigs", "activeConfigId"],
+      paths: ["darkMode", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId"],
     },
   }
 );

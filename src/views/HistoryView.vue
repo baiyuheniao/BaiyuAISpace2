@@ -184,7 +184,7 @@ onMounted(() => {
 }
 
 .history-item:hover {
-  border-color: rgba(24, 160, 88, 0.3);
+  border-color: rgba(0, 0, 0, 0.2);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   transform: translateX(4px);
 }

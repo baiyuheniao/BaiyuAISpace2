@@ -152,13 +152,13 @@ const handleCopy = async () => {
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #18a058 0%, #36ad6a 100%);
-  box-shadow: 0 4px 12px rgba(24, 160, 88, 0.3);
+  background: #000000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .ai-avatar {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+  background: #333333;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
 .message-content {
@@ -203,7 +203,7 @@ const handleCopy = async () => {
 }
 
 .message-body.user-body {
-  background: linear-gradient(135deg, rgba(24, 160, 88, 0.1) 0%, rgba(54, 173, 106, 0.1) 100%);
+  background: rgba(0, 0, 0, 0.05);
   border-bottom-left-radius: 18px;
   border-bottom-right-radius: 4px;
 }
@@ -260,8 +260,8 @@ const handleCopy = async () => {
 .markdown-content :deep(blockquote) {
   margin: 12px 0;
   padding: 12px 16px;
-  border-left: 4px solid #18a058;
-  background: rgba(24, 160, 88, 0.08);
+  border-left: 4px solid #000000;
+  background: rgba(0, 0, 0, 0.04);
   border-radius: 0 8px 8px 0;
 }
 

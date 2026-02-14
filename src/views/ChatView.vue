@@ -141,10 +141,7 @@ onMounted(async () => {
   font-size: 28px;
   font-weight: 600;
   margin-bottom: 12px;
-  background: linear-gradient(135deg, var(--n-text-color-1) 0%, var(--n-text-color-3) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--n-text-color-1);
 }
 
 .empty-desc {

@@ -12,9 +12,7 @@ export interface KnowledgeBase {
   id: string;
   name: string;
   description: string;
-  embedding_provider: string;
-  embedding_model: string;
-  embedding_dim: number;
+  embedding_api_config_id: string; // Reference to EmbeddingApiConfig in settings
   chunk_size: number;
   chunk_overlap: number;
   created_at: number;
@@ -64,8 +62,7 @@ export type RetrievalMode = "vector" | "keyword" | "hybrid";
 export interface CreateKnowledgeBaseRequest {
   name: string;
   description: string;
-  embedding_provider: string;
-  embedding_model: string;
+  embedding_api_config_id: string;
   chunk_size?: number;
   chunk_overlap?: number;
 }
@@ -160,12 +157,16 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
   const importDocument = async (
     kbId: string,
     filePath: string,
+    embeddingProvider: string,
+    embeddingModel: string,
     apiKey: string
   ): Promise<boolean> => {
     try {
       await invoke("import_document", {
         kbId,
         filePath,
+        embeddingProvider,
+        embeddingModel,
         apiKey,
       });
       await loadDocuments(kbId);
@@ -179,6 +180,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
 
   const selectAndImportDocument = async (
     kbId: string,
+    embeddingProvider: string,
+    embeddingModel: string,
     apiKey: string
   ): Promise<boolean> => {
     try {
@@ -214,7 +217,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
       });
 
       if (selected && typeof selected === "string") {
-        return await importDocument(kbId, selected, apiKey);
+        return await importDocument(kbId, selected, embeddingProvider, embeddingModel, apiKey);
       }
       return false;
     } catch (error) {
@@ -238,6 +241,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
   const searchKnowledgeBase = async (
     kbId: string,
     query: string,
+    embeddingProvider: string,
+    embeddingModel: string,
     apiKey: string
   ): Promise<RetrievalResult | null> => {
     try {
@@ -249,6 +254,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
           retrievalMode: retrievalSettings.value.mode,
           similarityThreshold: retrievalSettings.value.similarityThreshold,
         },
+        embeddingProvider,
+        embeddingModel,
         apiKey,
       });
       return result;
