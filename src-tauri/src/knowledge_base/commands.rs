@@ -4,7 +4,7 @@
 
 use super::types::*;
 use super::document::{parse_document, calculate_file_hash, split_text, estimate_tokens};
-use super::embedding::{generate_embeddings, get_embedding_dimension};
+use super::embedding::generate_embeddings;
 use super::db::{VectorStore, init_sqlite_tables};
 use super::retrieval::Retriever;
 use tauri::State;

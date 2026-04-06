@@ -13,6 +13,7 @@ import {
   NSelect,
   NBadge,
   NTag,
+  useNotification,
 } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore, PRESET_PROVIDERS } from "@/stores/settings";
@@ -31,6 +32,7 @@ const chat = useChatStore();
 const settings = useSettingsStore();
 const kbStore = useKnowledgeBaseStore();
 const mcp = useMCPStore();
+const notification = useNotification();
 
 const inputValue = ref("");
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -101,6 +103,11 @@ const handleSend = async () => {
   if ((!content && attachedFiles.value.length === 0) || chat.isLoading) return;
 
   if (!settings.activeConfig) {
+    notification.error({
+      title: "未配置 API",
+      description: "请先前往设置创建 API 配置",
+      duration: 3000,
+    });
     return;
   }
 
@@ -108,13 +115,19 @@ const handleSend = async () => {
     await chat.createSession(settings.activeConfig.id);
   }
 
-  // Build message content with files
+  // Prepare file info
+  const fileInfo = attachedFiles.value.map(f => ({
+    name: f.name,
+    size: f.size,
+  }));
+
+  // Build message content with file mention
   let messageContent = content;
   if (attachedFiles.value.length > 0) {
-    const fileInfo = attachedFiles.value
+    const fileMention = attachedFiles.value
       .map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`)
       .join(' ');
-    messageContent = messageContent ? `${messageContent}\n${fileInfo}` : fileInfo;
+    messageContent = messageContent ? `${messageContent}\n${fileMention}` : fileMention;
   }
 
   inputValue.value = "";
@@ -123,7 +136,16 @@ const handleSend = async () => {
     inputRef.value.style.height = "60px";
   }
 
-  await chat.sendMessage(messageContent);
+  try {
+    await chat.sendMessage(messageContent, fileInfo.length > 0 ? fileInfo : undefined);
+  } catch (error) {
+    const errorInfo = chat.classifyError(error);
+    notification.error({
+      title: "发送失败",
+      description: errorInfo.message,
+      duration: 4000,
+    });
+  }
 };
 
 const handleKeydown = (e: KeyboardEvent) => {

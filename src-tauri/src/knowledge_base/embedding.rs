@@ -6,6 +6,7 @@ use super::types::*;
 use serde_json::json;
 
 /// Get embedding model configuration
+#[allow(dead_code)]
 fn get_embedding_config(provider: &str) -> (&'static str, i32) {
     match provider {
         "openai" => ("text-embedding-3-small", 1536),
@@ -159,6 +160,7 @@ pub async fn generate_single_embedding(
 }
 
 /// Get embedding dimension for a model
+#[allow(dead_code)]
 pub fn get_embedding_dimension(provider: &str, model: &str) -> i32 {
     match (provider, model) {
         ("openai", "text-embedding-3-small") => 1536,

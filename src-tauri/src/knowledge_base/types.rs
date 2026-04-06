@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum KnowledgeBaseError {
     #[error("Database error: {0}")]

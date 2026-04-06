@@ -17,6 +17,7 @@ pub enum DocumentFormat {
     Txt,
 }
 
+#[allow(dead_code)]
 impl DocumentFormat {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {

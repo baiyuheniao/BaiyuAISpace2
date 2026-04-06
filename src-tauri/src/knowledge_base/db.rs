@@ -21,6 +21,7 @@ impl VectorStore {
     }
 
     /// Create vector table for a knowledge base
+    #[allow(dead_code)]
     pub async fn create_kb_table(&self, kb_id: &str, dim: i32) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
 

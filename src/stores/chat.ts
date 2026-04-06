@@ -17,6 +17,7 @@ export interface Message {
   timestamp: number;
   streaming?: boolean;
   error?: string;
+  files?: Array<{ name: string; size: number }>;
 }
 
 export interface ChatSession {
@@ -191,7 +192,98 @@ export const useChatStore = defineStore("chat", () => {
     await setupStreamListener();
   };
 
-  const sendMessage = async (content: string) => {
+  // Classify error type for better UX
+  const classifyError = (error: unknown): { type: string; message: string } => {
+    const errorStr = String(error);
+    
+    if (errorStr.includes("API key") || errorStr.includes("Unauthorized") || errorStr.includes("401")) {
+      return { type: "auth", message: "API 密钥无效或已过期，请检查设置" };
+    } else if (errorStr.includes("network") || errorStr.includes("Failed to fetch")) {
+      return { type: "network", message: "网络连接错误，请检查网络设置" };
+    } else if (errorStr.includes("timeout")) {
+      return { type: "timeout", message: "请求超时，请重试或调整超时设置" };
+    } else if (errorStr.includes("provider") || errorStr.includes("Invalid")) {
+      return { type: "config", message: "API 配置错误，请检查服务商和模型" };
+    } else {
+      return { type: "unknown", message: `错误: ${errorStr}` };
+    }
+  };
+
+  // Execute MCP tool call
+  const executeMcpTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
+    const mcp = useMCPStore();
+    const tool = mcp.availableTools.find(t => t.name === toolName);
+    
+    if (!tool) {
+      return `错误: 工具 "${toolName}" 不存在`;
+    }
+
+    try {
+      // Call MCP command to execute tool
+      const result = await invoke<any>("call_mcp_tool", {
+        tool_name: toolName,
+        input: toolInput,
+      });
+
+      // Check for success flag in result
+      if (typeof result === 'object' && result !== null) {
+        const resultObj = result as Record<string, unknown>;
+        const anyRes = result as any;
+        
+        // Handle success/error flags
+        if ('success' in resultObj) {
+          if (anyRes.success === false && anyRes.error) {
+            return `工具执行失败: ${anyRes.error}`;
+          }
+        }
+
+        // Extract meaningful result
+        if ('result' in resultObj) {
+          return JSON.stringify(anyRes.result, null, 2);
+        }
+        
+        // If no specific result field, return the whole response
+        return JSON.stringify(anyRes, null, 2);
+      } else {
+        return String(result);
+      }
+    } catch (err) {
+      return `调用工具时出错: ${String(err)}`;
+    }
+  };
+
+  // Handle MCP tool calls in assistant response
+  const handleMcpCalls = async (assistantMessage: Message): Promise<void> => {
+    const mcp = useMCPStore();
+    if (!mcpEnabled.value || mcp.availableTools.length === 0) return;
+
+    // Simple pattern to detect tool calls in response
+    // Format: [使用工具: tool_name with input: {...}]
+    const toolCallPattern = /\[使用工具: ([\w_-]+) with input: ({[^}]+})\]/g;
+    const matches = Array.from(assistantMessage.content.matchAll(toolCallPattern));
+
+    if (matches.length === 0) return; // No tool calls detected
+
+    // Execute each tool call and collect results
+    const toolResults: string[] = [];
+    for (const match of matches) {
+      const toolName = match[1];
+      try {
+        const toolInput = JSON.parse(match[2]) as Record<string, unknown>;
+        const result = await executeMcpTool(toolName, toolInput);
+        toolResults.push(`[工具 ${toolName} 结果]: ${result}`);
+      } catch (err) {
+        toolResults.push(`[工具 ${toolName} 错误]: ${String(err)}`);
+      }
+    }
+
+    // If tools were executed, add results as assistant message continuation
+    if (toolResults.length > 0) {
+      assistantMessage.content += "\n\n" + toolResults.join("\n");
+    }
+  };
+
+  const sendMessage = async (content: string, attachedFiles?: Array<{ name: string; size: number }>) => {
     if (!currentSession.value) return;
 
     const config = settings.apiConfigs.find(c => c.id === currentSession.value!.apiConfigId);
@@ -233,6 +325,7 @@ export const useChatStore = defineStore("chat", () => {
       role: "user",
       content,
       timestamp: Date.now(),
+      files: attachedFiles && attachedFiles.length > 0 ? attachedFiles : undefined,
     };
 
     currentSession.value.messages.push(userMessage);
@@ -305,8 +398,15 @@ export const useChatStore = defineStore("chat", () => {
           provider: config.provider,
           model: config.model,
           apiKey: config.apiKey,
+          enableMcp: mcpEnabled.value,
         },
       });
+
+      // Handle MCP tool calls after assistant response is complete
+      const assistantMsgRef = currentSession.value.messages[currentSession.value.messages.length - 1];
+      if (assistantMsgRef.role === "assistant") {
+        await handleMcpCalls(assistantMsgRef);
+      }
 
       if (currentSession.value.messages.length === 2) {
         currentSession.value.title = content.slice(0, 30) + (content.length > 30 ? "..." : "");
@@ -314,12 +414,14 @@ export const useChatStore = defineStore("chat", () => {
         await loadSessionsFromDb();
       }
     } catch (error) {
+      const errorInfo = classifyError(error);
       const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
       if (lastMessage.role === "assistant") {
-        lastMessage.error = String(error);
+        lastMessage.error = errorInfo.message;
         lastMessage.streaming = false;
         await saveMessageToDb(lastMessage);
       }
+      console.error(`[${errorInfo.type}] ${error}`);
       isLoading.value = false;
       currentStreamContent.value = "";
     }
@@ -423,5 +525,7 @@ ${toolDefs}
     loadSessionsFromDb,
     toggleRag,
     selectKnowledgeBaseForRag,
+    classifyError,
+    executeMcpTool,
   };
 });

@@ -4,6 +4,198 @@
 
 ---
 
+## 📅 2026-02-15 MCP 工具执行完整实现与功能完善
+
+### ✨ 核心功能增强
+
+#### 完整 MCP 工具调用框架
+实现了 JSON-RPC 2.0 标准的 MCP 工具执行流程，支持多种服务器类型：
+
+**支持的 MCP 服务器类型**：
+1. **Stdio**：通过进程的标准输入/输出进行 JSON-RPC 通信
+   - 适用于：Node.js、Python、Go 等任何可执行的 MCP 服务
+   - 特点：同步通信，本地进程调用，无网络开销
+   
+2. **HTTP/SSE**：通过 HTTP POST 请求进行 JSON-RPC 通信
+   - 适用于：RESTful API 服务器、云端 MCP 服务
+   - 特点：远程通信，支持 API 密钥认证，超时控制
+   
+3. **Demo/Test**：内置演示工具用于测试和验证
+   - `demo_echo`：回显输入参数
+   - `demo_calculator`：简单计算器（加减乘除）
+   - `test_connection`：连接测试
+
+**工作流程**：
+```
+LLM 响应包含工具调用 → 前端检测工具调用意图 → 解析工具名和参数
+  ↓
+调用 Tauri 的 call_mcp_tool 命令 → Rust 后端根据服务类型分发调用
+  ↓
+根据服务类型执行：
+  - Stdio: 启动进程 → 发送 JSON-RPC 请求 → 读取响应 → 解析结果
+  - HTTP: 构建 POST 请求 → 发送到服务器 → 解析 JSON-RPC 响应 → 提取结果
+  ↓
+将结果返回给前端 → LLM 继续推理 → 构建最终响应
+```
+
+#### 错误处理与分类
+新增智能错误分类系统，为用户提供友好的错误提示：
+
+| 错误类型 | 特征 | 用户提示 |
+|---------|------|---------|
+| **auth** | API 密钥、Unauthorized、401 | "API 密钥无效或已过期，请检查设置" |
+| **network** | 网络连接失败、DNS 解析失败 | "网络连接错误，请检查网络设置" |
+| **timeout** | 请求超时 | "请求超时，请重试或调整超时设置" |
+| **config** | 配置错误、不支持的提供商 | "API 配置错误，请检查服务商和模型" |
+| **unknown** | 其他错误 | 显示原始错误消息 |
+
+#### 文件上传与传递
+增强了文件处理功能：
+
+- 在消息数据结构中添加了 `files?: Array<{ name: string; size: number }>` 字段
+- `sendMessage()` 方法现在接受可选的文件信息参数
+- 前端在发送消息时自动收集并传递已附加的文件元数据
+- 文件信息保存在消息历史中，便于后续查询
+
+### 🔧 技术细节
+
+#### 后端实现 (Rust)
+
+**文件**：`src-tauri/src/commands/mcp.rs`
+
+**新增 JSON-RPC 2.0 支持**：
+```rust
+struct ToolCallRequest {
+    jsonrpc: String,      // "2.0"
+    method: String,       // "tools/call"
+    params: ToolCallParams,
+    id: String,           // UUID 用于请求标识
+}
+
+struct ToolCallParams {
+    name: String,         // 工具名称
+    arguments: Value,     // 工具输入参数（JSON）
+}
+```
+
+**Stdio 实现亮点**：
+- 启动 MCP 服务进程，设置环境变量和参数
+- 通过 stdin 发送 JSON-RPC 请求
+- 通过 stdout 读取响应（支持行读取）
+- 内置 30 秒超时保护
+- 自动处理进程生命周期
+
+**HTTP 实现亮点**：
+- 支持自定义服务器地址和端口
+- 内置 JWT/API Key 认证（Authorization: Bearer）
+- JSON Content-Type 自动设置
+- 内置 60 秒超时保护
+- HTTP 状态码验证
+
+**Demo 工具集合**：
+- 提供现成的演示工具用于快速测试
+- 无需配置真实 MCP 服务器即可验证流程
+
+#### 前端实现 (Vue 3 + TypeScript)
+
+**文件**：
+- `src/stores/chat.ts` - 核心逻辑
+- `src/components/ChatInput.vue` - 用户界面与通知
+
+**改进点**：
+1. **错误通知**：引入 Naive UI 的 `useNotification` 组件
+2. **智能错误分类**：`classifyError()` 函数自动识别错误类型
+3. **MCP 工具调用检测**：`handleMcpCalls()` 使用正则表达式识别 LLM 的工具调用意图
+4. **异步执行**：`executeMcpTool()` 异步调用并等待结果
+5. **结果解析**：灵活的结果提取逻辑支持多种响应格式
+
+**工具调用检测模式**：
+```javascript
+// LLM 返回格式示例：
+// "我来帮你计算：[使用工具: demo_calculator with input: {\"a\": 10, \"b\": 5, \"operation\": \"add\"}]"
+// 正则匹配: /\[使用工具: ([\w_-]+) with input: ({[^}]+})\]/g
+```
+
+### 📊 文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `src-tauri/src/commands/mcp.rs` | 完整 MCP 工具调用实现（Stdio + HTTP）、JSON-RPC 2.0 支持、Demo 工具集 |
+| `src/stores/chat.ts` | 添加 `classifyError()` 和 `executeMcpTool()` 函数、改进消息数据结构支持文件 |
+| `src/components/ChatInput.vue` | 导入通知组件、改进错误处理和用户反馈 |
+
+### 🧪 测试指南
+
+**1. 测试 Demo 工具（无需配置）**：
+```javascript
+// 在对话中，LLM 自动调用：
+// [使用工具: demo_echo with input: {"message": "hello"}]
+// [使用工具: demo_calculator with input: {"a": 10, "b": 5, "operation": "add"}]
+```
+
+**2. 配置真实 Stdio MCP 服务器**：
+
+创建简单的 MCP 服务文件 (`mcp-server.js`)：
+```javascript
+const readline = require('readline');
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
+rl.on('line', (line) => {
+  try {
+    const request = JSON.parse(line);
+    const response = {
+      jsonrpc: '2.0',
+      id: request.id,
+      result: {
+        status: 'success',
+        tool: request.params.name,
+        input: request.params.arguments
+      }
+    };
+    console.log(JSON.stringify(response));
+  } catch (err) {
+    console.log(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'error',
+      error: { code: -32700, message: 'Parse error', data: err.message }
+    }));
+  }
+});
+```
+
+在设置中配置：
+- 服务器类型：Stdio
+- 命令：`node`
+- 参数：`["./mcp-server.js"]`
+
+**3. 配置 HTTP MCP 服务**：
+
+设置中配置：
+- 服务器类型：HTTP
+- URL：`http://localhost:3000/mcp`
+- API Key：（可选）
+
+### ⚡ 性能特性
+
+✅ **超时保护**：Stdio 30s、HTTP 60s，避免请求永远挂起  
+✅ **异步执行**：完全异步设计，不阻塞 UI 线程  
+✅ **错误恢复**：失败的工具调用不中断对话流程  
+✅ **结果缓存**：工具执行结果与消息一起保存，便于历史回顾  
+✅ **灵活解析**：支持多种响应格式和 JSON-RPC 变体
+
+### 🚀 后续步骤
+
+1. **数据库集成**：将 MCP 服务器配置从内存保存到数据库
+2. **工具列表缓存**：在服务器启动时预加载工具列表
+3. **并发调用**：支持多个工具的同时调用和高效处理
+4. **行为追踪**：记录工具调用历史，便于调试和监控
+5. **生产化部署**：添加日志级别、监控指标等生产级别的特性
+
+---
+
 ## 📅 2026-02-14 项目方向调整：Android 子项目与本地性能功能裁剪
 
 ### 🔀 决策摘要

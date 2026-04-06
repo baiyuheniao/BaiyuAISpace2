@@ -141,6 +141,7 @@ impl Retriever {
     }
 
     /// Get knowledge base configuration from database
+    #[allow(dead_code)]
     async fn get_knowledge_base(&self, kb_id: &str) -> Result<KnowledgeBase, KnowledgeBaseError> {
         let db_path = self.db_path.clone();
         let kb_id = kb_id.to_string();
@@ -386,6 +387,7 @@ impl Retriever {
 }
 
 /// Build context for LLM from retrieved chunks
+#[allow(dead_code)]
 pub fn build_context(chunks: &[RetrievedChunk], query: &str) -> String {
     if chunks.is_empty() {
         return query.to_string();
