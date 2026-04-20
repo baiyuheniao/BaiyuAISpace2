@@ -214,3 +214,44 @@ onMounted(async () => {
   font-weight: 600;
   margin-bottom: 12px;
   color: var(--n-text-color-1);
+}
+
+/* 空状态描述 */
+.empty-desc {
+  font-size: 15px;
+  color: var(--n-text-color-3);
+  margin-bottom: 32px;
+}
+
+/* 功能提示容器 */
+.empty-tips {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
+
+/* 提示项样式 */
+.tip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--n-color-embed);
+  border-radius: 20px;
+  font-size: 13px;
+  color: var(--n-text-color-2);
+  transition: all 0.2s;
+}
+
+.tip-item:hover {
+  background: var(--n-hover-color);
+  transform: translateY(-1px);
+}
+
+/* 输入区域样式 */
+.input-area {
+  background: var(--n-color);
+  border-top: 1px solid var(--n-border-color);
+  padding: 0;
+}
+</style>
