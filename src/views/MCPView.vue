@@ -2,6 +2,26 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
+<!--
+  MCPView.vue - MCP (Model Context Protocol) 服务管理视图组件
+  
+  功能说明:
+  - MCP 服务器列表管理 (添加、删除、启用/禁用)
+  - MCP 服务器配置 (stdio / SSE / HTTP 三种连接类型)
+  - 服务器连接测试
+  - 可用工具列表展示
+  
+  什么是 MCP:
+  - MCP (Model Context Protocol) 是一个开放协议
+  - 允许 AI 模型与外部工具和服务进行标准化交互
+  - 通过 MCP，AI 可以调用各种外部工具扩展能力
+
+  主要组成部分:
+  - 服务器列表卡片
+  - 可用工具卡片
+  - 添加服务弹窗 (包含多步骤表单)
+-->
+
 <script setup lang="ts">
 import { ref } from "vue";
 import {
@@ -38,42 +58,69 @@ import {
 } from "@vicons/ionicons5";
 import { useMCPStore } from "@/stores/mcp";
 
+// ============ 状态管理 ============
+
+// MCP Store - 管理 MCP 服务器和工具
 const mcp = useMCPStore();
+
+// 消息提示 - 用于操作反馈
 const message = useMessage();
 
-// Modal state
+// ============ 弹窗状态 ============
+
+/** 添加服务弹窗显示状态 */
 const showCreateModal = ref(false);
+
+/** 测试连接中状态 */
 const testingConnection = ref(false);
+
+/** 测试结果: true=成功, false=失败, null=未测试 */
 const testResult = ref<boolean | null>(null);
 
-// Form state
+// ============ 表单数据 ============
+
+/**
+ * 添加服务表单数据
+ */
 const formData = ref({
-  name: "",
-  description: "",
-  server_type: "stdio" as "stdio" | "sse" | "http",
-  command: "",
-  args: "",
-  port: "",
-  url: "",
-  api_key: "",
-  enabled: true,
+  name: "",                        // 服务器名称
+  description: "",                 // 服务器描述
+  server_type: "stdio" as "stdio" | "sse" | "http",  // 服务器类型
+  command: "",                     // stdio 类型: 启动命令
+  args: "",                        // stdio 类型: 命令参数 (每行一个)
+  port: "",                        // HTTP/SSE 类型: 端口
+  url: "",                         // HTTP/SSE 类型: 服务 URL
+  api_key: "",                     // HTTP/SSE 类型: API Key
+  enabled: true,                   // 是否启用
 });
 
-// Get server type icon
+// ============ 辅助函数 ============
+
+/**
+ * 获取服务器类型对应的图标组件
+ * 
+ * @param type - 服务器类型 ("stdio" | "sse" | "http")
+ * @returns 对应的图标组件
+ */
 const getServerIcon = (type: string) => {
   switch (type) {
     case "stdio":
-      return Terminal;
+      return Terminal;     // 终端图标
     case "sse":
-      return Code;
+      return Code;        // 代码图标
     case "http":
-      return Globe;
+      return Globe;        // 网络图标
     default:
-      return Cube;
+      return Cube;        // 默认立方体图标
   }
 };
 
-// Get server type label
+/**
+ * 获取服务器类型的中文标签
+ * 
+ * @param type - 服务器类型
+ * @returns 中文标签
+ */
 const getServerTypeLabel = (type: string) => {
   switch (type) {
     case "stdio":
@@ -87,7 +134,22 @@ const getServerTypeLabel = (type: string) => {
   }
 };
 
-// Reset form
+/**
+ * 服务器类型选项列表
+ * 用于下拉选择
+ */
+const serverTypeOptions = [
+  { label: "标准输入输出 (stdio)", value: "stdio" },
+  { label: "SSE 流", value: "sse" },
+  { label: "HTTP API", value: "http" },
+];
+
+// ============ 表单操作方法 ============
+
+/**
+ * 重置表单数据
+ * 清空所有输入并恢复默认值
+ */
 const resetForm = () => {
   formData.value = {
     name: "",
@@ -102,20 +164,41 @@ const resetForm = () => {
   };
 };
 
-// Open create modal
+/**
+ * 打开添加服务弹窗
+ * 先重置表单再显示弹窗
+ */
 const openCreateModal = () => {
   resetForm();
   showCreateModal.value = true;
 };
 
-// Test connection
+/**
+ * 处理服务器类型变更
+ * 切换类型时重置测试结果
+ * 
+ * @param type - 新的服务器类型
+ */
+const handleServerTypeChange = (type: string) => {
+  formData.value.server_type = type as "stdio" | "sse" | "http";
+  testResult.value = null;
+};
+
+// ============ 业务方法 ============
+
+/**
+ * 测试服务器连接
+ * 验证配置能否成功连接到 MCP 服务器
+ */
 const handleTestConnection = async () => {
+  // stdio 类型需要命令
   if (formData.value.server_type === "stdio") {
     if (!formData.value.command.trim()) {
       message.error("请输入命令");
       return;
     }
   } else {
+    // HTTP/SSE 类型需要 URL
     if (!formData.value.url?.trim()) {
       message.error("请输入服务器 URL");
       return;
@@ -124,11 +207,14 @@ const handleTestConnection = async () => {
 
   try {
     testingConnection.value = true;
+    
+    // 调用 Store 方法测试连接
     const result = await mcp.testConnection(
       formData.value.server_type,
       formData.value.command || undefined,
       formData.value.url || undefined
     );
+    
     testResult.value = result;
     message.success(result ? "连接成功" : "连接失败");
   } finally {
@@ -136,13 +222,18 @@ const handleTestConnection = async () => {
   }
 };
 
-// Create server
+/**
+ * 创建 MCP 服务器
+ * 验证表单后添加到系统
+ */
 const handleCreate = async () => {
+  // 名称验证
   if (!formData.value.name.trim()) {
     message.error("请输入服务器名称");
     return;
   }
 
+  // 根据类型验证不同字段
   if (formData.value.server_type === "stdio") {
     if (!formData.value.command.trim()) {
       message.error("请输入启动命令");
@@ -156,11 +247,13 @@ const handleCreate = async () => {
   }
 
   try {
+    // 解析命令参数 (每行一个参数)
     const argsArray = formData.value.args
       .split("\n")
       .filter((arg) => arg.trim())
       .map((arg) => arg.trim());
 
+    // 调用 Store 方法创建服务器
     const server = await mcp.createServer({
       name: formData.value.name,
       description: formData.value.description,
@@ -185,7 +278,11 @@ const handleCreate = async () => {
   }
 };
 
-// Delete server
+/**
+ * 删除 MCP 服务器
+ * 
+ * @param serverId - 要删除的服务器 ID
+ */
 const handleDelete = async (serverId: string) => {
   try {
     await mcp.deleteServer(serverId);
@@ -195,7 +292,11 @@ const handleDelete = async (serverId: string) => {
   }
 };
 
-// Toggle server
+/**
+ * 切换服务器启用/禁用状态
+ * 
+ * @param serverId - 服务器 ID
+ */
 const handleToggle = async (serverId: string) => {
   try {
     await mcp.toggleServerEnabled(serverId);
@@ -203,36 +304,26 @@ const handleToggle = async (serverId: string) => {
     message.error("操作失败：" + String(error));
   }
 };
-
-// Server type options
-const serverTypeOptions = [
-  { label: "标准输入输出 (stdio)", value: "stdio" },
-  { label: "SSE 流", value: "sse" },
-  { label: "HTTP API", value: "http" },
-];
-
-// Update server type label when changed
-const handleServerTypeChange = (type: string) => {
-  formData.value.server_type = type as "stdio" | "sse" | "http";
-  testResult.value = null;
-};
 </script>
 
 <template>
+  <!-- MCP 主布局 -->
   <n-layout class="mcp-view">
     <n-layout-content :native-scrollbar="false" class="mcp-content">
       <div class="mcp-container">
+        <!-- 页面标题 -->
         <h1 class="page-title">
           <n-icon :size="28" style="margin-right: 12px"><Cube /></n-icon>
           MCP 服务管理
         </h1>
 
-        <!-- MCP Servers List -->
+        <!-- MCP 服务器列表卡片 -->
         <n-card class="settings-card" :bordered="false">
           <template #header>
             <div class="card-header">
               <n-icon :size="20" depth="3"><Cube /></n-icon>
               <span>已连接的服务</span>
+              <!-- 添加服务按钮 -->
               <n-button type="primary" size="small" @click="openCreateModal">
                 <template #icon>
                   <n-icon><Add /></n-icon>
@@ -242,13 +333,14 @@ const handleServerTypeChange = (type: string) => {
             </div>
           </template>
 
-          <!-- Servers List -->
+          <!-- 服务器列表 -->
           <n-list v-if="mcp.servers.length > 0" hoverable clickable>
             <n-list-item
               v-for="server in mcp.servers"
               :key="server.id"
             >
               <n-thing>
+                <!-- 服务器名称和状态标签 -->
                 <template #header>
                   <n-space align="center">
                     <span>{{ server.name }}</span>
@@ -261,28 +353,35 @@ const handleServerTypeChange = (type: string) => {
                   </n-space>
                 </template>
 
+                <!-- 服务器描述和配置信息 -->
                 <template #description>
                   <n-space vertical size="small">
+                    <!-- 服务器类型 -->
                     <n-text depth="3">
                       <n-icon :size="14" style="margin-right: 4px">
                         <component :is="getServerIcon(server.server_type)" />
                       </n-icon>
                       {{ getServerTypeLabel(server.server_type) }}
                     </n-text>
+                    <!-- 描述 (如果有) -->
                     <n-text depth="3" v-if="server.description">
                       {{ server.description }}
                     </n-text>
+                    <!-- stdio 类型显示命令 -->
                     <n-text depth="3" v-if="server.server_type === 'stdio'">
                       命令: <n-text code>{{ server.command }}</n-text>
                     </n-text>
+                    <!-- HTTP/SSE 类型显示 URL -->
                     <n-text depth="3" v-if="server.url">
                       地址: <n-text code>{{ server.url }}</n-text>
                     </n-text>
                   </n-space>
                 </template>
 
+                <!-- 操作按钮区域 -->
                 <template #header-extra>
                   <n-space>
+                    <!-- 启用/禁用切换按钮 -->
                     <n-button
                       quaternary
                       circle
@@ -294,6 +393,7 @@ const handleServerTypeChange = (type: string) => {
                         <n-icon><CheckmarkCircle /></n-icon>
                       </template>
                     </n-button>
+                    <!-- 删除确认弹窗 -->
                     <n-popconfirm
                       @positive-click="handleDelete(server.id)"
                       positive-text="删除"
@@ -320,8 +420,10 @@ const handleServerTypeChange = (type: string) => {
             </n-list-item>
           </n-list>
 
+          <!-- 空状态 -->
           <n-empty v-else description="暂无 MCP 服务" />
 
+          <!-- 底部提示 -->
           <template #footer v-if="mcp.servers.length > 0">
             <n-text depth="3" style="font-size: 12px">
               <n-icon :size="12" style="margin-right: 4px"><CheckmarkCircle /></n-icon>
@@ -330,7 +432,7 @@ const handleServerTypeChange = (type: string) => {
           </template>
         </n-card>
 
-        <!-- Available Tools -->
+        <!-- 可用工具卡片 -->
         <n-card v-if="mcp.availableTools.length > 0" class="settings-card" :bordered="false">
           <template #header>
             <div class="card-header">
@@ -339,15 +441,18 @@ const handleServerTypeChange = (type: string) => {
             </div>
           </template>
 
+          <!-- 工具列表 -->
           <n-list hoverable>
             <n-list-item
               v-for="tool in mcp.availableTools"
               :key="`${tool.server_id}-${tool.name}`"
             >
               <n-thing>
+                <!-- 工具名称 -->
                 <template #header>
                   {{ tool.name }}
                 </template>
+                <!-- 工具描述和来源 -->
                 <template #description>
                   <n-space vertical size="small">
                     <n-text depth="3">{{ tool.description }}</n-text>
@@ -363,7 +468,7 @@ const handleServerTypeChange = (type: string) => {
       </div>
     </n-layout-content>
 
-    <!-- Create Modal -->
+    <!-- 添加 MCP 服务弹窗 -->
     <n-modal
       v-model:show="showCreateModal"
       title="添加 MCP 服务"
@@ -372,10 +477,11 @@ const handleServerTypeChange = (type: string) => {
       :mask-closable="false"
     >
       <n-form label-placement="left" label-width="100px">
-        <!-- Basic Info Section -->
+        <!-- 基本信息 section -->
         <div class="form-section">
           <div class="section-title">基本信息</div>
           
+          <!-- 服务名称 -->
           <n-form-item label="服务名称" required>
             <n-input
               v-model:value="formData.name"
@@ -383,6 +489,7 @@ const handleServerTypeChange = (type: string) => {
             />
           </n-form-item>
 
+          <!-- 描述 -->
           <n-form-item label="描述">
             <n-input
               v-model:value="formData.description"
@@ -393,10 +500,11 @@ const handleServerTypeChange = (type: string) => {
           </n-form-item>
         </div>
 
-        <!-- Server Type Section -->
+        <!-- 服务类型 section -->
         <div class="form-section">
           <div class="section-title">服务类型</div>
           
+          <!-- 类型选择 -->
           <n-form-item label="类型" required>
             <n-select
               :value="formData.server_type"
@@ -406,8 +514,9 @@ const handleServerTypeChange = (type: string) => {
             />
           </n-form-item>
 
-          <!-- Stdio Configuration -->
+          <!-- stdio 类型配置 (条件渲染) -->
           <template v-if="formData.server_type === 'stdio'">
+            <!-- 启动命令 -->
             <n-form-item label="启动命令" required>
               <n-input
                 v-model:value="formData.command"
@@ -420,6 +529,7 @@ const handleServerTypeChange = (type: string) => {
               </template>
             </n-form-item>
 
+            <!-- 命令参数 -->
             <n-form-item label="命令参数">
               <n-input
                 v-model:value="formData.args"
@@ -435,8 +545,9 @@ const handleServerTypeChange = (type: string) => {
             </n-form-item>
           </template>
 
-          <!-- HTTP/SSE Configuration -->
+          <!-- HTTP/SSE 类型配置 (条件渲染) -->
           <template v-else>
+            <!-- 服务 URL -->
             <n-form-item label="服务 URL" required>
               <n-input
                 v-model:value="formData.url"
@@ -444,6 +555,7 @@ const handleServerTypeChange = (type: string) => {
               />
             </n-form-item>
 
+            <!-- 端口 (可选) -->
             <n-form-item label="端口 (可选)">
               <n-input
                 v-model:value="formData.port"
@@ -452,6 +564,7 @@ const handleServerTypeChange = (type: string) => {
               />
             </n-form-item>
 
+            <!-- API Key (可选) -->
             <n-form-item label="API Key (可选)">
               <n-input
                 v-model:value="formData.api_key"
@@ -463,10 +576,11 @@ const handleServerTypeChange = (type: string) => {
           </template>
         </div>
 
-        <!-- Settings Section -->
+        <!-- 设置 section -->
         <div class="form-section">
           <div class="section-title">设置</div>
 
+          <!-- 启用开关 -->
           <n-form-item label="启用服务">
             <n-switch
               v-model:value="formData.enabled"
@@ -477,6 +591,7 @@ const handleServerTypeChange = (type: string) => {
             </n-switch>
           </n-form-item>
 
+          <!-- 测试连接按钮 -->
           <n-form-item label="测试连接">
             <n-button
               :loading="testingConnection"
@@ -492,6 +607,7 @@ const handleServerTypeChange = (type: string) => {
         </div>
       </n-form>
 
+      <!-- 弹窗底部按钮 -->
       <template #footer>
         <n-space justify="end">
           <n-button @click="showCreateModal = false">取消</n-button>
@@ -503,21 +619,25 @@ const handleServerTypeChange = (type: string) => {
 </template>
 
 <style scoped lang="scss">
+/* 主容器 */
 .mcp-view {
   height: 100%;
   background: var(--n-color);
 }
 
+/* 内容区域 */
 .mcp-content {
   height: 100%;
 }
 
+/* 内容容器 */
 .mcp-container {
   max-width: 900px;
   margin: 0 auto;
   padding: 40px 32px;
 }
 
+/* 页面标题 */
 .page-title {
   font-size: 28px;
   font-weight: 600;
@@ -527,6 +647,7 @@ const handleServerTypeChange = (type: string) => {
   color: var(--n-text-color-1);
 }
 
+/* 卡片样式 */
 .settings-card {
   margin-bottom: 20px;
   border-radius: 16px;
@@ -534,6 +655,7 @@ const handleServerTypeChange = (type: string) => {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
 }
 
+/* 卡片头部 */
 .card-header {
   display: flex;
   align-items: center;
@@ -546,6 +668,7 @@ const handleServerTypeChange = (type: string) => {
   }
 }
 
+/* 表单分区 */
 .form-section {
   margin-bottom: 24px;
   padding-bottom: 24px;
@@ -556,6 +679,7 @@ const handleServerTypeChange = (type: string) => {
     margin-bottom: 0;
   }
 
+  /* 分区标题 */
   .section-title {
     font-size: 14px;
     font-weight: 600;

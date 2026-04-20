@@ -37,12 +37,27 @@ impl Database {
                 title TEXT NOT NULL,
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
+                api_config_id TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
             "#,
             [],
         )?;
+
+        // Add api_config_id column if it doesn't exist (for database migration)
+        let has_column: Result<i32, _> = conn.query_row(
+            "SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'api_config_id'",
+            [],
+            |_| Ok(1),
+        );
+        if has_column.is_err() {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN api_config_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+            log::info!("Database migration: added api_config_id column");
+        }
 
         // Create messages table
         conn.execute(
@@ -109,14 +124,15 @@ impl Database {
         
         conn.execute(
             r#"
-            INSERT OR REPLACE INTO sessions (id, title, provider, model, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT OR REPLACE INTO sessions (id, title, provider, model, api_config_id, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             [
                 &session.id,
                 &session.title,
                 &session.provider,
                 &session.model,
+                &session.api_config_id,
                 &session.created_at.to_string(),
                 &session.updated_at.to_string(),
             ],
@@ -143,7 +159,7 @@ impl Database {
         
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, title, provider, model, created_at, updated_at 
+            SELECT id, title, provider, model, api_config_id, created_at, updated_at 
             FROM sessions 
             ORDER BY updated_at DESC
             "#,
@@ -155,14 +171,15 @@ impl Database {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, title, provider, model, created_at, updated_at) = row?;
+            let (id, title, provider, model, api_config_id, created_at, updated_at) = row?;
             let messages = self.get_messages(&id)?;
             
             sessions.push(ChatSession {
@@ -170,6 +187,7 @@ impl Database {
                 title,
                 provider,
                 model,
+                api_config_id,
                 created_at,
                 updated_at,
                 messages,

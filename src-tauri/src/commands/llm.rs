@@ -30,6 +30,7 @@ pub struct ChatSession {
     pub updated_at: i64,
     pub provider: String,
     pub model: String,
+    pub api_config_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,6 +41,7 @@ pub struct SendMessageRequest {
     pub provider: String,
     pub model: String,
     pub api_key: String,
+    pub base_url: String,
     pub enable_mcp: bool,
 }
 
@@ -104,10 +106,22 @@ fn build_url(provider: &str, base_url: &str, model: &str) -> String {
                 model
             )
         }
-        "azure" => base_url.to_string(),
+        "azure" => {
+            let base = base_url.trim_end_matches('/');
+            if base.is_empty() {
+                "".to_string()
+            } else {
+                let base = if !model.is_empty() && !base.ends_with(model) {
+                    format!("{}/{}", base, model)
+                } else {
+                    base.to_string()
+                };
+                format!("{}/chat/completions?api-version=2023-05-15", base)
+            }
+        }
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         _ => {
-            if let Some((url, _, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
+            if let Some((_, url, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
                 url.to_string()
             } else {
                 format!("{}/chat/completions", base_url.trim_end_matches('/'))
@@ -217,17 +231,45 @@ fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
         "text/event-stream".parse().unwrap(),
     );
 
-    if provider == "anthropic" {
-        headers.insert("x-api-key", api_key.parse().unwrap());
-        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-    } else {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", api_key).parse().unwrap(),
-        );
+    match provider {
+        "google" => {
+            headers.insert("x-goog-api-key", api_key.parse().unwrap());
+        }
+        "azure" => {
+            headers.insert("api-key", api_key.parse().unwrap());
+        }
+        "anthropic" => {
+            headers.insert("x-api-key", api_key.parse().unwrap());
+            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        }
+        _ => {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", api_key).parse().unwrap(),
+            );
+        }
     }
 
     headers
+}
+
+// Mask a secret, showing only last N characters
+fn mask_secret(s: &str, show_last: usize) -> String {
+    if s.len() <= show_last {
+        "****".to_string()
+    } else {
+        let keep = &s[s.len() - show_last..];
+        format!("{}{}", "*".repeat(s.len() - show_last), keep)
+    }
+}
+
+fn mask_auth_header_value(value: &str) -> String {
+    if value.starts_with("Bearer ") {
+        let key = &value[7..];
+        format!("Bearer {}", mask_secret(key, 4))
+    } else {
+        mask_secret(value, 4)
+    }
 }
 
 // Parse SSE line and extract content or tool calls
@@ -245,42 +287,58 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
     let json: serde_json::Value = serde_json::from_str(data).ok()?;
 
     match provider {
+        "google" => {
+            // Google Gemini format: candidates[0].content.parts[0].text
+            json.get("candidates")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|cand| cand.get("content"))
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|part| part.get("text"))
+                .and_then(|t| t.as_str())
+                .map(|s| StreamContent::Text(s.to_string()))
+        }
         "anthropic" => {
             // Anthropic format: delta.text
-            json["delta"]["text"].as_str()
+            json.get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
                 .map(|s| StreamContent::Text(s.to_string()))
         }
         _ => {
             // OpenAI format
-            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                Some(StreamContent::Text(content.to_string()))
-            } else if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                // Handle tool calls
-                let calls: Vec<_> = tool_calls.iter().filter_map(|call| {
-                        if let (Some(id), Some(func)) = (
-                            call["id"].as_str(),
-                            call["function"].as_object()
-                        ) {
-                            Some(ToolCall {
-                                _id: id.to_string(),
-                                function: ToolFunction {
-                                    name: func["name"].as_str()?.to_string(),
-                                    arguments: func["arguments"].as_str()?.to_string(),
-                                }
-                            })
-                    } else {
-                        None
+            if let Some(choices) = json["choices"].as_array() {
+                if let Some(first_choice) = choices.first() {
+                    if let Some(content) = first_choice["delta"]["content"].as_str() {
+                        return Some(StreamContent::Text(content.to_string()));
+                    } else if let Some(tool_calls) = first_choice["delta"]["tool_calls"].as_array() {
+                        // Handle tool calls
+                        let calls: Vec<_> = tool_calls.iter().filter_map(|call| {
+                            if let (Some(id), Some(func)) = (
+                                call["id"].as_str(),
+                                call["function"].as_object()
+                            ) {
+                                Some(ToolCall {
+                                    _id: id.to_string(),
+                                    function: ToolFunction {
+                                        name: func["name"].as_str()?.to_string(),
+                                        arguments: func["arguments"].as_str()?.to_string(),
+                                    }
+                                })
+                            } else {
+                                None
+                            }
+                        }).collect();
+                        
+                        if !calls.is_empty() {
+                            return Some(StreamContent::ToolCalls(calls));
+                        }
                     }
-                }).collect();
-                
-                if !calls.is_empty() {
-                    Some(StreamContent::ToolCalls(calls))
-                } else {
-                    None
                 }
-            } else {
-                None
             }
+            None
         }
     }
 }
@@ -327,19 +385,60 @@ pub async fn stream_message(
         vec![]
     };
     
-    let url = build_url(&request.provider, "", &request.model);
+    let url = build_url(&request.provider, &request.base_url, &request.model);
+    // Log provider/base/model for debugging (do not log API key)
+    log::debug!(
+        "LLM request details: provider={} base_url='{}' model='{}'",
+        request.provider,
+        request.base_url,
+        request.model
+    );
+
+    if url.trim().is_empty() {
+        log::error!(
+            "Invalid URL constructed for provider={} base_url='{}' model='{}'",
+            request.provider,
+            request.base_url,
+            request.model
+        );
+        return Err(LLMError::ApiError("Invalid target URL".to_string()));
+    }
+
     let client = reqwest::Client::new();
     let body = build_stream_request_body(&request.provider, &request.model, &request.messages, &mcp_tools);
     let headers = build_headers(&request.provider, &api_key);
 
-    log::info!("Starting stream to {}", url);
+    log::debug!("Constructed URL for provider {}: {}", request.provider, url);
 
-    let response = client
+    let masked_auth = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
+        match h.to_str() {
+            Ok(s) => mask_auth_header_value(s),
+            Err(_) => "<non-utf8>".to_string(),
+        }
+    } else if let Some(h) = headers.get("x-api-key") {
+        match h.to_str() {
+            Ok(s) => mask_auth_header_value(s),
+            Err(_) => "<non-utf8>".to_string(),
+        }
+    } else {
+        "<none>".to_string()
+    };
+
+    log::debug!("Auth header (masked): {}", masked_auth);
+
+    let response = match client
         .post(&url)
-        .headers(headers)
+        .headers(headers.clone())
         .json(&body)
         .send()
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("reqwest send error for url '{}': {:?}", url, e);
+            return Err(e.into());
+        }
+    };
 
     if !response.status().is_success() {
         let error_text = response.text().await?;
@@ -416,6 +515,7 @@ pub async fn stream_message(
                                                 &request.provider,
                                                 &request.model,
                                                 &request.api_key,
+                                                &request.base_url,
                                                 &follow_up_messages,
                                                 &mcp_tools,
                                             )
@@ -469,23 +569,48 @@ async fn request_llm_once(
     provider: &str,
     model: &str,
     api_key: &str,
+    base_url: &str,
     messages: &[ChatMessage],
     tools: &[MCPTool],
 ) -> Result<String, LLMError> {
-    let url = build_url(provider, "", model);
+    let url = build_url(provider, base_url, model);
     let client = reqwest::Client::new();
     let mut body = build_stream_request_body(provider, model, messages, tools);
     body["stream"] = serde_json::json!(false);
 
     let headers = build_headers(provider, api_key);
 
-    let response = client
+    log::debug!("Constructed URL for provider {} (one-shot): {}", provider, url);
+
+    let masked_auth_one_shot = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
+        match h.to_str() {
+            Ok(s) => mask_auth_header_value(s),
+            Err(_) => "<non-utf8>".to_string(),
+        }
+    } else if let Some(h) = headers.get("x-api-key") {
+        match h.to_str() {
+            Ok(s) => mask_auth_header_value(s),
+            Err(_) => "<non-utf8>".to_string(),
+        }
+    } else {
+        "<none>".to_string()
+    };
+
+    log::debug!("One-shot auth header (masked): {}", masked_auth_one_shot);
+
+    let response = match client
         .post(&url)
-        .headers(headers)
+        .headers(headers.clone())
         .json(&body)
         .send()
         .await
-        .map_err(LLMError::RequestError)?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("reqwest send error (one-shot) for url '{}': {:?}", url, e);
+            return Err(e.into());
+        }
+    };
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
@@ -497,16 +622,35 @@ async fn request_llm_once(
         .await
         .map_err(LLMError::RequestError)?;
 
-    if provider == "anthropic" {
+    if provider == "google" {
+        // Google Gemini format: candidates[0].content.parts[0].text
+        if let Some(text) = json
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|cand| cand.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(|parts| parts.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|part| part.get("text"))
+            .and_then(|t| t.as_str())
+        {
+            return Ok(text.to_string());
+        }
+    } else if provider == "anthropic" {
         if let Some(resp) = json["completion"].as_str() {
             return Ok(resp.to_string());
         }
     } else {
-        if let Some(text) = json["choices"][0]["message"]["content"].as_str() {
-            return Ok(text.to_string());
-        }
-        if let Some(text) = json["choices"][0]["text"].as_str() {
-            return Ok(text.to_string());
+        if let Some(choices) = json["choices"].as_array() {
+            if let Some(first_choice) = choices.first() {
+                if let Some(text) = first_choice["message"]["content"].as_str() {
+                    return Ok(text.to_string());
+                }
+                if let Some(text) = first_choice["text"].as_str() {
+                    return Ok(text.to_string());
+                }
+            }
         }
     }
 
