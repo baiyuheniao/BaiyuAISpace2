@@ -174,7 +174,6 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             serde_json::json!({
                 "contents": contents,
                 "generationConfig": {
-                    "temperature": 0.7,
                     "maxOutputTokens": 4096,
                 }
             })
@@ -193,7 +192,6 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             let mut body = serde_json::json!({
                 "model": model,
                 "messages": msgs,
-                "temperature": 0.7,
                 "stream": true,
             });
 
