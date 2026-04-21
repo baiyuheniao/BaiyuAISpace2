@@ -24,7 +24,6 @@ import { useChatStore } from "@/stores/chat";
 import { useSettingsStore } from "@/stores/settings";
 import ChatMessage from "@/components/ChatMessage.vue";
 import ChatInput from "@/components/ChatInput.vue";
-import { Sparkles, ChatbubblesOutline } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
 
@@ -116,13 +115,6 @@ onMounted(async () => {
       <!-- 空状态 - 没有消息时显示 -->
       <div v-else class="empty-state">
         <div class="empty-content">
-          <!-- 空状态图标 (闪烁动画) -->
-          <div class="empty-icon">
-            <n-icon :size="80" depth="3">
-              <Sparkles />
-            </n-icon>
-          </div>
-          
           <!-- 主标题 -->
           <h2 class="empty-title">开始新的对话</h2>
           
@@ -138,14 +130,6 @@ onMounted(async () => {
               请先前往设置创建 API 配置
             </template>
           </p>
-          
-          <!-- 功能提示 -->
-          <div class="empty-tips">
-            <div class="tip-item">
-              <n-icon><ChatbubblesOutline /></n-icon>
-              <span>支持 Markdown 和代码高亮</span>
-            </div>
-          </div>
         </div>
       </div>
     </n-layout-content>
@@ -194,20 +178,6 @@ onMounted(async () => {
   padding: 40px;
 }
 
-/* 空状态图标样式 */
-.empty-icon {
-  margin-bottom: 24px;
-  color: var(--n-text-color-3);
-  // 浮动动画效果
-  animation: float 3s ease-in-out infinite;
-}
-
-// 浮动关键帧动画
-@keyframes float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-10px); }
-}
-
 /* 空状态主标题 */
 .empty-title {
   font-size: 28px;
@@ -221,31 +191,6 @@ onMounted(async () => {
   font-size: 15px;
   color: var(--n-text-color-3);
   margin-bottom: 32px;
-}
-
-/* 功能提示容器 */
-.empty-tips {
-  display: flex;
-  justify-content: center;
-  gap: 16px;
-}
-
-/* 提示项样式 */
-.tip-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: var(--n-color-embed);
-  border-radius: 20px;
-  font-size: 13px;
-  color: var(--n-text-color-2);
-  transition: all 0.2s;
-}
-
-.tip-item:hover {
-  background: var(--n-hover-color);
-  transform: translateY(-1px);
 }
 
 /* 输入区域样式 */

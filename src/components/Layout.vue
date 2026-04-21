@@ -9,7 +9,7 @@ import { NLayout, NLayoutSider, NMenu, NButton } from "naive-ui";
 import type { MenuOption } from "naive-ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
-import { Chatbubbles, Time, Settings, Add, Library, Cube } from "@vicons/ionicons5";
+import { Chatbubbles, Time, Settings, Library, Cube } from "@vicons/ionicons5";
 import logoImg from "../../assets/logo.png";
 
 const route = useRoute();
@@ -92,9 +92,6 @@ const handleNewChat = () => {
             class="new-chat-btn"
             @click="handleNewChat"
           >
-            <template #icon>
-              <n-icon><Add /></n-icon>
-            </template>
             新建对话
           </n-button>
         </div>
@@ -204,6 +201,7 @@ const handleNewChat = () => {
 
 .menu-section {
   flex: 1;
+  overflow: auto;
 }
 
 .bottom-section {
@@ -213,16 +211,6 @@ const handleNewChat = () => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.action-btn {
-  width: 100%;
-  justify-content: flex-start;
-  padding: 10px 16px;
-}
-
-.action-text {
-  margin-left: 12px;
 }
 
 .user-info {

@@ -644,11 +644,6 @@ const getStatusTag = (status: Document["status"]) => {
       :native-scrollbar="false"
       class="kb-empty-content"
     >
-      <n-empty description="请从左侧选择知识库或创建新知识库">
-        <template #icon>
-          <n-icon :size="64" depth="3"><Library /></n-icon>
-        </template>
-      </n-empty>
     </n-layout-content>
   </n-layout>
 
