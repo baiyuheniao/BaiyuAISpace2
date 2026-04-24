@@ -19,7 +19,7 @@
 
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted, computed } from "vue";
-import { NLayout, NLayoutContent, NLayoutFooter, NIcon, NText } from "naive-ui";
+import { NLayout, NLayoutContent, NLayoutFooter, NText } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore } from "@/stores/settings";
 import ChatMessage from "@/components/ChatMessage.vue";
