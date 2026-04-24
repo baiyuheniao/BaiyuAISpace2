@@ -7,6 +7,7 @@ use crate::db::DbState;
 use chrono::Utc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -218,6 +219,13 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
     }
 }
 
+fn create_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+}
+
 fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -402,7 +410,7 @@ pub async fn stream_message(
         return Err(LLMError::ApiError("Invalid target URL".to_string()));
     }
 
-    let client = reqwest::Client::new();
+    let client = create_http_client()?;
     let body = build_stream_request_body(&request.provider, &request.model, &request.messages, &mcp_tools);
     let headers = build_headers(&request.provider, &api_key);
 
@@ -572,7 +580,7 @@ async fn request_llm_once(
     tools: &[MCPTool],
 ) -> Result<String, LLMError> {
     let url = build_url(provider, base_url, model);
-    let client = reqwest::Client::new();
+    let client = create_http_client()?;
     let mut body = build_stream_request_body(provider, model, messages, tools);
     body["stream"] = serde_json::json!(false);
 

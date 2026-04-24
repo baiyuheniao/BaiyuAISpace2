@@ -5,6 +5,7 @@
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
@@ -204,6 +205,40 @@ pub async fn delete_mcp_server(
     Ok(())
 }
 
+const ALLOWED_MCP_COMMANDS: &[&str] = &[
+    "npx", "npm", "node", "python", "python3", "pip", "uvx", "uv",
+    "bun", "deno", "go", "cargo", "ruby", "perl", "php",
+];
+
+fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> {
+    let cmd_path = Path::new(command);
+    let cmd_name = cmd_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+
+    if !ALLOWED_MCP_COMMANDS.contains(&cmd_name) {
+        return Err(MCPError::LaunchError(format!(
+            "Command '{}' is not allowed. Allowed commands: {:?}",
+            cmd_name, ALLOWED_MCP_COMMANDS
+        )));
+    }
+
+    let dangerous_patterns = ["--eval", "-e", "&&", "||", "|", ">", ">>", "<", "`", "$(", ";"];
+    for arg in args {
+        for pattern in dangerous_patterns {
+            if arg.contains(pattern) {
+                return Err(MCPError::LaunchError(format!(
+                    "Argument '{}' contains dangerous pattern '{}'",
+                    arg, pattern
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -> Result<Vec<MCPTool>, MCPError> {
     let array = result
         .as_array()
@@ -242,6 +277,8 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     };
 
     let request_json = serde_json::to_string(&request).map_err(MCPError::JsonError)?;
+
+    validate_mcp_command(&server.command, &server.args)?;
 
     let mut child = Command::new(&server.command)
         .args(&server.args)
@@ -533,6 +570,8 @@ async fn call_mcp_tool_stdio(
         .map_err(|e| MCPError::JsonError(e))?;
 
     log::debug!("MCP Request: {}", request_json);
+
+    validate_mcp_command(&server.command, &server.args)?;
 
     // Execute the server process
     let mut child = Command::new(&server.command)

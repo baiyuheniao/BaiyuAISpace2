@@ -18,7 +18,9 @@ use tauri::Manager;
 use tokio::sync::Mutex;
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

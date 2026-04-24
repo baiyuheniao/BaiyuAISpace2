@@ -29,6 +29,9 @@ impl Database {
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
+        // Enable foreign key constraints
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+
         // Create sessions table
         conn.execute(
             r#"
