@@ -63,7 +63,10 @@ const handleNewChat = () => {
 </script>
 
 <template>
-  <n-layout has-sider class="layout">
+  <n-layout
+    has-sider
+    class="layout"
+  >
     <!-- Sidebar -->
     <n-layout-sider
       bordered
@@ -77,7 +80,11 @@ const handleNewChat = () => {
         <!-- Logo -->
         <div class="logo-section">
           <div class="logo">
-            <img :src="logoImg" alt="BaiyuAI" class="logo-img" />
+            <img
+              :src="logoImg"
+              alt="BaiyuAI"
+              class="logo-img"
+            >
             <span class="logo-text">BaiyuAI</span>
           </div>
         </div>
@@ -111,15 +118,27 @@ const handleNewChat = () => {
 
         <!-- Bottom Actions -->
         <div class="bottom-section">
-
           <!-- User Info at bottom -->
           <div class="user-info">
-            <n-avatar round :size="32" class="user-avatar">
-              <n-icon :size="18"><Settings /></n-icon>
+            <n-avatar
+              round
+              :size="32"
+              class="user-avatar"
+            >
+              <n-icon :size="18">
+                <Settings />
+              </n-icon>
             </n-avatar>
             <div class="user-text">
-              <n-text strong>用户</n-text>
-              <n-text depth="3" class="user-status">在线</n-text>
+              <n-text strong>
+                用户
+              </n-text>
+              <n-text
+                depth="3"
+                class="user-status"
+              >
+                在线
+              </n-text>
             </div>
           </div>
         </div>

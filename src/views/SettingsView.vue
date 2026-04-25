@@ -409,23 +409,43 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   <!-- 设置主布局容器 -->
   <n-layout class="settings-view">
     <!-- 设置内容区域 -->
-    <n-layout-content :native-scrollbar="false" class="settings-content">
+    <n-layout-content
+      :native-scrollbar="false"
+      class="settings-content"
+    >
       <div class="settings-container">
         <!-- 页面标题 -->
         <h1 class="page-title">
-          <n-icon :size="28" style="margin-right: 12px;"><ServerOutline /></n-icon>
+          <n-icon
+            :size="28"
+            style="margin-right: 12px;"
+          >
+            <ServerOutline />
+          </n-icon>
           设置
         </h1>
 
         <!-- LLM API 配置卡片 -->
-        <n-card class="settings-card" :bordered="false">
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
           <!-- 卡片标题 -->
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><KeyOutline /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <KeyOutline />
+              </n-icon>
               <span>对话模型 API 配置</span>
               <!-- 新建配置按钮 -->
-              <n-button type="primary" size="small" @click="openCreateModal">
+              <n-button
+                type="primary"
+                size="small"
+                @click="openCreateModal"
+              >
                 <template #icon>
                   <n-icon><Add /></n-icon>
                 </template>
@@ -435,7 +455,11 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           </template>
 
           <!-- 配置列表 -->
-          <n-list v-if="settings.apiConfigs.length > 0" hoverable clickable>
+          <n-list
+            v-if="settings.apiConfigs.length > 0"
+            hoverable
+            clickable
+          >
             <!-- 遍历显示每个配置 -->
             <n-list-item 
               v-for="config in settings.apiConfigs" 
@@ -460,13 +484,26 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 
                 <!-- 配置描述 -->
                 <template #description>
-                  <n-space vertical size="small">
+                  <n-space
+                    vertical
+                    size="small"
+                  >
                     <n-text depth="3">
-                      <n-icon :size="14" style="margin-right: 4px;"><CubeOutline /></n-icon>
+                      <n-icon
+                        :size="14"
+                        style="margin-right: 4px;"
+                      >
+                        <CubeOutline />
+                      </n-icon>
                       模型: {{ config.model }}
                     </n-text>
                     <n-text depth="3">
-                      <n-icon :size="14" style="margin-right: 4px;"><LinkOutline /></n-icon>
+                      <n-icon
+                        :size="14"
+                        style="margin-right: 4px;"
+                      >
+                        <LinkOutline />
+                      </n-icon>
                       {{ PRESET_PROVIDERS[config.provider]?.name || config.provider }}
                     </n-text>
                   </n-space>
@@ -476,19 +513,30 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 <template #header-extra>
                   <n-space>
                     <!-- 编辑按钮 -->
-                    <n-button quaternary circle size="small" @click.stop="openEditModal(config)">
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      @click.stop="openEditModal(config)"
+                    >
                       <template #icon>
                         <n-icon><CreateOutline /></n-icon>
                       </template>
                     </n-button>
                     <!-- 删除按钮 -->
                     <n-popconfirm 
-                      @positive-click="handleDelete(config.id)"
                       positive-text="删除"
                       negative-text="取消"
+                      @positive-click="handleDelete(config.id)"
                     >
                       <template #trigger>
-                        <n-button quaternary circle size="small" type="error" @click.stop>
+                        <n-button
+                          quaternary
+                          circle
+                          size="small"
+                          type="error"
+                          @click.stop
+                        >
                           <template #icon>
                             <n-icon><TrashOutline /></n-icon>
                           </template>
@@ -503,24 +551,50 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           </n-list>
 
           <!-- 空状态 -->
-          <n-empty v-else description="暂无 API 配置" />
+          <n-empty
+            v-else
+            description="暂无 API 配置"
+          />
 
           <!-- 卡片底部提示 -->
-          <template #footer v-if="settings.apiConfigs.length > 0">
-            <n-text depth="3" style="font-size: 12px;">
-              <n-icon :size="12" style="margin-right: 4px;"><CheckmarkCircle /></n-icon>
+          <template
+            v-if="settings.apiConfigs.length > 0"
+            #footer
+          >
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
+              <n-icon
+                :size="12"
+                style="margin-right: 4px;"
+              >
+                <CheckmarkCircle />
+              </n-icon>
               API Key 使用系统密钥链加密存储（Windows Credential / macOS Keychain / Linux Secret Service）
             </n-text>
           </template>
         </n-card>
 
         <!-- Embedding API 配置卡片 -->
-        <n-card class="settings-card" :bordered="false">
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><DocumentTextOutline /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <DocumentTextOutline />
+              </n-icon>
               <span>Embedding 向量模型 API 配置</span>
-              <n-button type="primary" size="small" @click="openEmbeddingCreateModal">
+              <n-button
+                type="primary"
+                size="small"
+                @click="openEmbeddingCreateModal"
+              >
                 <template #icon>
                   <n-icon><Add /></n-icon>
                 </template>
@@ -530,7 +604,11 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           </template>
 
           <!-- Embedding 配置列表 -->
-          <n-list v-if="settings.embeddingApiConfigs.length > 0" hoverable clickable>
+          <n-list
+            v-if="settings.embeddingApiConfigs.length > 0"
+            hoverable
+            clickable
+          >
             <n-list-item 
               v-for="config in settings.embeddingApiConfigs" 
               :key="config.id"
@@ -550,31 +628,55 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                   </n-space>
                 </template>
                 <template #description>
-                  <n-space vertical size="small">
+                  <n-space
+                    vertical
+                    size="small"
+                  >
                     <n-text depth="3">
-                      <n-icon :size="14" style="margin-right: 4px;"><CubeOutline /></n-icon>
+                      <n-icon
+                        :size="14"
+                        style="margin-right: 4px;"
+                      >
+                        <CubeOutline />
+                      </n-icon>
                       模型: {{ config.model }}
                     </n-text>
                     <n-text depth="3">
-                      <n-icon :size="14" style="margin-right: 4px;"><LinkOutline /></n-icon>
+                      <n-icon
+                        :size="14"
+                        style="margin-right: 4px;"
+                      >
+                        <LinkOutline />
+                      </n-icon>
                       {{ PRESET_PROVIDERS[config.provider]?.name || config.provider }}
                     </n-text>
                   </n-space>
                 </template>
                 <template #header-extra>
                   <n-space>
-                    <n-button quaternary circle size="small" @click.stop="openEmbeddingEditModal(config)">
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      @click.stop="openEmbeddingEditModal(config)"
+                    >
                       <template #icon>
                         <n-icon><CreateOutline /></n-icon>
                       </template>
                     </n-button>
                     <n-popconfirm 
-                      @positive-click="handleEmbeddingDelete(config.id)"
                       positive-text="删除"
                       negative-text="取消"
+                      @positive-click="handleEmbeddingDelete(config.id)"
                     >
                       <template #trigger>
-                        <n-button quaternary circle size="small" type="error" @click.stop>
+                        <n-button
+                          quaternary
+                          circle
+                          size="small"
+                          type="error"
+                          @click.stop
+                        >
                           <template #icon>
                             <n-icon><TrashOutline /></n-icon>
                           </template>
@@ -588,46 +690,84 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             </n-list-item>
           </n-list>
 
-          <n-empty v-else description="暂无 Embedding API 配置" />
+          <n-empty
+            v-else
+            description="暂无 Embedding API 配置"
+          />
 
-          <template #footer v-if="settings.embeddingApiConfigs.length > 0">
-            <n-text depth="3" style="font-size: 12px;">
-              <n-icon :size="12" style="margin-right: 4px;"><CheckmarkCircle /></n-icon>
+          <template
+            v-if="settings.embeddingApiConfigs.length > 0"
+            #footer
+          >
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
+              <n-icon
+                :size="12"
+                style="margin-right: 4px;"
+              >
+                <CheckmarkCircle />
+              </n-icon>
               Embedding API 用于知识库的文档向量化和检索查询
             </n-text>
           </template>
         </n-card>
 
         <!-- 外观设置卡片 -->
-        <n-card class="settings-card" :bordered="false">
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><ColorPaletteOutline /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <ColorPaletteOutline />
+              </n-icon>
               <span>外观</span>
             </div>
           </template>
 
           <!-- 表单设置 -->
-          <n-form label-placement="left" label-width="100px" class="settings-form">
+          <n-form
+            label-placement="left"
+            label-width="100px"
+            class="settings-form"
+          >
             <n-form-item label="深色模式">
               <!-- 主题切换开关 -->
               <n-switch
                 :value="settings.darkMode"
-                @update:value="settings.toggleTheme"
                 size="large"
+                @update:value="settings.toggleTheme"
               >
-                <template #checked>开启</template>
-                <template #unchecked>关闭</template>
+                <template #checked>
+                  开启
+                </template>
+                <template #unchecked>
+                  关闭
+                </template>
               </n-switch>
             </n-form-item>
           </n-form>
         </n-card>
 
         <!-- 关于卡片 -->
-        <n-card class="settings-card" :bordered="false">
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><InformationCircleOutline /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <InformationCircleOutline />
+              </n-icon>
               <span>关于</span>
             </div>
           </template>
@@ -636,15 +776,28 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           <div class="about-content">
             <div class="about-item">
               <span class="about-label">版本</span>
-              <n-tag type="success" size="small">v0.1.0</n-tag>
+              <n-tag
+                type="success"
+                size="small"
+              >
+                v0.1.0
+              </n-tag>
             </div>
             <div class="about-item">
               <span class="about-label">许可证</span>
-              <n-tag type="info" size="small">MPL-2.0</n-tag>
+              <n-tag
+                type="info"
+                size="small"
+              >
+                MPL-2.0
+              </n-tag>
             </div>
             <div class="about-item">
               <span class="about-label">GitHub</span>
-              <n-text underline class="about-link">
+              <n-text
+                underline
+                class="about-link"
+              >
                 baiyuheniao/BaiyuAISpace2
               </n-text>
             </div>
@@ -653,7 +806,10 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
         <!-- 页脚 -->
         <div class="footer-text">
-          <n-text depth="3" style="font-size: 12px;">
+          <n-text
+            depth="3"
+            style="font-size: 12px;"
+          >
             Made with ❤️ by Baiyu
           </n-text>
         </div>
@@ -668,48 +824,72 @@ const providerOptions = computed(() => settings.presetProviderOptions);
       style="width: 500px"
       :mask-closable="false"
     >
-      <n-form label-placement="left" label-width="100px">
-        <n-form-item label="配置名称" required>
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
+        <n-form-item
+          label="配置名称"
+          required
+        >
           <n-input 
             v-model:value="formData.name" 
             placeholder="例如：OpenAI 生产环境"
           />
         </n-form-item>
 
-        <n-form-item label="服务商" required>
+        <n-form-item
+          label="服务商"
+          required
+        >
           <n-select
             :value="formData.provider"
             :options="providerOptions"
-            @update:value="handleProviderChange"
             placeholder="选择服务商"
+            @update:value="handleProviderChange"
           />
         </n-form-item>
 
-        <n-form-item label="Base URL" required>
+        <n-form-item
+          label="Base URL"
+          required
+        >
           <n-input 
             v-model:value="formData.baseUrl" 
             placeholder="https://api.example.com/v1"
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
               已自动填入 {{ PRESET_PROVIDERS[formData.provider]?.name }} 默认地址，可手动修改
             </n-text>
           </template>
         </n-form-item>
 
-        <n-form-item label="模型" required>
+        <n-form-item
+          label="模型"
+          required
+        >
           <n-input 
             v-model:value="formData.model" 
             placeholder="例如：gpt-4o, claude-3-5-sonnet, qwen-max..."
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
               输入模型名称，可参考服务商官方文档
             </n-text>
           </template>
         </n-form-item>
 
-        <n-form-item label="API Key" required>
+        <n-form-item
+          label="API Key"
+          required
+        >
           <n-input 
             v-model:value="formData.apiKey" 
             type="password"
@@ -721,8 +901,15 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showCreateModal = false">取消</n-button>
-          <n-button type="primary" @click="handleCreate">创建</n-button>
+          <n-button @click="showCreateModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleCreate"
+          >
+            创建
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -735,31 +922,46 @@ const providerOptions = computed(() => settings.presetProviderOptions);
       style="width: 500px"
       :mask-closable="false"
     >
-      <n-form label-placement="left" label-width="100px">
-        <n-form-item label="配置名称" required>
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
+        <n-form-item
+          label="配置名称"
+          required
+        >
           <n-input 
             v-model:value="formData.name" 
             placeholder="例如：OpenAI 生产环境"
           />
         </n-form-item>
 
-        <n-form-item label="服务商" required>
+        <n-form-item
+          label="服务商"
+          required
+        >
           <n-select
             :value="formData.provider"
             :options="providerOptions"
-            @update:value="handleProviderChange"
             placeholder="选择服务商"
+            @update:value="handleProviderChange"
           />
         </n-form-item>
 
-        <n-form-item label="Base URL" required>
+        <n-form-item
+          label="Base URL"
+          required
+        >
           <n-input 
             v-model:value="formData.baseUrl" 
             placeholder="https://api.example.com/v1"
           />
         </n-form-item>
 
-        <n-form-item label="模型" required>
+        <n-form-item
+          label="模型"
+          required
+        >
           <n-input 
             v-model:value="formData.model" 
             placeholder="例如：gpt-4o, claude-3-5-sonnet..."
@@ -774,13 +976,31 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             :placeholder="formData.provider === 'baidu' ? '请输入 access_token' : '留空表示不修改'"
           />
           <template #feedback>
-            <n-text v-if="formData.provider === 'baidu'" depth="2" style="font-size: 12px; color: #f0a020;">
+            <n-text
+              v-if="formData.provider === 'baidu'"
+              depth="2"
+              style="font-size: 12px; color: #f0a020;"
+            >
               百度千帆需要 access_token，而非 API Key。请在
-              <n-a href="https://console.bce.baidu.com/qianfan/" target="_blank">百度千帆控制台</n-a>
+              <n-a
+                href="https://console.bce.baidu.com/qianfan/"
+                target="_blank"
+              >
+                百度千帆控制台
+              </n-a>
               获取 API Key 和 Secret Key，然后
-              <n-a href="https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Ck3edn42t" target="_blank">换取 access_token</n-a>
+              <n-a
+                href="https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Ck3edn42t"
+                target="_blank"
+              >
+                换取 access_token
+              </n-a>
             </n-text>
-            <n-text v-else depth="3" style="font-size: 12px;">
+            <n-text
+              v-else
+              depth="3"
+              style="font-size: 12px;"
+            >
               留空表示保持原 API Key 不变
             </n-text>
           </template>
@@ -789,8 +1009,15 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showEditModal = false">取消</n-button>
-          <n-button type="primary" @click="handleUpdate">保存</n-button>
+          <n-button @click="showEditModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleUpdate"
+          >
+            保存
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -803,48 +1030,72 @@ const providerOptions = computed(() => settings.presetProviderOptions);
       style="width: 500px"
       :mask-closable="false"
     >
-      <n-form label-placement="left" label-width="100px">
-        <n-form-item label="配置名称" required>
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
+        <n-form-item
+          label="配置名称"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.name" 
             placeholder="例如：OpenAI Embedding"
           />
         </n-form-item>
 
-        <n-form-item label="服务商" required>
+        <n-form-item
+          label="服务商"
+          required
+        >
           <n-select
             :value="embeddingFormData.provider"
             :options="providerOptions"
-            @update:value="handleEmbeddingProviderChange"
             placeholder="选择服务商"
+            @update:value="handleEmbeddingProviderChange"
           />
         </n-form-item>
 
-        <n-form-item label="Base URL" required>
+        <n-form-item
+          label="Base URL"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.baseUrl" 
             placeholder="https://api.openai.com/v1"
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
               已自动填入 {{ PRESET_PROVIDERS[embeddingFormData.provider]?.name }} 默认地址
             </n-text>
           </template>
         </n-form-item>
 
-        <n-form-item label="Embedding 模型" required>
+        <n-form-item
+          label="Embedding 模型"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.model" 
             placeholder="例如：text-embedding-3-small, embedding-2, bge-large-zh..."
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
               输入 Embedding 模型名称，可参考服务商官方文档
             </n-text>
           </template>
         </n-form-item>
 
-        <n-form-item label="API Key" required>
+        <n-form-item
+          label="API Key"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.apiKey" 
             type="password"
@@ -856,8 +1107,15 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showEmbeddingCreateModal = false">取消</n-button>
-          <n-button type="primary" @click="handleEmbeddingCreate">创建</n-button>
+          <n-button @click="showEmbeddingCreateModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleEmbeddingCreate"
+          >
+            创建
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -870,31 +1128,46 @@ const providerOptions = computed(() => settings.presetProviderOptions);
       style="width: 500px"
       :mask-closable="false"
     >
-      <n-form label-placement="left" label-width="100px">
-        <n-form-item label="配置名称" required>
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
+        <n-form-item
+          label="配置名称"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.name" 
             placeholder="例如：OpenAI Embedding"
           />
         </n-form-item>
 
-        <n-form-item label="服务商" required>
+        <n-form-item
+          label="服务商"
+          required
+        >
           <n-select
             :value="embeddingFormData.provider"
             :options="providerOptions"
-            @update:value="handleEmbeddingProviderChange"
             placeholder="选择服务商"
+            @update:value="handleEmbeddingProviderChange"
           />
         </n-form-item>
 
-        <n-form-item label="Base URL" required>
+        <n-form-item
+          label="Base URL"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.baseUrl" 
             placeholder="https://api.openai.com/v1"
           />
         </n-form-item>
 
-        <n-form-item label="Embedding 模型" required>
+        <n-form-item
+          label="Embedding 模型"
+          required
+        >
           <n-input 
             v-model:value="embeddingFormData.model" 
             placeholder="例如：text-embedding-3-small, embedding-2..."
@@ -909,7 +1182,10 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             placeholder="留空表示不修改"
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
               留空表示保持原 API Key 不变
             </n-text>
           </template>
@@ -918,8 +1194,15 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showEmbeddingEditModal = false">取消</n-button>
-          <n-button type="primary" @click="handleEmbeddingUpdate">保存</n-button>
+          <n-button @click="showEmbeddingEditModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleEmbeddingUpdate"
+          >
+            保存
+          </n-button>
         </n-space>
       </template>
     </n-modal>

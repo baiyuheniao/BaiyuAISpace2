@@ -63,7 +63,10 @@ const handleCopy = async () => {
 </script>
 
 <template>
-  <div class="message-wrapper" :class="{ 'user-message': isUser }">
+  <div
+    class="message-wrapper"
+    :class="{ 'user-message': isUser }"
+  >
     <div class="message-avatar">
       <n-avatar 
         round 
@@ -84,29 +87,57 @@ const handleCopy = async () => {
         <span class="message-time">{{ formatTime(message.timestamp) }}</span>
       </div>
 
-      <div class="message-body" :class="{ 'user-body': isUser }">
-        <div class="markdown-content" v-html="renderedContent" />
+      <div
+        class="message-body"
+        :class="{ 'user-body': isUser }"
+      >
+        <div
+          class="markdown-content"
+          v-html="renderedContent"
+        />
         
         <!-- Streaming indicator -->
-        <div v-if="message.streaming" class="streaming-indicator">
+        <div
+          v-if="message.streaming"
+          class="streaming-indicator"
+        >
           <n-spin size="small" />
           <span class="streaming-text">思考中...</span>
         </div>
       </div>
 
       <!-- Error message -->
-      <div v-if="message.error" class="message-error">
-        <n-alert type="error" :show-icon="true" :bordered="false">
+      <div
+        v-if="message.error"
+        class="message-error"
+      >
+        <n-alert
+          type="error"
+          :show-icon="true"
+          :bordered="false"
+        >
           {{ message.error }}
         </n-alert>
       </div>
 
       <!-- Actions -->
-      <div v-if="!isUser && !message.streaming" class="message-actions">
-        <n-tooltip placement="top" :show="copied">
+      <div
+        v-if="!isUser && !message.streaming"
+        class="message-actions"
+      >
+        <n-tooltip
+          placement="top"
+          :show="copied"
+        >
           <template #trigger>
-            <button class="action-btn" title="复制" @click="handleCopy">
-              <n-icon :size="14"><Copy /></n-icon>
+            <button
+              class="action-btn"
+              title="复制"
+              @click="handleCopy"
+            >
+              <n-icon :size="14">
+                <Copy />
+              </n-icon>
             </button>
           </template>
           <span>已复制!</span>

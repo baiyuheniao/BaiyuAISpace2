@@ -1,5 +1,5 @@
 [package]
-name = "baiyu-aispace"
+name = "BaiyuAISpace2"
 version = "0.1.0"
 description = "轻量级跨平台 AI Agent 开发环境"
 authors = ["Baiyu"]

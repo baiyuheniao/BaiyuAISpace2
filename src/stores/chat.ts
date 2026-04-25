@@ -511,7 +511,7 @@ export const useChatStore = defineStore("chat", () => {
       currentSession.value.messages.push(assistantMessage);
 
       // ============ 构建 API 消息列表 ============
-      let apiMessages = currentSession.value.messages
+      const apiMessages = currentSession.value.messages
         // 过滤掉流式中和有错误的消息
         .filter(m => !m.streaming && !m.error)
         .map((m, index) => {
@@ -754,7 +754,7 @@ ${toolDefs}
 
   // ============ 流式中断功能 ============
   const stopStream = () => {
-    if (isLoading.value) {
+    if (isLoading.value && currentSession.value) {
       isLoading.value = false;
       const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
       if (lastMessage && lastMessage.role === "assistant") {

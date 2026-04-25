@@ -22,7 +22,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider :theme="currentTheme" class="full-height">
+  <n-config-provider
+    :theme="currentTheme"
+    class="full-height"
+  >
     <n-dialog-provider>
       <n-message-provider>
         <n-notification-provider>

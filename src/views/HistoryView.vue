@@ -124,31 +124,51 @@ onMounted(() => {
   <!-- 历史记录主布局容器 -->
   <n-layout class="history-view">
     <!-- 历史记录内容区域 -->
-    <n-layout-content :native-scrollbar="false" class="history-content">
+    <n-layout-content
+      :native-scrollbar="false"
+      class="history-content"
+    >
       <div class="history-container">
         <!-- 页面标题 -->
         <h1 class="page-title">
-          <n-icon :size="28" style="margin-right: 12px;"><TimeOutline /></n-icon>
+          <n-icon
+            :size="28"
+            style="margin-right: 12px;"
+          >
+            <TimeOutline />
+          </n-icon>
           历史记录
         </h1>
 
         <!-- 加载状态 -->
-        <div v-if="loading" class="loading-state">
+        <div
+          v-if="loading"
+          class="loading-state"
+        >
           <n-spin size="large" />
         </div>
 
         <!-- 空状态 - 没有历史记录时显示 -->
-        <div v-else-if="chat.sessions.length === 0" class="empty-state">
+        <div
+          v-else-if="chat.sessions.length === 0"
+          class="empty-state"
+        >
           <n-empty description="暂无历史对话">
             <!-- 空状态图标 -->
             <template #icon>
-              <n-icon :size="64" depth="3">
+              <n-icon
+                :size="64"
+                depth="3"
+              >
                 <ChatbubblesOutline />
               </n-icon>
             </template>
             <!-- 提示文本 -->
             <template #extra>
-              <n-text depth="3" style="margin-top: 16px; display: block;">
+              <n-text
+                depth="3"
+                style="margin-top: 16px; display: block;"
+              >
                 开始一个新对话，历史记录将显示在这里
               </n-text>
             </template>
@@ -156,7 +176,12 @@ onMounted(() => {
         </div>
 
         <!-- 会话列表 -->
-        <n-list v-else class="history-list" hoverable clickable>
+        <n-list
+          v-else
+          class="history-list"
+          hoverable
+          clickable
+        >
           <!-- 遍历显示每个会话 -->
           <n-list-item
             v-for="session in chat.sessions"
@@ -172,15 +197,31 @@ onMounted(() => {
               
               <!-- 会话描述 - 显示元信息 -->
               <template #description>
-                <n-space align="center" :size="12" class="session-meta">
+                <n-space
+                  align="center"
+                  :size="12"
+                  class="session-meta"
+                >
                   <!-- 提供商标签 -->
-                  <n-tag size="small" type="success" class="provider-tag">
+                  <n-tag
+                    size="small"
+                    type="success"
+                    class="provider-tag"
+                  >
                     {{ session.provider }}
                   </n-tag>
                   <!-- 模型名称 -->
-                  <n-text depth="3" class="model-text">{{ session.model }}</n-text>
+                  <n-text
+                    depth="3"
+                    class="model-text"
+                  >
+                    {{ session.model }}
+                  </n-text>
                   <!-- 消息数量 -->
-                  <n-text depth="3" class="message-count">
+                  <n-text
+                    depth="3"
+                    class="message-count"
+                  >
                     {{ session.messages.length }} 条消息
                   </n-text>
                 </n-space>
@@ -188,9 +229,15 @@ onMounted(() => {
               
               <!-- 右侧操作区域 -->
               <template #header-extra>
-                <n-space align="center" :size="16">
+                <n-space
+                  align="center"
+                  :size="16"
+                >
                   <!-- 更新时间 -->
-                  <n-text depth="3" class="time-text">
+                  <n-text
+                    depth="3"
+                    class="time-text"
+                  >
                     {{ formatDate(session.updatedAt) }}
                   </n-text>
                   <!-- 删除按钮 (悬停时显示) -->
@@ -211,7 +258,9 @@ onMounted(() => {
             </n-thing>
             <!-- 进入提示 (悬停时显示) -->
             <div class="enter-hint">
-              <n-icon :size="14"><EnterOutline /></n-icon>
+              <n-icon :size="14">
+                <EnterOutline />
+              </n-icon>
             </div>
           </n-list-item>
         </n-list>

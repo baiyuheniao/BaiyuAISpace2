@@ -111,13 +111,14 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     request: CreateKnowledgeBaseRequest
   ): Promise<KnowledgeBase | null> => {
     try {
+      console.log("[KB] Creating knowledge base with request:", JSON.stringify(request));
       const result = await invoke<KnowledgeBase>("create_knowledge_base", {
         request,
       });
       knowledgeBases.value.unshift(result);
       return result;
     } catch (error) {
-      console.error("Failed to create knowledge base:", error);
+      console.error("[KB] Failed to create knowledge base:", error);
       return null;
     }
   };

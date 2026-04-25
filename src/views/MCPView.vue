@@ -309,22 +309,42 @@ const handleToggle = async (serverId: string) => {
 <template>
   <!-- MCP 主布局 -->
   <n-layout class="mcp-view">
-    <n-layout-content :native-scrollbar="false" class="mcp-content">
+    <n-layout-content
+      :native-scrollbar="false"
+      class="mcp-content"
+    >
       <div class="mcp-container">
         <!-- 页面标题 -->
         <h1 class="page-title">
-          <n-icon :size="28" style="margin-right: 12px"><Cube /></n-icon>
+          <n-icon
+            :size="28"
+            style="margin-right: 12px"
+          >
+            <Cube />
+          </n-icon>
           MCP 服务管理
         </h1>
 
         <!-- MCP 服务器列表卡片 -->
-        <n-card class="settings-card" :bordered="false">
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><Cube /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <Cube />
+              </n-icon>
               <span>已连接的服务</span>
               <!-- 添加服务按钮 -->
-              <n-button type="primary" size="small" @click="openCreateModal">
+              <n-button
+                type="primary"
+                size="small"
+                @click="openCreateModal"
+              >
                 <template #icon>
                   <n-icon><Add /></n-icon>
                 </template>
@@ -334,7 +354,11 @@ const handleToggle = async (serverId: string) => {
           </template>
 
           <!-- 服务器列表 -->
-          <n-list v-if="mcp.servers.length > 0" hoverable clickable>
+          <n-list
+            v-if="mcp.servers.length > 0"
+            hoverable
+            clickable
+          >
             <n-list-item
               v-for="server in mcp.servers"
               :key="server.id"
@@ -355,25 +379,44 @@ const handleToggle = async (serverId: string) => {
 
                 <!-- 服务器描述和配置信息 -->
                 <template #description>
-                  <n-space vertical size="small">
+                  <n-space
+                    vertical
+                    size="small"
+                  >
                     <!-- 服务器类型 -->
                     <n-text depth="3">
-                      <n-icon :size="14" style="margin-right: 4px">
+                      <n-icon
+                        :size="14"
+                        style="margin-right: 4px"
+                      >
                         <component :is="getServerIcon(server.server_type)" />
                       </n-icon>
                       {{ getServerTypeLabel(server.server_type) }}
                     </n-text>
                     <!-- 描述 (如果有) -->
-                    <n-text depth="3" v-if="server.description">
+                    <n-text
+                      v-if="server.description"
+                      depth="3"
+                    >
                       {{ server.description }}
                     </n-text>
                     <!-- stdio 类型显示命令 -->
-                    <n-text depth="3" v-if="server.server_type === 'stdio'">
-                      命令: <n-text code>{{ server.command }}</n-text>
+                    <n-text
+                      v-if="server.server_type === 'stdio'"
+                      depth="3"
+                    >
+                      命令: <n-text code>
+                        {{ server.command }}
+                      </n-text>
                     </n-text>
                     <!-- HTTP/SSE 类型显示 URL -->
-                    <n-text depth="3" v-if="server.url">
-                      地址: <n-text code>{{ server.url }}</n-text>
+                    <n-text
+                      v-if="server.url"
+                      depth="3"
+                    >
+                      地址: <n-text code>
+                        {{ server.url }}
+                      </n-text>
                     </n-text>
                   </n-space>
                 </template>
@@ -395,9 +438,9 @@ const handleToggle = async (serverId: string) => {
                     </n-button>
                     <!-- 删除确认弹窗 -->
                     <n-popconfirm
-                      @positive-click="handleDelete(server.id)"
                       positive-text="删除"
                       negative-text="取消"
+                      @positive-click="handleDelete(server.id)"
                     >
                       <template #trigger>
                         <n-button
@@ -421,22 +464,45 @@ const handleToggle = async (serverId: string) => {
           </n-list>
 
           <!-- 空状态 -->
-          <n-empty v-else description="暂无 MCP 服务" />
+          <n-empty
+            v-else
+            description="暂无 MCP 服务"
+          />
 
           <!-- 底部提示 -->
-          <template #footer v-if="mcp.servers.length > 0">
-            <n-text depth="3" style="font-size: 12px">
-              <n-icon :size="12" style="margin-right: 4px"><CheckmarkCircle /></n-icon>
+          <template
+            v-if="mcp.servers.length > 0"
+            #footer
+          >
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              <n-icon
+                :size="12"
+                style="margin-right: 4px"
+              >
+                <CheckmarkCircle />
+              </n-icon>
               已启用的服务允许在对话中调用其提供的工具
             </n-text>
           </template>
         </n-card>
 
         <!-- 可用工具卡片 -->
-        <n-card v-if="mcp.availableTools.length > 0" class="settings-card" :bordered="false">
+        <n-card
+          v-if="mcp.availableTools.length > 0"
+          class="settings-card"
+          :bordered="false"
+        >
           <template #header>
             <div class="card-header">
-              <n-icon :size="20" depth="3"><Play /></n-icon>
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <Play />
+              </n-icon>
               <span>可用工具</span>
             </div>
           </template>
@@ -454,10 +520,17 @@ const handleToggle = async (serverId: string) => {
                 </template>
                 <!-- 工具描述和来源 -->
                 <template #description>
-                  <n-space vertical size="small">
-                    <n-text depth="3">{{ tool.description }}</n-text>
+                  <n-space
+                    vertical
+                    size="small"
+                  >
                     <n-text depth="3">
-                      来自: <n-text strong>{{ tool.server_name }}</n-text>
+                      {{ tool.description }}
+                    </n-text>
+                    <n-text depth="3">
+                      来自: <n-text strong>
+                        {{ tool.server_name }}
+                      </n-text>
                     </n-text>
                   </n-space>
                 </template>
@@ -476,13 +549,21 @@ const handleToggle = async (serverId: string) => {
       style="width: 600px"
       :mask-closable="false"
     >
-      <n-form label-placement="left" label-width="100px">
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
         <!-- 基本信息 section -->
         <div class="form-section">
-          <div class="section-title">基本信息</div>
+          <div class="section-title">
+            基本信息
+          </div>
           
           <!-- 服务名称 -->
-          <n-form-item label="服务名称" required>
+          <n-form-item
+            label="服务名称"
+            required
+          >
             <n-input
               v-model:value="formData.name"
               placeholder="例如：Wikipedia 搜索工具"
@@ -502,28 +583,39 @@ const handleToggle = async (serverId: string) => {
 
         <!-- 服务类型 section -->
         <div class="form-section">
-          <div class="section-title">服务类型</div>
+          <div class="section-title">
+            服务类型
+          </div>
           
           <!-- 类型选择 -->
-          <n-form-item label="类型" required>
+          <n-form-item
+            label="类型"
+            required
+          >
             <n-select
               :value="formData.server_type"
               :options="serverTypeOptions"
-              @update:value="handleServerTypeChange"
               placeholder="选择服务类型"
+              @update:value="handleServerTypeChange"
             />
           </n-form-item>
 
           <!-- stdio 类型配置 (条件渲染) -->
           <template v-if="formData.server_type === 'stdio'">
             <!-- 启动命令 -->
-            <n-form-item label="启动命令" required>
+            <n-form-item
+              label="启动命令"
+              required
+            >
               <n-input
                 v-model:value="formData.command"
                 placeholder="例如：/path/to/mcp-server 或 python mcp_server.py"
               />
               <template #feedback>
-                <n-text depth="3" style="font-size: 12px">
+                <n-text
+                  depth="3"
+                  style="font-size: 12px"
+                >
                   完整的启动命令路径或脚本
                 </n-text>
               </template>
@@ -538,7 +630,10 @@ const handleToggle = async (serverId: string) => {
                 :rows="3"
               />
               <template #feedback>
-                <n-text depth="3" style="font-size: 12px">
+                <n-text
+                  depth="3"
+                  style="font-size: 12px"
+                >
                   可选，每行一个参数
                 </n-text>
               </template>
@@ -548,7 +643,10 @@ const handleToggle = async (serverId: string) => {
           <!-- HTTP/SSE 类型配置 (条件渲染) -->
           <template v-else>
             <!-- 服务 URL -->
-            <n-form-item label="服务 URL" required>
+            <n-form-item
+              label="服务 URL"
+              required
+            >
               <n-input
                 v-model:value="formData.url"
                 placeholder="例如：http://localhost:8000 或 https://api.example.com"
@@ -578,7 +676,9 @@ const handleToggle = async (serverId: string) => {
 
         <!-- 设置 section -->
         <div class="form-section">
-          <div class="section-title">设置</div>
+          <div class="section-title">
+            设置
+          </div>
 
           <!-- 启用开关 -->
           <n-form-item label="启用服务">
@@ -586,8 +686,12 @@ const handleToggle = async (serverId: string) => {
               v-model:value="formData.enabled"
               size="large"
             >
-              <template #checked>已启用</template>
-              <template #unchecked>已禁用</template>
+              <template #checked>
+                已启用
+              </template>
+              <template #unchecked>
+                已禁用
+              </template>
             </n-switch>
           </n-form-item>
 
@@ -600,7 +704,10 @@ const handleToggle = async (serverId: string) => {
             >
               {{ testResult === true ? "✓ 连接成功" : testResult === false ? "✗ 连接失败" : "测试连接" }}
             </n-button>
-            <n-text depth="3" style="font-size: 12px; margin-left: 12px">
+            <n-text
+              depth="3"
+              style="font-size: 12px; margin-left: 12px"
+            >
               建议先测试连接确保配置正确
             </n-text>
           </n-form-item>
@@ -610,8 +717,15 @@ const handleToggle = async (serverId: string) => {
       <!-- 弹窗底部按钮 -->
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showCreateModal = false">取消</n-button>
-          <n-button type="primary" @click="handleCreate">添加服务</n-button>
+          <n-button @click="showCreateModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            @click="handleCreate"
+          >
+            添加服务
+          </n-button>
         </n-space>
       </template>
     </n-modal>

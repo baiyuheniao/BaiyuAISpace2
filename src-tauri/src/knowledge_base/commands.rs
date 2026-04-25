@@ -28,6 +28,8 @@ pub async fn create_knowledge_base(
     request: CreateKnowledgeBaseRequest,
     db_state: State<'_, crate::db::DbState>,
 ) -> Result<KnowledgeBase, KnowledgeBaseError> {
+    log::info!("[KB] Creating knowledge base: {:?}", request);
+    
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -37,23 +39,38 @@ pub async fn create_knowledge_base(
     let chunk_size = request.chunk_size.unwrap_or(1000);
     let chunk_overlap = request.chunk_overlap.unwrap_or(200);
     
-    conn.execute(
+    log::info!("[KB] Inserting with chunk_size={}, chunk_overlap={}", chunk_size, chunk_overlap);
+    
+    let result = conn.execute(
         r#"
         INSERT INTO knowledge_bases 
-        (id, name, description, embedding_api_config_id, chunk_size, chunk_overlap, created_at, updated_at, document_count)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
+        (id, name, description, embedding_provider, embedding_model, embedding_dim, embedding_api_config_id, chunk_size, chunk_overlap, created_at, updated_at, document_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)
         "#,
         [
             &id,
             &request.name,
             &request.description,
+            &"".to_string(), // embedding_provider - empty for backward compatibility
+            &"".to_string(), // embedding_model - empty for backward compatibility
+            &"1536".to_string(), // embedding_dim - default 1536
             &request.embedding_api_config_id,
             &chunk_size.to_string(),
             &chunk_overlap.to_string(),
             &now.to_string(),
             &now.to_string(),
         ],
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+    );
+    
+    match result {
+        Ok(rows) => {
+            log::info!("[KB] Successfully created, rows affected: {}", rows);
+        }
+        Err(e) => {
+            log::error!("[KB] Failed to insert: {}", e);
+            return Err(KnowledgeBaseError::DatabaseError(e.to_string()));
+        }
+    }
     
     log::info!("Created knowledge base: {} ({})", request.name, id);
     

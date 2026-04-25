@@ -235,7 +235,10 @@ const getFileDisplayName = (file: File): string => {
 <template>
   <div class="chat-input-wrapper">
     <!-- API Config Indicator -->
-    <div v-if="currentApiConfig" class="api-indicator">
+    <div
+      v-if="currentApiConfig"
+      class="api-indicator"
+    >
       <n-tag 
         type="info" 
         size="small" 
@@ -247,14 +250,29 @@ const getFileDisplayName = (file: File): string => {
           <n-icon><ServerOutline /></n-icon>
         </template>
         {{ currentApiConfig.name }}
-        <n-icon :size="12" class="chevron-icon"><ChevronDown /></n-icon>
+        <n-icon
+          :size="12"
+          class="chevron-icon"
+        >
+          <ChevronDown />
+        </n-icon>
       </n-tag>
-      <n-text depth="3" class="model-text">
+      <n-text
+        depth="3"
+        class="model-text"
+      >
         {{ currentApiConfig.model }}
       </n-text>
     </div>
-    <div v-else class="api-indicator">
-      <n-tag type="warning" size="small" :bordered="false">
+    <div
+      v-else
+      class="api-indicator"
+    >
+      <n-tag
+        type="warning"
+        size="small"
+        :bordered="false"
+      >
         <template #icon>
           <n-icon><ServerOutline /></n-icon>
         </template>
@@ -263,21 +281,41 @@ const getFileDisplayName = (file: File): string => {
     </div>
 
     <!-- RAG Indicator -->
-    <div v-if="chat.ragEnabled && selectedKbName" class="rag-indicator">
-      <n-tag type="success" size="small" closable @close="handleDisableRag">
+    <div
+      v-if="chat.ragEnabled && selectedKbName"
+      class="rag-indicator"
+    >
+      <n-tag
+        type="success"
+        size="small"
+        closable
+        @close="handleDisableRag"
+      >
         <template #icon>
           <n-icon><Library /></n-icon>
         </template>
         知识库: {{ selectedKbName }}
       </n-tag>
-      <n-text v-if="chat.lastRetrievalResult" depth="3" class="rag-result-info">
+      <n-text
+        v-if="chat.lastRetrievalResult"
+        depth="3"
+        class="rag-result-info"
+      >
         检索到 {{ chat.lastRetrievalResult.chunks.length }} 个片段
       </n-text>
     </div>
 
     <!-- MCP Indicator -->
-    <div v-if="chat.mcpEnabled && enabledMcpServersCount > 0" class="mcp-indicator">
-      <n-tag type="warning" size="small" closable @close="handleDisableMcp">
+    <div
+      v-if="chat.mcpEnabled && enabledMcpServersCount > 0"
+      class="mcp-indicator"
+    >
+      <n-tag
+        type="warning"
+        size="small"
+        closable
+        @close="handleDisableMcp"
+      >
         <template #icon>
           <n-icon><Cube /></n-icon>
         </template>
@@ -312,7 +350,7 @@ const getFileDisplayName = (file: File): string => {
           accept="image/*,video/mp4,video/webm,video/mpeg"
           style="display: none"
           @change="handleFilesSelected"
-        />
+        >
         <n-tooltip placement="top">
           <template #trigger>
             <n-button
@@ -324,10 +362,20 @@ const getFileDisplayName = (file: File): string => {
             >
               <template #icon>
                 <n-icon>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
+                    <line
+                      x1="12"
+                      y1="3"
+                      x2="12"
+                      y2="15"
+                    />
                   </svg>
                 </n-icon>
               </template>
@@ -349,10 +397,16 @@ const getFileDisplayName = (file: File): string => {
               @click="handleMcpToggle"
             >
               <template #icon>
-                <n-badge v-if="chat.mcpEnabled && enabledMcpServersCount > 0" :value="availableMcpToolsCount" color="warning">
+                <n-badge
+                  v-if="chat.mcpEnabled && enabledMcpServersCount > 0"
+                  :value="availableMcpToolsCount"
+                  color="warning"
+                >
                   <n-icon><Cube /></n-icon>
                 </n-badge>
-                <n-icon v-else><Cube /></n-icon>
+                <n-icon v-else>
+                  <Cube />
+                </n-icon>
               </template>
             </n-button>
           </template>
@@ -372,10 +426,16 @@ const getFileDisplayName = (file: File): string => {
               @click="showRagSelector = !showRagSelector"
             >
               <template #icon>
-                <n-badge v-if="chat.ragEnabled" dot type="success">
+                <n-badge
+                  v-if="chat.ragEnabled"
+                  dot
+                  type="success"
+                >
                   <n-icon><Library /></n-icon>
                 </n-badge>
-                <n-icon v-else><Library /></n-icon>
+                <n-icon v-else>
+                  <Library />
+                </n-icon>
               </template>
             </n-button>
           </template>
@@ -397,8 +457,18 @@ const getFileDisplayName = (file: File): string => {
               <template #icon>
                 <n-icon>
                   <Send v-if="!chat.isLoading" />
-                  <svg v-else viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  <svg
+                    v-else
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <rect
+                      x="6"
+                      y="6"
+                      width="12"
+                      height="12"
+                      rx="2"
+                    />
                   </svg>
                 </n-icon>
               </template>
@@ -410,21 +480,38 @@ const getFileDisplayName = (file: File): string => {
     </div>
 
     <!-- Attached Files Display -->
-    <div v-if="attachedFiles.length > 0" class="attached-files">
-      <div class="files-label">已附加的文件：</div>
+    <div
+      v-if="attachedFiles.length > 0"
+      class="attached-files"
+    >
+      <div class="files-label">
+        已附加的文件：
+      </div>
       <div class="files-list">
-        <div v-for="(file, index) in attachedFiles" :key="index" class="file-item">
+        <div
+          v-for="(file, index) in attachedFiles"
+          :key="index"
+          class="file-item"
+        >
           <n-tag 
             closable 
-            @close="removeAttachedFile(index)"
             class="file-tag"
+            @close="removeAttachedFile(index)"
           >
             <template #icon>
               <n-icon :size="14">
-                <svg v-if="file.type.startsWith('image/')" viewBox="0 0 24 24" fill="currentColor">
+                <svg
+                  v-if="file.type.startsWith('image/')"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
                   <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" />
                 </svg>
-                <svg v-else-if="file.type.startsWith('video/')" viewBox="0 0 24 24" fill="currentColor">
+                <svg
+                  v-else-if="file.type.startsWith('video/')"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
                   <path d="M18 3H6c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 10l-4-3v6l4-3z" />
                 </svg>
               </n-icon>
@@ -436,10 +523,20 @@ const getFileDisplayName = (file: File): string => {
     </div>
 
     <!-- API Selector Popover -->
-    <div v-if="showApiSelector" class="selector-popover api-selector">
+    <div
+      v-if="showApiSelector"
+      class="selector-popover api-selector"
+    >
       <div class="selector-header">
-        <n-text strong>选择 API 配置</n-text>
-        <n-button quaternary circle size="small" @click="showApiSelector = false">
+        <n-text strong>
+          选择 API 配置
+        </n-text>
+        <n-button
+          quaternary
+          circle
+          size="small"
+          @click="showApiSelector = false"
+        >
           <template #icon>
             <n-icon><Close /></n-icon>
           </template>
@@ -451,16 +548,30 @@ const getFileDisplayName = (file: File): string => {
         placeholder="选择要使用的 API 配置"
         @update:value="handleApiChange"
       />
-      <n-text v-if="apiConfigOptions.length === 0" depth="3" class="selector-hint">
+      <n-text
+        v-if="apiConfigOptions.length === 0"
+        depth="3"
+        class="selector-hint"
+      >
         暂无 API 配置，请前往设置创建
       </n-text>
     </div>
 
     <!-- RAG Selector Popover -->
-    <div v-if="showRagSelector" class="selector-popover rag-selector">
+    <div
+      v-if="showRagSelector"
+      class="selector-popover rag-selector"
+    >
       <div class="selector-header">
-        <n-text strong>选择知识库</n-text>
-        <n-button quaternary circle size="small" @click="showRagSelector = false">
+        <n-text strong>
+          选择知识库
+        </n-text>
+        <n-button
+          quaternary
+          circle
+          size="small"
+          @click="showRagSelector = false"
+        >
           <template #icon>
             <n-icon><Close /></n-icon>
           </template>
@@ -472,22 +583,47 @@ const getFileDisplayName = (file: File): string => {
         placeholder="选择要使用的知识库"
         @update:value="handleKbChange"
       />
-      <n-text depth="3" class="selector-hint">
+      <n-text
+        depth="3"
+        class="selector-hint"
+      >
         选择知识库后，AI 将基于文档内容回答问题
       </n-text>
     </div>
 
     <div class="input-footer">
-      <n-space align="center" :size="16">
-        <n-text depth="3" class="hint-text">
+      <n-space
+        align="center"
+        :size="16"
+      >
+        <n-text
+          depth="3"
+          class="hint-text"
+        >
           <span style="margin-right: 4px;">⌨️</span>
           Enter 发送 · Shift+Enter 换行
         </n-text>
         <template v-if="chat.ragEnabled">
-          <n-text depth="3" class="divider">|</n-text>
-          <n-space align="center" :size="4">
-            <n-icon :size="14" color="#000000"><Library /></n-icon>
-            <n-text depth="3" class="rag-text">
+          <n-text
+            depth="3"
+            class="divider"
+          >
+            |
+          </n-text>
+          <n-space
+            align="center"
+            :size="4"
+          >
+            <n-icon
+              :size="14"
+              color="#000000"
+            >
+              <Library />
+            </n-icon>
+            <n-text
+              depth="3"
+              class="rag-text"
+            >
               RAG 已启用
             </n-text>
           </n-space>

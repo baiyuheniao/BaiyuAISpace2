@@ -242,6 +242,61 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
+    // Migrate: add chunk_size and chunk_overlap columns if they don't exist
+    let table_info: Vec<String> = conn
+        .prepare("PRAGMA table_info(knowledge_bases)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    // Add embedding_provider if it doesn't exist (old column)
+    if !table_info.contains(&"embedding_provider".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+    }
+    
+    // Add embedding_model if it doesn't exist (old column)
+    if !table_info.contains(&"embedding_model".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+    }
+    
+    // Add embedding_dim if it doesn't exist (old column)
+    if !table_info.contains(&"embedding_dim".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN embedding_dim INTEGER NOT NULL DEFAULT 1536",
+            [],
+        );
+    }
+    
+    // Add embedding_api_config_id if it doesn't exist
+    if !table_info.contains(&"embedding_api_config_id".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN embedding_api_config_id TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+    }
+    
+    // Add chunk_size and chunk_overlap if they don't exist
+    if !table_info.contains(&"chunk_size".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 1000",
+            [],
+        );
+    }
+    if !table_info.contains(&"chunk_overlap".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN chunk_overlap INTEGER NOT NULL DEFAULT 200",
+            [],
+        );
+    }
+
     // Documents table
     conn.execute(
         r#"

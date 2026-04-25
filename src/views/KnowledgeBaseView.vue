@@ -41,6 +41,7 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NInputNumber,
   NSelect,
   NSpace,
   NPopconfirm,
@@ -331,7 +332,10 @@ const getStatusTag = (status: Document["status"]) => {
 
 <template>
   <!-- 知识库主布局 (包含侧边栏) -->
-  <n-layout class="kb-view" has-sider>
+  <n-layout
+    class="kb-view"
+    has-sider
+  >
     <!-- 侧边栏: 知识库列表 -->
     <n-layout-sider
       v-if="!kbStore.currentKb"
@@ -344,11 +348,17 @@ const getStatusTag = (status: Document["status"]) => {
         <!-- 侧边栏头部 -->
         <div class="kb-header">
           <h2 class="kb-title">
-            <n-icon :size="24"><Library /></n-icon>
+            <n-icon :size="24">
+              <Library />
+            </n-icon>
             知识库
           </h2>
           <!-- 新建按钮 -->
-          <n-button type="primary" size="small" @click="showCreateModal = true">
+          <n-button
+            type="primary"
+            size="small"
+            @click="showCreateModal = true"
+          >
             <template #icon>
               <n-icon><Add /></n-icon>
             </template>
@@ -359,7 +369,10 @@ const getStatusTag = (status: Document["status"]) => {
         <!-- 知识库列表 -->
         <div class="kb-list">
           <!-- 加载状态 -->
-          <n-spin v-if="kbStore.loading" class="kb-loading" />
+          <n-spin
+            v-if="kbStore.loading"
+            class="kb-loading"
+          />
           
           <!-- 空状态 -->
           <n-empty
@@ -369,7 +382,11 @@ const getStatusTag = (status: Document["status"]) => {
           />
 
           <!-- 知识库列表 -->
-          <n-list v-else hoverable clickable>
+          <n-list
+            v-else
+            hoverable
+            clickable
+          >
             <n-list-item
               v-for="kb in kbStore.knowledgeBases"
               :key="kb.id"
@@ -383,16 +400,28 @@ const getStatusTag = (status: Document["status"]) => {
                 
                 <!-- 知识库描述 -->
                 <template #description>
-                  <n-space vertical size="small">
-                    <n-text depth="3" class="kb-item-desc">
+                  <n-space
+                    vertical
+                    size="small"
+                  >
+                    <n-text
+                      depth="3"
+                      class="kb-item-desc"
+                    >
                       {{ kb.description || "无描述" }}
                     </n-text>
                     <!-- 元信息标签 -->
                     <n-space size="small">
-                      <n-tag size="small" type="info">
+                      <n-tag
+                        size="small"
+                        type="info"
+                      >
                         {{ kb.document_count }} 个文档
                       </n-tag>
-                      <n-tag size="small" type="default">
+                      <n-tag
+                        size="small"
+                        type="default"
+                      >
                         {{ getEmbeddingConfigName(kb.embedding_api_config_id) }}
                       </n-tag>
                     </n-space>
@@ -402,12 +431,18 @@ const getStatusTag = (status: Document["status"]) => {
                 <!-- 删除按钮 -->
                 <template #header-extra>
                   <n-popconfirm
-                    @positive-click="handleDeleteKb(kb)"
                     positive-text="删除"
                     negative-text="取消"
+                    @positive-click="handleDeleteKb(kb)"
                   >
                     <template #trigger>
-                      <n-button quaternary circle size="small" type="error" @click.stop>
+                      <n-button
+                        quaternary
+                        circle
+                        size="small"
+                        type="error"
+                        @click.stop
+                      >
                         <template #icon>
                           <n-icon><TrashOutline /></n-icon>
                         </template>
@@ -434,13 +469,19 @@ const getStatusTag = (status: Document["status"]) => {
         <!-- 面包屑导航 -->
         <n-space align="center">
           <!-- 返回按钮 -->
-          <n-button quaternary circle @click="handleBack">
+          <n-button
+            quaternary
+            circle
+            @click="handleBack"
+          >
             <template #icon>
               <n-icon><ArrowBack /></n-icon>
             </template>
           </n-button>
           <n-breadcrumb>
-            <n-breadcrumb-item @click="handleBack">知识库</n-breadcrumb-item>
+            <n-breadcrumb-item @click="handleBack">
+              知识库
+            </n-breadcrumb-item>
             <n-breadcrumb-item>{{ kbStore.currentKb.name }}</n-breadcrumb-item>
           </n-breadcrumb>
         </n-space>
@@ -469,14 +510,21 @@ const getStatusTag = (status: Document["status"]) => {
       </div>
 
       <!-- 文档标签页 -->
-      <div v-if="activeTab === 'documents'" class="kb-documents">
+      <div
+        v-if="activeTab === 'documents'"
+        class="kb-documents"
+      >
         <!-- 文档列表头部 -->
         <div class="kb-documents-header">
           <n-text depth="3">
             共 {{ kbStore.currentKbDocuments.length }} 个文档
           </n-text>
           <!-- 导入按钮 -->
-          <n-button type="primary" :loading="importing" @click="handleImport">
+          <n-button
+            type="primary"
+            :loading="importing"
+            @click="handleImport"
+          >
             <template #icon>
               <n-icon><CloudUploadOutline /></n-icon>
             </template>
@@ -491,12 +539,17 @@ const getStatusTag = (status: Document["status"]) => {
           class="kb-documents-empty"
         >
           <template #extra>
-            <n-button @click="handleImport">导入文档</n-button>
+            <n-button @click="handleImport">
+              导入文档
+            </n-button>
           </template>
         </n-empty>
 
         <!-- 文档列表 -->
-        <n-list v-else hoverable>
+        <n-list
+          v-else
+          hoverable
+        >
           <n-list-item
             v-for="doc in kbStore.currentKbDocuments"
             :key="doc.id"
@@ -509,26 +562,57 @@ const getStatusTag = (status: Document["status"]) => {
               
               <!-- 文件详情 -->
               <template #description>
-                <n-space vertical size="small">
+                <n-space
+                  vertical
+                  size="small"
+                >
                   <!-- 内容预览 -->
-                  <n-text depth="3" class="doc-preview">
+                  <n-text
+                    depth="3"
+                    class="doc-preview"
+                  >
                     {{ doc.content_preview || "无预览" }}
                   </n-text>
                   <!-- 元信息标签 -->
-                  <n-space size="small" align="center">
+                  <n-space
+                    size="small"
+                    align="center"
+                  >
                     <!-- 状态标签 -->
-                    <n-tag :type="getStatusTag(doc.status).type as any" size="small">
+                    <n-tag
+                      :type="getStatusTag(doc.status).type as any"
+                      size="small"
+                    >
                       {{ getStatusTag(doc.status).text }}
                     </n-tag>
                     <!-- 文件大小 -->
-                    <n-tag size="small" type="default">{{ formatSize(doc.file_size) }}</n-tag>
+                    <n-tag
+                      size="small"
+                      type="default"
+                    >
+                      {{ formatSize(doc.file_size) }}
+                    </n-tag>
                     <!-- 块数量 -->
-                    <n-tag size="small" type="default">{{ doc.chunk_count }} 块</n-tag>
+                    <n-tag
+                      size="small"
+                      type="default"
+                    >
+                      {{ doc.chunk_count }} 块
+                    </n-tag>
                     <!-- 创建日期 -->
-                    <n-text depth="3" class="doc-date">{{ formatDate(doc.created_at) }}</n-text>
+                    <n-text
+                      depth="3"
+                      class="doc-date"
+                    >
+                      {{ formatDate(doc.created_at) }}
+                    </n-text>
                   </n-space>
                   <!-- 错误信息 -->
-                  <n-text v-if="doc.error_message" type="error" class="doc-error">
+                  <n-text
+                    v-if="doc.error_message"
+                    type="error"
+                    class="doc-error"
+                  >
                     {{ doc.error_message }}
                   </n-text>
                 </n-space>
@@ -537,12 +621,17 @@ const getStatusTag = (status: Document["status"]) => {
               <!-- 删除按钮 -->
               <template #header-extra>
                 <n-popconfirm
-                  @positive-click="handleDeleteDoc(doc)"
                   positive-text="删除"
                   negative-text="取消"
+                  @positive-click="handleDeleteDoc(doc)"
                 >
                   <template #trigger>
-                    <n-button quaternary circle size="small" type="error">
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      type="error"
+                    >
                       <template #icon>
                         <n-icon><TrashOutline /></n-icon>
                       </template>
@@ -557,10 +646,19 @@ const getStatusTag = (status: Document["status"]) => {
       </div>
 
       <!-- 检索设置标签页 -->
-      <div v-else-if="activeTab === 'settings'" class="kb-settings">
+      <div
+        v-else-if="activeTab === 'settings'"
+        class="kb-settings"
+      >
         <!-- 检索设置卡片 -->
-        <n-card title="检索设置" class="settings-card">
-          <n-form label-placement="left" label-width="120px">
+        <n-card
+          title="检索设置"
+          class="settings-card"
+        >
+          <n-form
+            label-placement="left"
+            label-width="120px"
+          >
             <!-- 检索模式 -->
             <n-form-item label="检索模式">
               <n-radio-group v-model:value="kbStore.retrievalSettings.mode">
@@ -572,7 +670,12 @@ const getStatusTag = (status: Document["status"]) => {
                   >
                     <div class="radio-option">
                       <span class="radio-label">{{ option.label }}</span>
-                      <n-text depth="3" class="radio-desc">{{ option.desc }}</n-text>
+                      <n-text
+                        depth="3"
+                        class="radio-desc"
+                      >
+                        {{ option.desc }}
+                      </n-text>
                     </div>
                   </n-radio>
                 </n-space>
@@ -588,7 +691,9 @@ const getStatusTag = (status: Document["status"]) => {
                 :step="1"
                 show-tooltip
               />
-              <n-text depth="3">{{ kbStore.retrievalSettings.topK }} 个结果</n-text>
+              <n-text depth="3">
+                {{ kbStore.retrievalSettings.topK }} 个结果
+              </n-text>
             </n-form-item>
 
             <!-- 相似度阈值 -->
@@ -600,12 +705,17 @@ const getStatusTag = (status: Document["status"]) => {
                 :step="0.05"
                 show-tooltip
               />
-              <n-text depth="3">{{ kbStore.retrievalSettings.similarityThreshold }}</n-text>
+              <n-text depth="3">
+                {{ kbStore.retrievalSettings.similarityThreshold }}
+              </n-text>
             </n-form-item>
 
             <!-- 保存按钮 -->
             <n-form-item>
-              <n-button type="primary" @click="handleUpdateSettings">
+              <n-button
+                type="primary"
+                @click="handleUpdateSettings"
+              >
                 保存设置
               </n-button>
             </n-form-item>
@@ -613,8 +723,14 @@ const getStatusTag = (status: Document["status"]) => {
         </n-card>
 
         <!-- 知识库信息卡片 -->
-        <n-card title="知识库信息" class="settings-card">
-          <n-descriptions bordered :column="2">
+        <n-card
+          title="知识库信息"
+          class="settings-card"
+        >
+          <n-descriptions
+            bordered
+            :column="2"
+          >
             <n-descriptions-item label="名称">
               {{ kbStore.currentKb.name }}
             </n-descriptions-item>
@@ -630,7 +746,10 @@ const getStatusTag = (status: Document["status"]) => {
             <n-descriptions-item label="重叠大小">
               {{ kbStore.currentKb.chunk_overlap }}
             </n-descriptions-item>
-            <n-descriptions-item label="创建时间" :span="2">
+            <n-descriptions-item
+              label="创建时间"
+              :span="2"
+            >
               {{ formatDate(kbStore.currentKb.created_at) }}
             </n-descriptions-item>
           </n-descriptions>
@@ -643,8 +762,7 @@ const getStatusTag = (status: Document["status"]) => {
       v-else
       :native-scrollbar="false"
       class="kb-empty-content"
-    >
-    </n-layout-content>
+    />
   </n-layout>
 
   <!-- 新建知识库弹窗 -->
@@ -655,10 +773,19 @@ const getStatusTag = (status: Document["status"]) => {
     style="width: 500px"
     :mask-closable="false"
   >
-    <n-form label-placement="left" label-width="100px">
+    <n-form
+      label-placement="left"
+      label-width="100px"
+    >
       <!-- 名称 -->
-      <n-form-item label="名称" required>
-        <n-input v-model:value="createForm.name" placeholder="输入知识库名称" />
+      <n-form-item
+        label="名称"
+        required
+      >
+        <n-input
+          v-model:value="createForm.name"
+          placeholder="输入知识库名称"
+        />
       </n-form-item>
 
       <!-- 描述 -->
@@ -672,14 +799,20 @@ const getStatusTag = (status: Document["status"]) => {
       </n-form-item>
 
       <!-- Embedding API 配置 -->
-      <n-form-item label="Embedding API" required>
+      <n-form-item
+        label="Embedding API"
+        required
+      >
         <n-select
           v-model:value="createForm.embeddingApiConfigId"
           :options="embeddingApiConfigOptions"
           placeholder="选择 Embedding API 配置"
         />
         <template #feedback>
-          <n-text depth="3" style="font-size: 12px;">
+          <n-text
+            depth="3"
+            style="font-size: 12px;"
+          >
             在「设置」中添加 Embedding API 配置，支持任意 OpenAI 兼容的嵌入模型
           </n-text>
         </template>
@@ -711,8 +844,14 @@ const getStatusTag = (status: Document["status"]) => {
     <!-- 弹窗底部按钮 -->
     <template #footer>
       <n-space justify="end">
-        <n-button @click="showCreateModal = false">取消</n-button>
-        <n-button type="primary" :loading="creating" @click="handleCreate">
+        <n-button @click="showCreateModal = false">
+          取消
+        </n-button>
+        <n-button
+          type="primary"
+          :loading="creating"
+          @click="handleCreate"
+        >
           创建
         </n-button>
       </n-space>

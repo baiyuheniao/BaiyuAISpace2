@@ -101,9 +101,16 @@ onMounted(async () => {
   <!-- 聊天主布局容器 -->
   <n-layout class="chat-view">
     <!-- 消息区域 -->
-    <n-layout-content class="messages-area" :native-scrollbar="false">
+    <n-layout-content
+      class="messages-area"
+      :native-scrollbar="false"
+    >
       <!-- 有消息时显示消息列表 -->
-      <div v-if="hasMessages" ref="messagesContainer" class="messages-container">
+      <div
+        v-if="hasMessages"
+        ref="messagesContainer"
+        class="messages-container"
+      >
         <!-- 遍历渲染每条消息 -->
         <ChatMessage
           v-for="message in chat.currentSession?.messages"
@@ -113,17 +120,26 @@ onMounted(async () => {
       </div>
 
       <!-- 空状态 - 没有消息时显示 -->
-      <div v-else class="empty-state">
+      <div
+        v-else
+        class="empty-state"
+      >
         <div class="empty-content">
           <!-- 主标题 -->
-          <h2 class="empty-title">开始新的对话</h2>
+          <h2 class="empty-title">
+            开始新的对话
+          </h2>
           
           <!-- 副标题 - 显示当前使用的模型信息 -->
           <p class="empty-desc">
             <!-- 如果有激活配置，显示配置信息 -->
             <template v-if="settings.activeConfig">
-              使用 <n-text code>{{ settings.activeConfig.name }}</n-text> 的 
-              <n-text code>{{ settings.activeConfig.model }}</n-text> 模型
+              使用 <n-text code>
+                {{ settings.activeConfig.name }}
+              </n-text> 的 
+              <n-text code>
+                {{ settings.activeConfig.model }}
+              </n-text> 模型
             </template>
             <!-- 如果没有配置，引导用户去设置 -->
             <template v-else>
@@ -135,7 +151,10 @@ onMounted(async () => {
     </n-layout-content>
 
     <!-- 输入区域 - 固定在底部 -->
-    <n-layout-footer class="input-area" bordered>
+    <n-layout-footer
+      class="input-area"
+      bordered
+    >
       <!-- 消息输入组件 -->
       <ChatInput />
     </n-layout-footer>
