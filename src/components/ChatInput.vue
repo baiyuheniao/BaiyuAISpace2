@@ -148,6 +148,10 @@ const handleSend = async () => {
   }
 };
 
+const handleStop = () => {
+  chat.stopStream();
+};
+
 const handleKeydown = (e: KeyboardEvent) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -378,24 +382,29 @@ const getFileDisplayName = (file: File): string => {
           {{ availableKbCount === 0 ? '无可用知识库' : chat.ragEnabled ? '更改知识库' : '启用知识库' }}
         </n-tooltip>
 
-        <!-- Send Button -->
+        <!-- Send/Stop Button -->
         <n-tooltip placement="top">
           <template #trigger>
             <n-button
               type="primary"
               circle
               size="large"
-              :disabled="!canSend"
+              :disabled="!canSend && !chat.isLoading"
               :loading="chat.isLoading"
               class="send-btn"
-              @click="handleSend"
+              @click="chat.isLoading ? handleStop() : handleSend()"
             >
               <template #icon>
-                <n-icon><Send /></n-icon>
+                <n-icon>
+                  <Send v-if="!chat.isLoading" />
+                  <svg v-else viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                </n-icon>
               </template>
             </n-button>
           </template>
-          发送消息
+          {{ chat.isLoading ? '停止生成' : '发送消息' }}
         </n-tooltip>
       </div>
     </div>

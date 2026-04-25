@@ -771,10 +771,16 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             v-model:value="formData.apiKey" 
             type="password"
             show-password-on="click"
-            placeholder="留空表示不修改"
+            :placeholder="formData.provider === 'baidu' ? '请输入 access_token' : '留空表示不修改'"
           />
           <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">
+            <n-text v-if="formData.provider === 'baidu'" depth="2" style="font-size: 12px; color: #f0a020;">
+              百度千帆需要 access_token，而非 API Key。请在
+              <n-a href="https://console.bce.baidu.com/qianfan/" target="_blank">百度千帆控制台</n-a>
+              获取 API Key 和 Secret Key，然后
+              <n-a href="https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Ck3edn42t" target="_blank">换取 access_token</n-a>
+            </n-text>
+            <n-text v-else depth="3" style="font-size: 12px;">
               留空表示保持原 API Key 不变
             </n-text>
           </template>

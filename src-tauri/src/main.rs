@@ -28,6 +28,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // LLM commands
             commands::llm::stream_message,
+            // Auth commands
+            commands::auth::get_baidu_access_token,
             // Database commands
             save_session_cmd,
             save_message_cmd,

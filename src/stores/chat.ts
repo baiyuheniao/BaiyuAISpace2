@@ -179,6 +179,9 @@ export const useChatStore = defineStore("chat", () => {
       if (!currentSession.value) return;
       if (chunk.session_id !== currentSession.value.id) return;
 
+      // 如果用户已停止，不再处理后续内容
+      if (!isLoading.value && !chunk.done) return;
+
       // 获取最后一条消息
       const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
       if (!lastMessage || lastMessage.role !== "assistant") return;
@@ -749,6 +752,19 @@ ${toolDefs}
     currentStreamContent.value = "";
   };
 
+  // ============ 流式中断功能 ============
+  const stopStream = () => {
+    if (isLoading.value) {
+      isLoading.value = false;
+      const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
+      if (lastMessage && lastMessage.role === "assistant") {
+        lastMessage.streaming = false;
+      }
+      currentStreamContent.value = "";
+      console.log("[Stream] Stopped by user");
+    }
+  };
+
   // ============ 返回公共接口 ============
   return {
     // 状态
@@ -772,5 +788,6 @@ ${toolDefs}
     selectKnowledgeBaseForRag,  // 选择知识库
     classifyError,           // 错误分类
     executeMcpTool,         // 执行 MCP 工具
+    stopStream,              // 停止流式输出
   };
 });
