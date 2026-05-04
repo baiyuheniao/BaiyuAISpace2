@@ -644,8 +644,12 @@ async fn request_llm_once(
             return Ok(text.to_string());
         }
     } else if provider == "anthropic" {
-        if let Some(resp) = json["completion"].as_str() {
-            return Ok(resp.to_string());
+        if let Some(content_array) = json["content"].as_array() {
+            if let Some(first_content) = content_array.first() {
+                if let Some(text) = first_content["text"].as_str() {
+                    return Ok(text.to_string());
+                }
+            }
         }
     } else {
         if let Some(choices) = json["choices"].as_array() {

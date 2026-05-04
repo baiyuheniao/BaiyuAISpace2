@@ -22,6 +22,8 @@ fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -58,10 +60,8 @@ fn main() {
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
         ])
-        .setup(|app| {
-            // Initialize database
+        .setup(move |app| {
             let db = Database::new(app.handle());
-            let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 if let Err(e) = db.init().await {
                     log::error!("Failed to initialize database: {}", e);

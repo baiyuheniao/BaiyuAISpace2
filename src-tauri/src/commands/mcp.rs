@@ -307,6 +307,10 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
 
     let response: JsonRpcResponse = serde_json::from_str(&response_line).map_err(MCPError::JsonError)?;
 
+    // Ensure the child process is terminated
+    let _ = child.kill();
+    let _ = child.wait();
+
     if let Some(error) = response.error {
         return Err(MCPError::CommunicationError(format!("MCP error ({}): {}", error.code, error.message)));
     }
@@ -621,6 +625,10 @@ async fn call_mcp_tool_stdio(
     // Parse JSON-RPC response
     let response: JsonRpcResponse = serde_json::from_str(&response_line)
         .map_err(|e| MCPError::JsonError(e))?;
+
+    // Ensure the child process is terminated
+    let _ = child.kill();
+    let _ = child.wait();
 
     if let Some(error) = response.error {
         return Err(MCPError::CommunicationError(format!(

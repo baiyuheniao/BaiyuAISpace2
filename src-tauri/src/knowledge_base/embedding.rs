@@ -26,8 +26,39 @@ fn get_embedding_url(provider: &str) -> String {
     }
 }
 
-/// Generate embeddings for text batch
+const EMBEDDING_BATCH_SIZE: usize = 100;
+
+/// Generate embeddings for text batch with batch size limit
 pub async fn generate_embeddings(
+    texts: Vec<String>,
+    provider: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    let mut all_embeddings = Vec::new();
+    
+    for chunk in texts.chunks(EMBEDDING_BATCH_SIZE) {
+        let batch_embeddings = generate_embeddings_batch(
+            chunk.to_vec(),
+            provider,
+            api_key,
+            model,
+        ).await?;
+        all_embeddings.extend(batch_embeddings);
+        
+        if texts.len() > EMBEDDING_BATCH_SIZE {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    
+    Ok(all_embeddings)
+}
+
+async fn generate_embeddings_batch(
     texts: Vec<String>,
     provider: &str,
     api_key: &str,

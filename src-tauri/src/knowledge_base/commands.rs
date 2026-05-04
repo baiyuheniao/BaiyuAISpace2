@@ -200,10 +200,13 @@ pub async fn import_document(
         .to_lowercase();
     
     // Get file size
-    let file_size = tokio::fs::metadata(&file_path)
-        .await
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
+    let file_size = match tokio::fs::metadata(&file_path).await {
+        Ok(m) => m.len() as i64,
+        Err(e) => {
+            log::warn!("Failed to read file metadata for {}: {}", file_path, e);
+            0
+        }
+    };
     
     conn.execute(
         r#"
