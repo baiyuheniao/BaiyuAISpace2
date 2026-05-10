@@ -2,23 +2,61 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
+<!--
+  Layout.vue - 应用布局组件
+  
+  功能说明:
+  - 应用主布局结构 (左侧边栏 + 主内容区)
+  - 导航菜单
+  - 新建对话按钮
+  - 用户信息展示
+  
+  组成部分:
+  - 左侧边栏 (n-layout-sider): 包含 logo、导航菜单、用户信息
+  - 主内容区 (n-layout): 显示路由视图
+-->
+
 <script setup lang="ts">
+// 导入 Vue 相关功能
 import { computed, h } from "vue";
+
+// 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
+
+// 导入 NaiveUI 组件
 import { NLayout, NLayoutSider, NMenu, NButton } from "naive-ui";
+
+// 导入类型
 import type { MenuOption } from "naive-ui";
+
+// 导入 Store
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
+
+// 导入图标
 import { Chatbubbles, Time, Settings, Library, Cube } from "@vicons/ionicons5";
+
+// 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
 
+// ============ 响应式数据 ============
+
+// 当前路由信息
 const route = useRoute();
+
+// 路由导航
 const router = useRouter();
+
+// 设置 Store
 const settings = useSettingsStore();
+
+// 聊天 Store
 const chat = useChatStore();
 
+// 当前激活的菜单项
 const activeKey = computed(() => route.name as string);
 
+// 导航菜单配置
 const menuOptions: MenuOption[] = [
   {
     label: "Chat/对话",
@@ -47,10 +85,12 @@ const menuOptions: MenuOption[] = [
   },
 ];
 
+// 菜单项点击处理
 const handleMenuUpdate = (key: string) => {
   router.push({ name: key });
 };
 
+// 新建对话按钮点击处理
 const handleNewChat = () => {
   if (!settings.activeConfigId) {
     // No API config, redirect to settings

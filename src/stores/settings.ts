@@ -6,7 +6,23 @@ import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 
-// Preset providers with default base URLs
+/**
+ * 设置 Store - 管理应用全局设置
+ * 
+ * 功能说明:
+ * - 主题模式切换 (深色/浅色)
+ * - API 配置管理 (LLM 和 Embedding)
+ * - API 密钥的安全存储 (通过 Tauri 后端)
+ * 
+ * 使用方式:
+ * import { useSettingsStore } from "@/stores/settings";
+ * const settings = useSettingsStore();
+ */
+
+// 预设的 LLM 提供商配置
+// key: 提供商标识符
+// name: 显示名称
+// baseUrl: API 基础 URL
 export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }> = {
   openai: {
     name: "OpenAI",
@@ -70,33 +86,43 @@ export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }>
   },
 };
 
-// API Configuration interface
+/**
+ * LLM API 配置接口
+ * 用于配置各种大语言模型的 API 连接信息
+ */
 export interface ApiConfig {
-  id: string;
-  name: string; // Custom name for this config
-  provider: string; // Key from PRESET_PROVIDERS
-  baseUrl: string;
-  model: string; // User manually inputs model name
-  apiKey: string;
-  createdAt: number;
+  id: string;                      // 配置唯一标识符
+  name: string;                    // 自定义配置名称 (如 "我的 GPT-4")
+  provider: string;                // 提供商标识符 (对应 PRESET_PROVIDERS 的 key)
+  baseUrl: string;                 // API 基础 URL
+  model: string;                   // 模型名称 (如 gpt-4, claude-3-opus)
+  apiKey: string;                  // API 密钥 (会存储到系统安全存储)
+  createdAt: number;               // 创建时间戳
 }
 
-// Embedding API Configuration interface - same structure as ApiConfig
+/**
+ * Embedding API 配置接口
+ * 用于配置文本嵌入模型的 API (知识库向量化用)
+ * 结构与 ApiConfig 相同
+ */
 export interface EmbeddingApiConfig {
   id: string;
   name: string;
   provider: string;
   baseUrl: string;
-  model: string; // User manually inputs embedding model name
+  model: string;
   apiKey: string;
   createdAt: number;
 }
 
-// Storage version - increment when schema changes
+// 存储版本号 - 当数据结构变更时需要递增
 const STORAGE_VERSION = "6";
 const STORAGE_VERSION_KEY = "baiyu-aispace-version";
 
-// Check and clear old storage if version mismatch
+/**
+ * 检查并处理存储版本
+ * 如果版本号变化,清除旧数据以避免兼容性问题
+ */
 const checkStorageVersion = () => {
   const storedVersion = localStorage.getItem(STORAGE_VERSION_KEY);
   if (storedVersion !== STORAGE_VERSION) {
@@ -111,17 +137,23 @@ checkStorageVersion();
 export const useSettingsStore = defineStore(
   "settings",
   () => {
-    // Theme
+    // ============ 主题相关状态 ============
+    
+    // 深色模式开关
     const darkMode = ref(true);
+    
+    // 切换深色/浅色主题
     const toggleTheme = () => {
       darkMode.value = !darkMode.value;
       applyTheme();
     };
 
+    // 初始化主题设置
     const initTheme = () => {
       applyTheme();
     };
 
+    // 应用主题到 HTML 元素
     const applyTheme = () => {
       const html = document.documentElement;
       if (darkMode.value) {
@@ -131,27 +163,35 @@ export const useSettingsStore = defineStore(
       }
     };
 
-    // API Configurations - multiple configs supported
+    // ============ API 配置状态 ============
+    
+    // LLM API 配置列表 (支持多配置)
     const apiConfigs = ref<ApiConfig[]>([]);
+    
+    // 当前激活的 LLM 配置 ID
     const activeConfigId = ref<string | null>(null);
 
-    // Embedding API Configurations - separate from LLM configs
+    // Embedding API 配置列表 (与 LLM 配置分开)
     const embeddingApiConfigs = ref<EmbeddingApiConfig[]>([]);
+    
+    // 当前激活的 Embedding 配置 ID
     const activeEmbeddingApiConfigId = ref<string | null>(null);
 
-    // Get active config
+    // ============ 计算属性 ============
+
+    // 获取当前激活的 LLM 配置
     const activeConfig = computed(() => {
       if (!activeConfigId.value) return null;
       return apiConfigs.value.find((c) => c.id === activeConfigId.value) || null;
     });
 
-    // Get active embedding API config
+    // 获取当前激活的 Embedding 配置
     const activeEmbeddingApiConfig = computed(() => {
       if (!activeEmbeddingApiConfigId.value) return null;
       return embeddingApiConfigs.value.find((c) => c.id === activeEmbeddingApiConfigId.value) || null;
     });
 
-    // Get embedding API config options for dropdown
+    // 获取 Embedding 配置下拉选项
     const embeddingApiConfigOptions = computed(() => {
       return embeddingApiConfigs.value.map((config) => ({
         label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider} - ${config.model})`,
@@ -159,7 +199,7 @@ export const useSettingsStore = defineStore(
       }));
     });
 
-    // Get preset provider options for dropdown
+    // 获取预设提供商下拉选项
     const presetProviderOptions = computed(() => {
       return Object.entries(PRESET_PROVIDERS).map(([key, value]) => ({
         label: value.name,
@@ -167,7 +207,7 @@ export const useSettingsStore = defineStore(
       }));
     });
 
-    // Get all API config options for dropdown (used in chat)
+    // 获取 API 配置下拉选项 (聊天页面使用)
     const apiConfigOptions = computed(() => {
       return apiConfigs.value.map((config) => ({
         label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider})`,
@@ -175,7 +215,16 @@ export const useSettingsStore = defineStore(
       }));
     });
 
-    // Create a new API config
+    // ============ 方法函数 ============
+
+    /**
+     * 创建新的 LLM API 配置
+     * @param name 配置名称
+     * @param provider 提供商标识符
+     * @param model 模型名称
+     * @param apiKey API 密钥
+     * @param customBaseUrl 自定义 API 地址 (可选)
+     */
     const createApiConfig = (
       name: string,
       provider: string,
@@ -206,7 +255,7 @@ export const useSettingsStore = defineStore(
       return config;
     };
 
-    // Update an existing API config
+    // 更新现有 LLM API 配置
     const updateApiConfig = (configId: string, updates: Partial<ApiConfig>) => {
       const idx = apiConfigs.value.findIndex((c) => c.id === configId);
       if (idx === -1) return;
@@ -221,7 +270,7 @@ export const useSettingsStore = defineStore(
       apiConfigs.value[idx] = { ...config, ...updates };
     };
 
-    // Delete an API config
+    // 删除 LLM API 配置
     const deleteApiConfig = (configId: string) => {
       apiConfigs.value = apiConfigs.value.filter((c) => c.id !== configId);
       
@@ -230,16 +279,16 @@ export const useSettingsStore = defineStore(
         activeConfigId.value = apiConfigs.value.length > 0 ? apiConfigs.value[0].id : null;
       }
       
-      // Delete from secure storage
+      // 删除安全存储中的密钥
       deleteApiKeyFromSecureStorage(configId);
     };
 
-    // Set active config
+    // 设置当前激活的配置
     const setActiveConfig = (configId: string | null) => {
       activeConfigId.value = configId;
     };
 
-    // Create a new Embedding API config
+    // 创建新的 Embedding API 配置
     const createEmbeddingApiConfig = (
       name: string,
       provider: string,
@@ -270,7 +319,7 @@ export const useSettingsStore = defineStore(
       return config;
     };
 
-    // Update an existing Embedding API config
+    // 更新现有 Embedding API 配置
     const updateEmbeddingApiConfig = (configId: string, updates: Partial<EmbeddingApiConfig>) => {
       const idx = embeddingApiConfigs.value.findIndex((c) => c.id === configId);
       if (idx === -1) return;
@@ -285,7 +334,7 @@ export const useSettingsStore = defineStore(
       embeddingApiConfigs.value[idx] = { ...config, ...updates };
     };
 
-    // Delete an Embedding API config
+    // 删除 Embedding API 配置
     const deleteEmbeddingApiConfig = (configId: string) => {
       embeddingApiConfigs.value = embeddingApiConfigs.value.filter((c) => c.id !== configId);
       
@@ -303,7 +352,7 @@ export const useSettingsStore = defineStore(
       activeEmbeddingApiConfigId.value = configId;
     };
 
-    // Load embedding API key from secure storage
+    // 从安全存储加载指定配置的 Embedding API 密钥
     const loadEmbeddingApiKeyForConfig = async (configId: string): Promise<string | null> => {
       try {
         const apiKey = await invoke<string | null>("get_api_key", { provider: `emb_${configId}` });
@@ -320,14 +369,14 @@ export const useSettingsStore = defineStore(
       }
     };
 
-    // Load all embedding API keys from secure storage
+    // 加载所有 Embedding API 密钥
     const loadAllEmbeddingApiKeys = async () => {
       for (const config of embeddingApiConfigs.value) {
         await loadEmbeddingApiKeyForConfig(config.id);
       }
     };
 
-    // Load API key from secure storage for a config
+    // 从安全存储加载指定配置的 API 密钥
     const loadApiKeyForConfig = async (configId: string): Promise<string | null> => {
       try {
         const apiKey = await invoke<string | null>("get_api_key", { provider: configId });
@@ -344,14 +393,14 @@ export const useSettingsStore = defineStore(
       }
     };
 
-    // Load all API keys from secure storage
+    // 加载所有 API 密钥
     const loadAllApiKeys = async () => {
       for (const config of apiConfigs.value) {
         await loadApiKeyForConfig(config.id);
       }
     };
 
-    // Save API key to secure storage
+    // 保存 API 密钥到安全存储
     const saveApiKeyToSecureStorage = async (configId: string, apiKey: string) => {
       try {
         await invoke("save_api_key", { provider: configId, apiKey });
@@ -360,7 +409,7 @@ export const useSettingsStore = defineStore(
       }
     };
 
-    // Delete API key from secure storage
+    // 从安全存储删除 API 密钥
     const deleteApiKeyFromSecureStorage = async (configId: string) => {
       try {
         await invoke("delete_api_key", { provider: configId });
@@ -369,7 +418,7 @@ export const useSettingsStore = defineStore(
       }
     };
 
-    // Get default base URL for a provider
+    // 获取提供商的默认 API 地址
     const getDefaultBaseUrl = (provider: string): string => {
       return PRESET_PROVIDERS[provider]?.baseUrl || "";
     };

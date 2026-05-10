@@ -2,8 +2,23 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
+<!--
+  ChatInput.vue - 聊天输入组件
+  
+  功能说明:
+  - 消息文本输入 (支持多行)
+  - 附件文件上传
+  - 知识库选择 (RAG)
+  - API 配置切换
+  - MCP 工具开关
+  - 消息发送/停止生成
+-->
+
 <script setup lang="ts">
+// 导入 Vue 相关功能
 import { ref, computed, onMounted } from "vue";
+
+// 导入 NaiveUI 组件
 import { 
   NButton, 
   NIcon, 
@@ -15,10 +30,14 @@ import {
   NTag,
   useNotification,
 } from "naive-ui";
+
+// 导入 Store
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore, PRESET_PROVIDERS } from "@/stores/settings";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
 import { useMCPStore } from "@/stores/mcp";
+
+// 导入图标
 import { 
   Send, 
   Library, 
@@ -28,26 +47,46 @@ import {
   Cube,
 } from "@vicons/ionicons5";
 
+// ============ Store 实例 ============
+
 const chat = useChatStore();
 const settings = useSettingsStore();
 const kbStore = useKnowledgeBaseStore();
 const mcp = useMCPStore();
+
+// 通知组件
 const notification = useNotification();
 
+// ============ 响应式状态 ============
+
+// 输入框文本内容
 const inputValue = ref("");
+
+// 输入框 DOM 引用
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+
+// 文件输入 DOM 引用
 const fileInputRef = ref<HTMLInputElement | null>(null);
+
+// 已附加的文件列表
 const attachedFiles = ref<File[]>([]);
+
+// 是否显示知识库选择器
 const showRagSelector = ref(false);
+
+// 是否显示 API 配置选择器
 const showApiSelector = ref(false);
 
+// ============ 计算属性 ============
+
+// 是否可以发送消息
 const canSend = computed(() => {
   const hasContent = inputValue.value.trim().length > 0;
   const hasFiles = attachedFiles.value.length > 0;
   return (hasContent || hasFiles) && !chat.isLoading && settings.activeConfig;
 });
 
-// API Config options
+// API 配置下拉选项
 const apiConfigOptions = computed(() => {
   return settings.apiConfigs.map(config => ({
     label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider})`,
@@ -55,12 +94,12 @@ const apiConfigOptions = computed(() => {
   }));
 });
 
-// Current API Config info
+// 当前使用的 API 配置
 const currentApiConfig = computed(() => {
   return settings.activeConfig;
 });
 
-// Knowledge base options for selector
+// 知识库下拉选项
 const kbOptions = computed(() => {
   return [
     { label: "不使用知识库", value: "" },
@@ -71,33 +110,39 @@ const kbOptions = computed(() => {
   ];
 });
 
-// Selected KB name for display
+// 已选中的知识库名称
 const selectedKbName = computed(() => {
   if (!chat.selectedKnowledgeBaseId) return null;
   const kb = kbStore.knowledgeBases.find(k => k.id === chat.selectedKnowledgeBaseId);
   return kb?.name;
 });
 
-// Enabled MCP servers count
+// 已启用的 MCP 服务器数量
 const enabledMcpServersCount = computed(() => {
   return mcp.servers.filter(s => s.enabled).length;
 });
 
-// Available MCP tools count
+// 可用的 MCP 工具数量
 const availableMcpToolsCount = computed(() => {
   return mcp.availableTools.length;
 });
 
-// Available knowledge bases
+// 可用的知识库数量
 const availableKbCount = computed(() => {
   return kbStore.knowledgeBases.length;
 });
 
+// ============ 生命周期钩子 ============
+
+// 组件挂载时加载数据
 onMounted(() => {
   kbStore.loadKnowledgeBases();
   mcp.loadServers();
 });
 
+// ============ 方法函数 ============
+
+// 发送消息
 const handleSend = async () => {
   const content = inputValue.value.trim();
   if ((!content && attachedFiles.value.length === 0) || chat.isLoading) return;
@@ -148,10 +193,12 @@ const handleSend = async () => {
   }
 };
 
+// 停止生成
 const handleStop = () => {
   chat.stopStream();
 };
 
+// 键盘事件处理 (Enter 发送, Shift+Enter 换行)
 const handleKeydown = (e: KeyboardEvent) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -159,6 +206,7 @@ const handleKeydown = (e: KeyboardEvent) => {
   }
 };
 
+// 输入框内容变化处理 (自动调整高度)
 const handleInput = () => {
   if (inputRef.value) {
     inputRef.value.style.height = "auto";
@@ -166,6 +214,7 @@ const handleInput = () => {
   }
 };
 
+// 知识库选择变化处理
 const handleKbChange = (value: string) => {
   if (value === "") {
     chat.selectKnowledgeBaseForRag(null);
@@ -176,24 +225,29 @@ const handleKbChange = (value: string) => {
   }
 };
 
+// 禁用 RAG
 const handleDisableRag = () => {
   chat.toggleRag(false);
   chat.selectKnowledgeBaseForRag(null);
 };
 
+// API 配置切换
 const handleApiChange = (configId: string) => {
   settings.setActiveConfig(configId);
   showApiSelector.value = false;
 };
 
+// MCP 开关切换
 const handleMcpToggle = () => {
   chat.mcpEnabled = !chat.mcpEnabled;
 };
 
+// 禁用 MCP
 const handleDisableMcp = () => {
   chat.mcpEnabled = false;
 };
 
+// 选择文件按钮点击
 const handleFileSelect = () => {
   fileInputRef.value?.click();
 };

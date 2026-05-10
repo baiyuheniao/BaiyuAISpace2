@@ -2,47 +2,85 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+/**
+ * MCP Store - 管理 Model Context Protocol (MCP) 服务器和工具
+ * 
+ * 功能说明:
+ * - MCP 服务器的 CRUD 操作
+ * - 服务器类型支持: stdio (标准输入输出), SSE (服务器发送事件), HTTP
+ * - 工具列表加载和管理
+ * - 工具调用和结果处理
+ * 
+ * 使用方式:
+ * import { useMCPStore } from "@/stores/mcp";
+ * const mcp = useMCPStore();
+ */
+
 import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 
+// ============ 类型定义 ============
+
+/**
+ * MCP 服务器配置
+ * 定义一个可连接的 MCP 服务器
+ */
 export interface MCPServer {
-  id: string;
-  name: string;
-  description: string;
-  server_type: "stdio" | "sse" | "http";
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  port?: number;
-  url?: string;
-  api_key?: string;
-  enabled: boolean;
-  created_at: number;
-  updated_at: number;
+  id: string;                      // 服务器唯一标识符
+  name: string;                    // 服务器名称
+  description: string;            // 服务器描述
+  server_type: "stdio" | "sse" | "http";  // 服务器连接类型
+  command: string;                // 启动命令 (stdio 类型使用)
+  args: string[];                 // 命令行参数
+  env: Record<string, string>;   // 环境变量
+  port?: number;                  // 端口号 (SSE/HTTP 类型使用)
+  url?: string;                   // 服务器 URL (SSE/HTTP 类型使用)
+  api_key?: string;              // API 密钥 (可选)
+  enabled: boolean;              // 是否启用
+  created_at: number;            // 创建时间戳
+  updated_at: number;            // 更新时间戳
 }
 
+/**
+ * MCP 工具
+ * 服务器提供的可调用工具
+ */
 export interface MCPTool {
-  server_id: string;
-  server_name: string;
-  name: string;
-  description: string;
-  input_schema: Record<string, any>;
+  server_id: string;             // 所属服务器 ID
+  server_name: string;            // 服务器名称
+  name: string;                  // 工具名称
+  description: string;           // 工具描述
+  input_schema: Record<string, any>;  // 输入参数 schema
 }
 
+/**
+ * MCP 工具调用结果
+ */
 export interface MCPToolResult {
-  tool_name: string;
-  result: Record<string, any>;
-  error?: string;
+  tool_name: string;              // 工具名称
+  result: Record<string, any>;   // 调用结果
+  error?: string;                 // 错误信息 (如果有)
 }
 
 export const useMCPStore = defineStore("mcp", () => {
+  // ============ 响应式状态 ============
+  
+  // MCP 服务器列表
   const servers = ref<MCPServer[]>([]);
+  
+  // 可用工具列表
   const tools = ref<MCPTool[]>([]);
+  
+  // 是否正在加载
   const isLoading = ref(false);
+  
+  // 当前选中的服务器 ID
   const selectedServerId = ref<string | null>(null);
 
-  // Get available tools from all enabled servers
+  // ============ 计算属性 ============
+  
+  // 获取所有已启用服务器的工具
   const availableTools = computed(() => {
     return tools.value.filter((tool) => {
       const server = servers.value.find((s) => s.id === tool.server_id);
@@ -50,12 +88,14 @@ export const useMCPStore = defineStore("mcp", () => {
     });
   });
 
-  // Get tools for a specific server
+  // ============ 方法函数 ============
+  
+  // 获取指定服务器的工具列表
   const getToolsByServer = (serverId: string) => {
     return tools.value.filter((tool) => tool.server_id === serverId);
   };
 
-  // Load all MCP servers
+  // 加载所有 MCP 服务器
   const loadServers = async () => {
     try {
       isLoading.value = true;
@@ -73,7 +113,7 @@ export const useMCPStore = defineStore("mcp", () => {
     }
   };
 
-  // Load all tools from all servers
+  // 加载所有服务器的工具
   const loadAllTools = async () => {
     try {
       const allTools = await invoke<MCPTool[]>("get_all_mcp_tools");
@@ -83,7 +123,7 @@ export const useMCPStore = defineStore("mcp", () => {
     }
   };
 
-  // Load tools for a specific server
+  // 加载指定服务器的工具
   const loadServerTools = async (serverId: string) => {
     try {
       const serverTools = await invoke<MCPTool[]>("get_mcp_tools", {
@@ -97,7 +137,7 @@ export const useMCPStore = defineStore("mcp", () => {
     }
   };
 
-  // Create or update a MCP server
+  // 创建或更新 MCP 服务器
   const createServer = async (
     server: Omit<MCPServer, "id" | "created_at" | "updated_at">
   ): Promise<MCPServer | null> => {
@@ -128,7 +168,7 @@ export const useMCPStore = defineStore("mcp", () => {
     return null;
   };
 
-  // Update a MCP server
+  // 更新 MCP 服务器
   const updateServer = async (
     serverId: string,
     updates: Partial<MCPServer>

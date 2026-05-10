@@ -2,21 +2,55 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
 
+<!--
+  ChatMessage.vue - 聊天消息组件
+  
+  功能说明:
+  - 显示单条聊天消息 (用户/AI)
+  - Markdown 内容渲染 (代码高亮)
+  - 消息时间显示
+  - 复制消息内容
+  - 流式输出动画
+  
+  组成部分:
+  - 消息头像
+  - 消息头部 (作者 + 时间)
+  - 消息内容 (Markdown 渲染)
+  - 流式输出指示器
+  - 错误提示
+  - 操作按钮 (复制)
+-->
+
 <script setup lang="ts">
+// 导入 Vue 相关功能
 import { computed, ref } from "vue";
+
+// 导入 NaiveUI 组件
 import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
+
+// 导入 Markdown 解析库
 import { marked } from "marked";
 import { markedHighlight } from "marked-highlight";
+
+// 导入代码高亮库
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
+
+// 导入消息类型
 import type { Message } from "@/stores/chat";
+
+// 导入图标
 import { Person, Sparkles, Copy } from "@vicons/ionicons5";
+
+// ============ Props 定义 ============
 
 const props = defineProps<{
   message: Message;
 }>();
 
-// Configure marked once
+// ============ Markdown 配置 ============
+
+// 配置 marked (只执行一次)
 let markedConfigured = false;
 if (!markedConfigured) {
   marked.use(
@@ -31,14 +65,23 @@ if (!markedConfigured) {
   markedConfigured = true;
 }
 
+// ============ 计算属性 ============
+
+// 是否为用户消息
 const isUser = computed(() => props.message.role === "user");
+
+// 是否为 AI 助手消息
 const isAssistant = computed(() => props.message.role === "assistant");
 
+// 渲染后的 Markdown 内容
 const renderedContent = computed(() => {
   if (!props.message.content) return "";
   return marked.parse(props.message.content, { async: false }) as string;
 });
 
+// ============ 方法函数 ============
+
+// 格式化时间显示
 const formatTime = (timestamp: number) => {
   return new Date(timestamp).toLocaleTimeString("zh-CN", {
     hour: "2-digit",
@@ -46,9 +89,10 @@ const formatTime = (timestamp: number) => {
   });
 };
 
-// Copy functionality
+// 复制状态
 const copied = ref(false);
 
+// 复制消息内容
 const handleCopy = async () => {
   try {
     await navigator.clipboard.writeText(props.message.content);

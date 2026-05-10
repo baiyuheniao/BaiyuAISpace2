@@ -2,99 +2,159 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+/**
+ * 知识库 Store - 管理 RAG (检索增强生成) 相关的知识库功能
+ * 
+ * 功能说明:
+ * - 知识库的 CRUD 操作 (创建、读取、更新、删除)
+ * - 文档上传和管理
+ * - 文本分块 (Chunking) 配置
+ * - 相似度检索
+ * 
+ * 使用方式:
+ * import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
+ * const kbStore = useKnowledgeBaseStore();
+ */
+
 import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-// Types matching Rust backend
+// ============ 类型定义 (与 Rust 后端对应) ============
+
+/**
+ * 知识库类型
+ * 表示一个完整的知识库对象
+ */
 export interface KnowledgeBase {
-  id: string;
-  name: string;
-  description: string;
-  embedding_api_config_id: string; // Reference to EmbeddingApiConfig in settings
-  chunk_size: number;
-  chunk_overlap: number;
-  created_at: number;
-  updated_at: number;
-  document_count: number;
+  id: string;                       // 知识库唯一标识符
+  name: string;                    // 知识库名称
+  description: string;             // 知识库描述
+  embedding_api_config_id: string; // 关联的 Embedding API 配置 ID
+  chunk_size: number;              // 文本分块大小 (token 数)
+  chunk_overlap: number;           // 分块重叠大小
+  created_at: number;              // 创建时间戳
+  updated_at: number;              // 更新时间戳
+  document_count: number;          // 包含的文档数量
 }
 
+/**
+ * 文档类型
+ * 表示知识库中的一个文档
+ */
 export interface Document {
-  id: string;
-  kb_id: string;
-  filename: string;
-  file_type: string;
-  file_size: number;
-  file_hash: string;
-  content_preview: string;
-  chunk_count: number;
-  status: "processing" | "completed" | "error";
-  error_message?: string;
-  created_at: number;
+  id: string;                      // 文档唯一标识符
+  kb_id: string;                  // 所属知识库 ID
+  filename: string;               // 文件名
+  file_type: string;             // 文件类型 (如 pdf, txt, md)
+  file_size: number;              // 文件大小 (字节)
+  file_hash: string;              // 文件内容哈希 (用于去重)
+  content_preview: string;         // 内容预览 (前 200 字符)
+  chunk_count: number;            // 分块数量
+  status: "processing" | "completed" | "error";  // 处理状态
+  error_message?: string;         // 错误信息 (如果有)
+  created_at: number;             // 创建时间戳
 }
 
+/**
+ * 文本块类型
+ * 文档分割后的最小检索单元
+ */
 export interface Chunk {
-  id: string;
-  document_id: string;
-  kb_id: string;
-  content: string;
-  chunk_index: number;
-  token_count: number;
+  id: string;                      // 分块唯一标识符
+  document_id: string;            // 所属文档 ID
+  kb_id: string;                  // 所属知识库 ID
+  content: string;                // 分块内容
+  chunk_index: number;            // 分块索引
+  token_count: number;            // token 数量
 }
 
+/**
+ * 检索结果中的分块
+ * 包含分块信息和相似度分数
+ */
 export interface RetrievedChunk {
-  chunk: Chunk;
-  score: number;
-  vector_score?: number;
-  keyword_score?: number;
-  document_filename: string;
+  chunk: Chunk;                   // 原始分块数据
+  score: number;                  // 综合相似度分数
+  vector_score?: number;          // 向量相似度分数
+  keyword_score?: number;         // 关键词匹配分数
+  document_filename: string;      // 来源文档文件名
 }
 
+/**
+ * 检索结果类型
+ */
 export interface RetrievalResult {
-  query: string;
-  chunks: RetrievedChunk[];
-  total_chunks: number;
+  query: string;                  // 检索查询文本
+  chunks: RetrievedChunk[];       // 检索到的相关分块
+  total_chunks: number;           // 符合阈值的总分块数
 }
 
+/**
+ * 检索模式类型
+ * - vector: 向量检索 (语义相似度)
+ * - keyword: 关键词检索
+ * - hybrid: 混合检索 (向量 + 关键词)
+ */
 export type RetrievalMode = "vector" | "keyword" | "hybrid";
 
+/**
+ * 创建知识库请求类型
+ */
 export interface CreateKnowledgeBaseRequest {
-  name: string;
-  description: string;
-  embedding_api_config_id: string;
-  chunk_size?: number;
-  chunk_overlap?: number;
+  name: string;                   // 知识库名称
+  description: string;            // 知识库描述
+  embedding_api_config_id: string; // Embedding API 配置 ID
+  chunk_size?: number;           // 分块大小 (可选)
+  chunk_overlap?: number;        // 分块重叠 (可选)
 }
 
+/**
+ * 检索设置类型
+ */
 export interface RetrievalSettings {
-  mode: RetrievalMode;
-  topK: number;
-  similarityThreshold: number;
+  mode: RetrievalMode;            // 检索模式
+  topK: number;                   // 返回结果数量
+  similarityThreshold: number;    // 相似度阈值
 }
 
 export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
-  // State
+  // ============ 响应式状态 ============
+  
+  // 知识库列表
   const knowledgeBases = ref<KnowledgeBase[]>([]);
+  
+  // 当前选中的知识库
   const currentKb = ref<KnowledgeBase | null>(null);
+  
+  // 当前知识库的文档列表
   const documents = ref<Document[]>([]);
+  
+  // 是否正在加载
   const loading = ref(false);
+  
+  // 文档导入进度
   const importProgress = ref<{ current: number; total: number } | null>(null);
   
-  // Retrieval settings
+  // 检索设置
   const retrievalSettings = ref<RetrievalSettings>({
     mode: "hybrid",
     topK: 5,
     similarityThreshold: 0.7,
   });
 
-  // Getters
+  // ============ 计算属性 ============
+  
+  // 获取当前知识库的文档列表
   const currentKbDocuments = computed(() => {
     if (!currentKb.value) return [];
     return documents.value.filter((d) => d.kb_id === currentKb.value!.id);
   });
 
-  // Actions
+  // ============ 方法函数 ============
+
+  // 加载所有知识库列表
   const loadKnowledgeBases = async () => {
     loading.value = true;
     try {
