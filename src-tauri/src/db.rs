@@ -49,12 +49,13 @@ impl Database {
         )?;
 
         // Add api_config_id column if it doesn't exist (for database migration)
-        let has_column: Result<i32, _> = conn.query_row(
+        let has_column = conn.query_row(
             "SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'api_config_id'",
             [],
-            |_| Ok(1),
-        );
-        if has_column.is_err() {
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+        if !has_column {
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN api_config_id TEXT NOT NULL DEFAULT ''",
                 [],
