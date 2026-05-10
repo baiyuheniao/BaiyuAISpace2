@@ -2,21 +2,42 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 安全存储模块
+ * 
+ * 功能说明:
+ * - 使用系统密钥链 (Keyring) 安全存储 API 密钥
+ * - 支持保存、获取、删除 API 密钥
+ * - 支持检查密钥是否存在
+ * 
+ * 使用方式:
+ * - Windows: 使用 Windows Credential Manager
+ * - macOS: 使用 Keychain
+ * - Linux: 使用 libsecret
+ */
+
+// 引入依赖
 use keyring::Entry;
 use serde::Serialize;
 use thiserror::Error;
 
+/// 应用名称 (用于密钥链标识)
 const APP_NAME: &str = "BaiyuAISpace";
+/// 服务名称 (用于密钥链标识)
 const SERVICE_NAME: &str = "api_keys";
 
+/// 安全存储错误类型
 #[derive(Error, Debug)]
 pub enum SecureStorageError {
+    /// 密钥链错误
     #[error("Keyring error: {0}")]
     KeyringError(String),
+    /// 序列化错误
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 }
 
+/// 实现 Serialize trait 用于 Tauri 命令返回
 impl Serialize for SecureStorageError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -26,7 +47,12 @@ impl Serialize for SecureStorageError {
     }
 }
 
-/// Save API key to system keyring
+/**
+ * 保存 API 密钥到系统密钥链
+ * 
+ * @param provider: 提供商标识符 (如 openai, anthropic)
+ * @param api_key: API 密钥
+ */
 #[tauri::command]
 pub fn save_api_key(provider: String, api_key: String) -> Result<(), SecureStorageError> {
     let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))
@@ -39,7 +65,13 @@ pub fn save_api_key(provider: String, api_key: String) -> Result<(), SecureStora
     Ok(())
 }
 
-/// Get API key from system keyring
+/// 从系统密钥链获取 API 密钥
+/// 
+/// # 参数
+/// * `provider` - 提供商标识符 (如 openai, anthropic)
+/// 
+/// # 返回
+/// 找到则返回 `Some(api_key)`，未找到则返回 `None`
 #[tauri::command]
 pub fn get_api_key(provider: String) -> Result<Option<String>, SecureStorageError> {
     let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))
@@ -58,7 +90,10 @@ pub fn get_api_key(provider: String) -> Result<Option<String>, SecureStorageErro
     }
 }
 
-/// Delete API key from system keyring
+/// 从系统密钥链删除 API 密钥
+/// 
+/// # 参数
+/// * `provider` - 提供商标识符
 #[tauri::command]
 pub fn delete_api_key(provider: String) -> Result<(), SecureStorageError> {
     let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))
@@ -71,7 +106,13 @@ pub fn delete_api_key(provider: String) -> Result<(), SecureStorageError> {
     Ok(())
 }
 
-/// Check if API key exists
+/// 检查 API 密钥是否存在
+/// 
+/// # 参数
+/// * `provider` - 提供商标识符
+/// 
+/// # 返回
+/// 存在返回 true，不存在返回 false
 #[tauri::command]
 pub fn has_api_key(provider: String) -> Result<bool, SecureStorageError> {
     let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))

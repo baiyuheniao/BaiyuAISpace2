@@ -2,6 +2,16 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * LLM 聊天模块
+ * 
+ * 功能说明:
+ * - 支持多种 LLM 提供商 (OpenAI, Anthropic, Google 等)
+ * - 流式响应处理 (Server-Sent Events)
+ * - MCP 工具集成
+ * - 会话和消息管理
+ */
+
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::db::DbState;
 use chrono::Utc;
@@ -12,61 +22,96 @@ use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-// Types
+// ============ 类型定义 ============
+
+/// 聊天消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// 消息 ID
     pub id: String,
+    /// 消息角色 (user/assistant/system)
     pub role: String,
+    /// 消息内容
     pub content: String,
+    /// 时间戳 (毫秒)
     pub timestamp: i64,
+    /// 错误信息 (如果有)
     pub error: Option<String>,
 }
 
+/// 聊天会话结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSession {
+    /// 会话 ID
     pub id: String,
+    /// 会话标题
     pub title: String,
+    /// 消息列表
     pub messages: Vec<ChatMessage>,
+    /// 创建时间戳
     pub created_at: i64,
+    /// 最后更新时间戳
     pub updated_at: i64,
+    /// LLM 提供商
     pub provider: String,
+    /// 模型名称
     pub model: String,
+    /// API 配置 ID
     pub api_config_id: String,
 }
 
+/// 发送消息请求结构
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
+    /// 会话 ID
     pub session_id: String,
+    /// 消息历史
     pub messages: Vec<ChatMessage>,
+    /// LLM 提供商
     pub provider: String,
+    /// 模型名称
     pub model: String,
+    /// API 密钥
     pub api_key: String,
+    /// API 基础 URL
     pub base_url: String,
+    /// 是否启用 MCP
     pub enable_mcp: bool,
 }
 
-// Stream event for frontend
+/// 流式响应事件结构
 #[derive(Clone, Serialize)]
 pub struct StreamChunk {
+    /// 会话 ID
     pub session_id: String,
+    /// 消息 ID
     pub message_id: String,
+    /// 增量内容
     pub content: String,
+    /// 是否完成
     pub done: bool,
 }
 
-// Errors
+// ============ 错误类型 ============
+
+/// LLM 错误类型
 #[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum LLMError {
+    /// HTTP 请求错误
     #[error("HTTP request failed: {0}")]
     RequestError(#[from] reqwest::Error),
+    /// API 返回错误
     #[error("API error: {0}")]
     ApiError(String),
+    /// 无效的提供商
     #[error("Invalid provider: {0}")]
     InvalidProvider(String),
+    /// 缺少 API 密钥
     #[error("Missing API key")]
     MissingApiKey,
+    /// 流式响应错误
     #[error("Stream error: {0}")]
     StreamError(String),
 }
@@ -80,7 +125,11 @@ impl Serialize for LLMError {
     }
 }
 
-// Provider configurations: (id, base_url, auth_header_type)
+/// LLM 提供商配置
+/// 格式: (提供商标识符, API 端点, 认证头类型)
+/// 
+/// - bearer: 使用 Authorization: Bearer token
+/// - x_api_key: 使用 x-api-key 头
 const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("openai", "https://api.openai.com/v1/chat/completions", "bearer"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "x_api_key"),

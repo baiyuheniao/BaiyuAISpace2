@@ -2,10 +2,29 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 文本嵌入模块
+ * 
+ * 功能说明:
+ * - 调用外部 API 生成文本向量
+ * - 支持多种 Embedding 提供商 (OpenAI, 智谱, SiliconFlow)
+ * - 批量处理支持
+ * 
+ * Embedding 向量用于:
+ * - 文档相似度计算
+ * - 语义检索
+ */
+
 use super::types::*;
 use serde_json::json;
 
-/// Get embedding model configuration
+/// 获取 Embedding 模型配置
+/// 
+/// # 参数
+/// - provider: 提供商名称
+/// 
+/// # 返回
+/// (模型名称, 向量维度)
 #[allow(dead_code)]
 fn get_embedding_config(provider: &str) -> (&'static str, i32) {
     match provider {
@@ -16,7 +35,7 @@ fn get_embedding_config(provider: &str) -> (&'static str, i32) {
     }
 }
 
-/// Get embedding API URL
+/// 获取 Embedding API 端点 URL
 fn get_embedding_url(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1/embeddings".to_string(),
@@ -26,9 +45,19 @@ fn get_embedding_url(provider: &str) -> String {
     }
 }
 
+/// 批量处理的大小限制
 const EMBEDDING_BATCH_SIZE: usize = 100;
 
-/// Generate embeddings for text batch with batch size limit
+/// 生成文本批次嵌入向量
+/// 
+/// # 参数
+/// - texts: 文本列表
+/// - provider: Embedding 提供商
+/// - api_key: API 密钥
+/// - model: 模型名称
+/// 
+/// # 返回
+/// 向量列表 (每个 f32 向量)
 pub async fn generate_embeddings(
     texts: Vec<String>,
     provider: &str,

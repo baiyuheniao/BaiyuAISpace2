@@ -2,22 +2,49 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 检索模块
+ * 
+ * 功能说明:
+ * - 向量相似度检索
+ * - 关键词检索
+ * - 混合检索 (向量 + 关键词)
+ * 
+ * 检索模式:
+ * - Vector: 基于向量相似度
+ * - Keyword: 基于关键词匹配
+ * - Hybrid: 混合两种方式
+ */
+
 use super::types::*;
 use super::db::VectorStore;
 use super::embedding::generate_single_embedding;
 use std::sync::Arc;
 
+/// 检索器结构
 pub struct Retriever {
+    /// 向量存储实例
     vector_store: Arc<VectorStore>,
+    /// 数据库路径
     db_path: String,
 }
 
 impl Retriever {
+    /// 创建新的检索器
     pub fn new(vector_store: Arc<VectorStore>, db_path: String) -> Self {
         Self { vector_store, db_path }
     }
 
-    /// Retrieve relevant chunks
+    /// 检索相关文档片段
+    /// 
+    /// # 参数
+    /// - request: 检索请求
+    /// - embedding_provider: Embedding 提供商
+    /// - embedding_model: Embedding 模型
+    /// - api_key: API 密钥
+    /// 
+    /// # 返回
+    /// 检索结果
     pub async fn retrieve(
         &self,
         request: RetrievalRequest,
@@ -38,7 +65,7 @@ impl Retriever {
         }
     }
 
-    /// Pure vector similarity search
+    /// 纯向量相似度搜索
     async fn vector_search(
         &self,
         request: &RetrievalRequest,

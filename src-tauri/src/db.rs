@@ -2,18 +2,42 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 数据库模块
+ * 
+ * 功能说明:
+ * - SQLite 数据库初始化和表结构创建
+ * - 会话 (Session) 管理 (CRUD)
+ * - 消息 (Message) 管理
+ * - MCP 服务器配置存储
+ * - 数据库迁移支持
+ * 
+ * 数据库表:
+ * - sessions: 聊天会话表
+ * - messages: 消息表 (关联 sessions)
+ * - mcp_servers: MCP 服务器配置表
+ */
+
 use crate::commands::llm::{ChatMessage, ChatSession};
 use crate::commands::mcp::{MCPServer, MCPServerType};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-// Database instance wrapper
+/// 数据库实例包装结构
+/// 包含数据库文件路径
 pub struct Database {
+    /// 数据库文件路径
     pub path: String,
 }
 
 impl Database {
+    /**
+     * 创建新的数据库实例
+     * 
+     * @param app_handle: Tauri 应用句柄
+     * @return Database 实例
+     */
     pub fn new(app_handle: &tauri::AppHandle) -> Self {
         let app_dir = app_handle
             .path()
@@ -26,6 +50,16 @@ impl Database {
         }
     }
 
+    /**
+     * 初始化数据库表结构
+     * 
+     * 创建以下表:
+     * - sessions: 聊天会话
+     * - messages: 消息 (外键关联 sessions)
+     * - mcp_servers: MCP 服务器配置
+     * 
+     * 同时创建索引以优化查询性能
+     */
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -123,6 +157,11 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * 保存会话到数据库
+     * 
+     * @param session: 要保存的会话对象
+     */
     pub fn save_session(&self, session: &ChatSession) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -146,6 +185,11 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * 删除会话
+     * 
+     * @param session_id: 要删除的会话 ID
+     */
     pub fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -158,6 +202,12 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * 获取所有会话
+     * 按最后更新时间倒序排列
+     * 
+     * @return 会话列表 (包含消息)
+     */
     pub fn get_sessions(&self) -> Result<Vec<ChatSession>, Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -202,6 +252,13 @@ impl Database {
         Ok(sessions)
     }
 
+    /**
+     * 保存消息到数据库
+     * 同时更新会话的 updated_at 时间戳
+     * 
+     * @param session_id: 所属会话 ID
+     * @param message: 要保存的消息
+     */
     pub fn save_message(
         &self,
         session_id: &str,
@@ -233,6 +290,13 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * 获取指定会话的所有消息
+     * 按时间戳升序排列
+     * 
+     * @param session_id: 会话 ID
+     * @return 消息列表
+     */
     pub fn get_messages(
         &self,
         session_id: &str,
@@ -263,6 +327,11 @@ impl Database {
         Ok(messages?)
     }
 
+    /**
+     * 保存 MCP 服务器配置
+     * 
+     * @param server: MCP 服务器配置
+     */
     pub fn save_mcp_server(&self, server: &MCPServer) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -305,6 +374,12 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * 获取所有 MCP 服务器配置
+     * 按名称升序排列
+     * 
+     * @return MCP 服务器列表
+     */
     pub fn get_mcp_servers(&self) -> Result<Vec<MCPServer>, Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -349,6 +424,11 @@ impl Database {
         Ok(servers?)
     }
 
+    /**
+     * 删除 MCP 服务器配置
+     * 
+     * @param server_id: 要删除的服务器 ID
+     */
     pub fn delete_mcp_server(&self, server_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -362,5 +442,6 @@ impl Database {
     }
 }
 
-// State wrapper for Tauri
+/// 数据库状态封装结构
+/// 用于在 Tauri 应用中共享数据库实例
 pub struct DbState(pub Arc<Mutex<Database>>);

@@ -2,6 +2,16 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 知识库命令模块
+ * 
+ * 功能说明:
+ * - 创建/删除知识库
+ * - 添加/删除文档
+ * - 文档检索
+ * - 知识库状态查询
+ */
+
 use super::types::*;
 use super::document::{parse_document, calculate_file_hash, split_text, estimate_tokens};
 use super::embedding::generate_embeddings;
@@ -12,17 +22,29 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+/// 知识库状态结构
 pub struct KbState {
+    /// 向量存储实例
     pub vector_store: Arc<VectorStore>,
+    /// 数据库路径
     pub db_path: String,
 }
 
-/// Initialize knowledge base tables
+/// 初始化知识库表结构
+/// 
+/// 在 SQLite 中创建知识库相关的表
 pub fn init_knowledge_base(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     init_sqlite_tables(conn)
 }
 
-/// Create a new knowledge base
+/// 创建新的知识库
+/// 
+/// # 参数
+/// - request: 创建知识库请求 (包含名称、描述、embedding 配置等)
+/// - db_state: 数据库状态
+/// 
+/// # 返回
+/// 创建成功的 KnowledgeBase 对象
 #[tauri::command]
 pub async fn create_knowledge_base(
     request: CreateKnowledgeBaseRequest,
@@ -87,7 +109,10 @@ pub async fn create_knowledge_base(
     })
 }
 
-/// List all knowledge bases
+/// 列出所有知识库
+/// 
+/// # 返回
+/// 所有知识库的列表
 #[tauri::command]
 pub async fn list_knowledge_bases(
     db_state: State<'_, crate::db::DbState>,
@@ -124,7 +149,12 @@ pub async fn list_knowledge_bases(
     Ok(bases)
 }
 
-/// Delete knowledge base
+/// 删除知识库
+/// 
+/// # 参数
+/// - kb_id: 知识库 ID
+/// - db_state: 数据库状态
+/// - kb_state: 知识库状态
 #[tauri::command]
 pub async fn delete_knowledge_base(
     kb_id: String,
@@ -148,7 +178,16 @@ pub async fn delete_knowledge_base(
     Ok(())
 }
 
-/// Import document to knowledge base
+/// 导入文档到知识库
+/// 
+/// 支持的格式: PDF, DOCX, XLSX, MD, HTML, TXT
+/// 
+/// # 参数
+/// - kb_id: 目标知识库 ID
+/// - file_data: 文件数据 (Base64 编码)
+/// - filename: 文件名
+/// - db_state: 数据库状态
+/// - kb_state: 知识库状态
 #[tauri::command]
 pub async fn import_document(
     kb_id: String,
@@ -333,7 +372,14 @@ pub async fn import_document(
     })
 }
 
-/// List documents in knowledge base
+/// 列出知识库中的文档
+/// 
+/// # 参数
+/// - kb_id: 知识库 ID
+/// - db_state: 数据库状态
+/// 
+/// # 返回
+/// 知识库中的文档列表
 #[tauri::command]
 pub async fn list_documents(
     kb_id: String,
@@ -380,7 +426,13 @@ pub async fn list_documents(
     Ok(docs)
 }
 
-/// Delete document
+/// 删除文档
+/// 
+/// # 参数
+/// - doc_id: 文档 ID
+/// - kb_id: 知识库 ID
+/// - db_state: 数据库状态
+/// - kb_state: 知识库状态
 #[tauri::command]
 pub async fn delete_document(
     doc_id: String,
@@ -418,7 +470,19 @@ pub async fn delete_document(
     Ok(())
 }
 
-/// Search knowledge base
+/// 搜索知识库
+/// 
+/// 使用向量相似度检索相关文档
+/// 
+/// # 参数
+/// - request: 检索请求 (包含查询内容、知识库 ID、返回数量等)
+/// - embedding_provider: Embedding 提供商
+/// - embedding_model: Embedding 模型
+/// - api_key: API 密钥
+/// - kb_state: 知识库状态
+/// 
+/// # 返回
+/// 相关文档片段列表
 #[tauri::command]
 pub async fn search_knowledge_base(
     request: RetrievalRequest,

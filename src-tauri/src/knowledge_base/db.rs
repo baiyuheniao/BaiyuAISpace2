@@ -2,16 +2,27 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 向量数据库模块
+ * 
+ * 功能说明:
+ * - 使用 SQLite 存储向量数据
+ * - 支持余弦相似度搜索
+ * - 向量插入、查询、删除操作
+ */
+
 use super::types::*;
 
-/// Vector store using SQLite with cosine similarity search
+/// 向量存储结构 (使用 SQLite)
 pub struct VectorStore {
+    /// 数据库路径
     db_path: String,
 }
 
 impl VectorStore {
+    /// 创建新的向量存储实例
     pub async fn new(db_path: &str) -> Result<Self, KnowledgeBaseError> {
-        // Ensure directory exists
+        // 确保目录存在
         std::fs::create_dir_all(db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
@@ -20,7 +31,7 @@ impl VectorStore {
         })
     }
 
-    /// Create vector table for a knowledge base
+    /// 为知识库创建向量表
     #[allow(dead_code)]
     pub async fn create_kb_table(&self, kb_id: &str, dim: i32) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;

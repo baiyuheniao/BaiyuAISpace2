@@ -2,23 +2,40 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * 文档处理模块
+ * 
+ * 功能说明:
+ * - 支持多种文档格式解析 (PDF, DOCX, XLSX, MD, HTML, TXT)
+ * - 文件哈希计算
+ * - 文本分块
+ * - Token 数量估算
+ */
+
 use super::types::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Supported document formats
+/// 支持的文档格式枚举
 #[derive(Debug, Clone, Copy)]
 pub enum DocumentFormat {
+    /// PDF 文档
     Pdf,
-    Word,  // docx
-    Excel, // xlsx
+    /// Word 文档 (docx)
+    Word,
+    /// Excel 文档 (xlsx)
+    Excel,
+    /// Markdown 文档
     Markdown,
+    /// HTML 文档
     Html,
+    /// 纯文本
     Txt,
 }
 
 #[allow(dead_code)]
 impl DocumentFormat {
+    /// 根据文件扩展名获取文档格式
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {
             "pdf" => Some(DocumentFormat::Pdf),
@@ -31,6 +48,7 @@ impl DocumentFormat {
         }
     }
 
+    /// 获取格式对应的文件扩展名
     pub fn as_str(&self) -> &'static str {
         match self {
             DocumentFormat::Pdf => "pdf",
@@ -43,7 +61,13 @@ impl DocumentFormat {
     }
 }
 
-/// Parse document content to text
+/// 解析文档内容为纯文本
+/// 
+/// # 参数
+/// - file_path: 文件路径
+/// 
+/// # 返回
+/// 提取的文本内容
 pub async fn parse_document(file_path: &str) -> Result<String, KnowledgeBaseError> {
     let path = Path::new(file_path);
     let ext = path.extension()

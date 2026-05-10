@@ -2,6 +2,21 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * MCP (Model Context Protocol) 模块
+ * 
+ * 功能说明:
+ * - MCP 服务器管理 (stdio/SSE/HTTP 类型)
+ * - 工具列表获取
+ * - 工具调用
+ * - 服务器连接测试
+ * 
+ * MCP 服务器类型:
+ * - stdio: 标准输入输出 (本地进程)
+ * - SSE: 服务器发送事件
+ * - HTTP: HTTP API
+ */
+
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -12,22 +27,30 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// MCP 错误类型
 #[derive(Error, Debug)]
 pub enum MCPError {
+    /// 服务器未找到
     #[error("MCP server not found: {0}")]
     ServerNotFound(String),
+    /// 启动服务器失败
     #[error("Failed to launch MCP server: {0}")]
     LaunchError(String),
+    /// 通信错误
     #[error("MCP communication error: {0}")]
     CommunicationError(String),
+    /// 配置无效
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
+    /// JSON 解析错误
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
+    /// HTTP 请求错误
     #[error("Reqwest error: {0}")]
     ReqwestError(#[from] reqwest::Error),
 }
 
+/// 实现 Serialize trait 用于 Tauri 命令返回
 impl Serialize for MCPError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -37,45 +60,67 @@ impl Serialize for MCPError {
     }
 }
 
-/// MCP Server Configuration
+/// MCP 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServer {
+    /// 服务器 ID
     pub id: String,
+    /// 服务器名称
     pub name: String,
+    /// 服务器描述
     pub description: String,
-    pub server_type: MCPServerType, // "stdio", "sse", "custom"
-    pub command: String, // For stdio: path to executable or script
-    pub args: Vec<String>, // Command arguments
-    pub env: HashMap<String, String>, // Environment variables
-    pub port: Option<u16>, // For SSE/HTTP servers
-    pub url: Option<String>, // For HTTP servers
-    pub api_key: Option<String>, // For API authentication
+    /// 服务器类型 (stdio/SSE/HTTP)
+    pub server_type: MCPServerType,
+    /// 启动命令 (stdio 类型使用)
+    pub command: String,
+    /// 命令行参数
+    pub args: Vec<String>,
+    /// 环境变量
+    pub env: HashMap<String, String>,
+    /// 端口号 (SSE/HTTP 类型使用)
+    pub port: Option<u16>,
+    /// 服务器 URL (HTTP 类型使用)
+    pub url: Option<String>,
+    /// API 密钥 (可选)
+    pub api_key: Option<String>,
+    /// 是否启用
     pub enabled: bool,
+    /// 创建时间戳
     pub created_at: i64,
+    /// 更新时间戳
     pub updated_at: i64,
 }
 
+/// MCP 服务器类型枚举
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MCPServerType {
+    /// 标准输入输出 (本地进程)
     #[serde(rename = "stdio")]
     Stdio,
+    /// 服务器发送事件
     #[serde(rename = "sse")]
     SSE,
+    /// HTTP API
     #[serde(rename = "http")]
     HTTP,
 }
 
-/// Tool exposed by MCP Server
+/// MCP 工具定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPTool {
+    /// 所属服务器 ID
     pub server_id: String,
+    /// 服务器名称
     pub server_name: String,
+    /// 工具名称
     pub name: String,
+    /// 工具描述
     pub description: String,
-    pub input_schema: serde_json::Value, // JSON Schema
+    /// 输入参数 JSON Schema
+    pub input_schema: serde_json::Value,
 }
 
-/// MCP Tool Call Request
+/// MCP 工具调用请求
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPToolCall {
