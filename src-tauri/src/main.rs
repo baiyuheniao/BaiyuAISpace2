@@ -30,6 +30,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // LLM commands
             commands::llm::stream_message,
+            commands::llm::cancel_stream,
             // Auth commands
             commands::auth::get_baidu_access_token,
             // Database commands
