@@ -236,28 +236,6 @@ fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> 
         }
     }
 
-    // Extra validation for npx: restrict to known safe subcommands
-    if cmd_name == "npx" {
-        if let Some(subcommand) = args.first() {
-            // npx can execute arbitrary packages; only allow specific subcommands
-            let allowed_npx_actions = ["--version", "--help", "-y", "yes"];
-            let is_flag = subcommand.starts_with('-');
-            if !is_flag && !allowed_npx_actions.contains(&subcommand.as_str()) {
-                // The first non-flag argument is treated as a package name
-                // Allow it only if it looks like a known MCP server package pattern
-                // or if the user explicitly passes -y flag (common for MCP servers)
-                if !args.iter().any(|a| a == "-y" || a == "yes" || a == "--yes") {
-                    return Err(MCPError::LaunchError(format!(
-                        "npx package execution requires explicit confirmation. \
-                         Add '-y' flag or use a full path to the executable. \
-                         Attempted package: '{}'",
-                        subcommand
-                    )));
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
