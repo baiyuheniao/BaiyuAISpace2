@@ -104,36 +104,131 @@ fn extract_text_from_pdf_bytes(bytes: &[u8]) -> Result<String, KnowledgeBaseErro
     let content = String::from_utf8_lossy(bytes);
     let mut result = String::new();
     
-    // Very basic extraction - this is not production ready
-    // Real implementation should use a PDF library
+    // Improved PDF text extraction strategy:
+    // 1. Look for BT...ET blocks (PDF text objects) with Tf (font) and Tj/TJ (text) operators
+    let mut in_text_block = false;
+    let mut current_text = String::new();
+    
     for line in content.lines() {
-        // Look for BT...ET blocks (PDF text objects)
-        if line.contains("(") && line.contains(")") {
-            // Extract text between ( and )
+        let trimmed = line.trim();
+        
+        // Track text block boundaries
+        if trimmed == "BT" {
+            in_text_block = true;
+            current_text.clear();
+            continue;
+        }
+        if trimmed == "ET" {
+            in_text_block = false;
+            if !current_text.is_empty() {
+                result.push_str(&current_text);
+                result.push(' ');
+            }
+            current_text.clear();
+            continue;
+        }
+        
+        if in_text_block {
+            // Extract text from Tj operator: (text) Tj
+            if let Some(pos) = trimmed.find(")Tj") {
+                let before = &trimmed[..pos];
+                if let Some(start) = before.rfind('(') {
+                    let text = &before[start + 1..];
+                    // Decode PDF string escapes
+                    let decoded = decode_pdf_string(text);
+                    current_text.push_str(&decoded);
+                }
+            }
+            
+            // Extract text from TJ array operator: [(text1) (text2)] TJ
+            if trimmed.contains("TJ") {
+                for part in trimmed.split(')') {
+                    let part = part.trim();
+                    if let Some(start) = part.rfind('(') {
+                        let text = &part[start + 1..];
+                        let decoded = decode_pdf_string(text);
+                        current_text.push_str(&decoded);
+                    }
+                }
+            }
+        }
+        
+        // Also try the simple parenthesis extraction as a secondary method
+        if !in_text_block && line.contains("(") && line.contains(")") {
             let mut in_paren = false;
             let mut text = String::new();
             for ch in line.chars() {
                 match ch {
                     '(' => in_paren = true,
-                    ')' => in_paren = false,
+                    ')' => {
+                        in_paren = false;
+                        if !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace()) {
+                            result.push_str(&text);
+                            result.push(' ');
+                        }
+                        text.clear();
+                    }
                     _ if in_paren => text.push(ch),
                     _ => {}
                 }
             }
-            if !text.is_empty() {
-                result.push_str(&text);
-                result.push(' ');
-            }
         }
     }
     
-    if result.is_empty() {
+    // Clean up the result
+    let cleaned: String = result
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace() || *c == '\n')
+        .collect();
+    
+    if cleaned.trim().is_empty() {
         return Err(KnowledgeBaseError::DocumentParseError(
-            "PDF parsing not available. Please install pdftotext or use text files.".to_string()
+            "PDF parsing not available. Please install pdftotext (poppler-utils) or use text files.".to_string()
         ));
     }
     
-    Ok(result)
+    Ok(cleaned)
+}
+
+/// Decode PDF string escape sequences
+fn decode_pdf_string(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek() {
+                Some('n') => { result.push('\n'); chars.next(); }
+                Some('r') => { result.push('\r'); chars.next(); }
+                Some('t') => { result.push('\t'); chars.next(); }
+                Some('b') => { result.push('\u{08}'); chars.next(); }
+                Some('f') => { result.push('\u{0c}'); chars.next(); }
+                Some('(') => { result.push('('); chars.next(); }
+                Some(')') => { result.push(')'); chars.next(); }
+                Some('\\') => { result.push('\\'); chars.next(); }
+                Some('0'..='7') => {
+                    // Octal escape
+                    let mut octal = String::new();
+                    for _ in 0..3 {
+                        if let Some(&digit @ '0'..='7') = chars.peek() {
+                            octal.push(digit);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Ok(byte) = u8::from_str_radix(&octal, 8) {
+                        result.push(byte as char);
+                    }
+                }
+                _ => {} // Unknown escape, skip backslash
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
 }
 
 /// Parse Word document
