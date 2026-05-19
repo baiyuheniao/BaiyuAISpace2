@@ -443,7 +443,8 @@ export const useChatStore = defineStore("chat", () => {
     }
 
     // 检查 API 密钥是否已加载
-    if (!config.apiKey) {
+    // Local models don't require API keys
+    if (config.provider !== "local" && !config.apiKey) {
       console.error("API key not loaded for config:", config.id);
       alert("API 密钥未加载，请重启应用或重新设置");
       return;
