@@ -224,26 +224,23 @@ const handleBack = () => {
 const handleImport = async () => {
   // 检查是否有选中的知识库
   if (!kbStore.currentKb) return;
-  
+
   // 获取对应的 Embedding API 配置
   const embeddingConfig = settingsStore.embeddingApiConfigs.find(
     c => c.id === kbStore.currentKb!.embedding_api_config_id
   );
-  
-  // 验证 API 配置存在且有 API Key
-  if (!embeddingConfig?.apiKey) {
+
+  // 验证 API 配置存在（API Key 由后端从 secure_storage 读取，前端不再传递）
+  if (!embeddingConfig) {
     message.error("请先在设置中创建 Embedding API 配置并填写 API Key");
     return;
   }
 
   importing.value = true;
-  
-  // 调用 Store 方法选择并导入文档
+
+  // 调用 Store 方法选择并导入文档（不再传递 API Key，后端自行读取）
   const success = await kbStore.selectAndImportDocument(
     kbStore.currentKb.id,
-    embeddingConfig.provider,
-    embeddingConfig.model,
-    embeddingConfig.apiKey
   );
   
   importing.value = false;
@@ -819,7 +816,7 @@ const getStatusTag = (status: Document["status"]) => {
       </n-form-item>
 
       <!-- 分块大小 -->
-      <n-form-item label="分块大小">
+      <n-form-item label="分块大小（字符数）">
         <n-input-number
           v-model:value="createForm.chunk_size"
           :min="100"

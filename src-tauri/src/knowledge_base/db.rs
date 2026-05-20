@@ -348,9 +348,11 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
     )?;
 
     // FTS5 virtual table for full-text search (optional, if FTS5 is available)
+    // Fix for #29 and #30: Include kb_id column for knowledge base isolation
     let _ = conn.execute(
         r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            kb_id,
             content,
             content_rowid=rowid,
             tokenize='porter'
