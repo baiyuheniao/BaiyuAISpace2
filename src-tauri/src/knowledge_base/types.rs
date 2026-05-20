@@ -82,6 +82,7 @@ pub struct Chunk {
 
 /// Retrieval request
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RetrievalRequest {
     pub kb_id: String,
     pub query: String,

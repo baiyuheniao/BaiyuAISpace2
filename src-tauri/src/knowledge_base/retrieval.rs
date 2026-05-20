@@ -173,6 +173,7 @@ impl Retriever {
     }
 
     /// Enrich chunk results with metadata from SQLite
+    /// Fix for #38: Use JOIN instead of N+1 queries
     async fn enrich_chunks(
         &self,
         results: Vec<(String, String, String, f32)>, // (chunk_id, doc_id, content, score)
@@ -180,51 +181,82 @@ impl Retriever {
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
         let db_path = self.db_path.clone();
         let kb_id = kb_id.to_string();
-        
+
         tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(&db_path)
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-            
-            let mut chunks = Vec::new();
-            
-            for (chunk_id, doc_id, content, score) in results {
-                // Get chunk metadata
-                let chunk_result: Result<(i32, i32), _> = conn.query_row(
-                    "SELECT chunk_index, token_count FROM chunks WHERE id = ?1",
-                    [&chunk_id],
-                    |row| Ok((row.get(0)?, row.get(1)?))
-                );
-                
-                let (chunk_index, token_count) = chunk_result.unwrap_or((0, 0));
-                
-                // Get document filename
-                let filename: String = conn.query_row(
-                    "SELECT filename FROM documents WHERE id = ?1",
-                    [&doc_id],
-                    |row| row.get(0)
-                ).unwrap_or_else(|_| "Unknown".to_string());
-                
-                chunks.push(RetrievedChunk {
-                    chunk: Chunk {
-                        id: chunk_id,
-                        document_id: doc_id.clone(),
-                        kb_id: kb_id.clone(),
-                        content,
-                        chunk_index,
-                        token_count,
-                    },
-                    score,
-                    vector_score: Some(score),
-                    keyword_score: None,
-                    document_filename: filename,
-                });
+
+            if results.is_empty() {
+                return Ok(Vec::new());
             }
-            
+
+            // Build a single query with JOIN to get all metadata at once
+            let placeholders: String = results.iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let chunk_ids: Vec<&str> = results.iter()
+                .map(|(id, _, _, _)| id.as_str())
+                .collect();
+
+            let query = format!(
+                r#"
+                SELECT c.id, c.chunk_index, c.token_count,
+                       COALESCE(d.filename, 'Unknown') as filename
+                FROM chunks c
+                LEFT JOIN documents d ON c.document_id = d.id
+                WHERE c.id IN ({})
+                "#,
+                placeholders
+            );
+
+            let mut stmt = conn.prepare(&query)
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+            let metadata_rows: std::collections::HashMap<String, (i32, i32, String)> = stmt
+                .query_map(rusqlite::params_from_iter(chunk_ids), |row| {
+                    let id: String = row.get(0)?;
+                    let chunk_index: i32 = row.get(1)?;
+                    let token_count: i32 = row.get(2)?;
+                    let filename: String = row.get(3)?;
+                    Ok((id, (chunk_index, token_count, filename)))
+                })
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            let chunks: Vec<RetrievedChunk> = results
+                .into_iter()
+                .map(|(chunk_id, doc_id, content, score)| {
+                    let (chunk_index, token_count, filename) = metadata_rows
+                        .get(&chunk_id)
+                        .cloned()
+                        .unwrap_or((0, 0, "Unknown".to_string()));
+
+                    RetrievedChunk {
+                        chunk: Chunk {
+                            id: chunk_id,
+                            document_id: doc_id.clone(),
+                            kb_id: kb_id.clone(),
+                            content,
+                            chunk_index,
+                            token_count,
+                        },
+                        score,
+                        vector_score: Some(score),
+                        keyword_score: None,
+                        document_filename: filename,
+                    }
+                })
+                .collect();
+
             Ok(chunks)
         }).await.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
     }
 
     /// Search using FTS5 (Full-Text Search) - blocking version
+    /// Fix for #37: Escape FTS5 special characters in user query
     fn search_with_fts_blocking(
         conn: &rusqlite::Connection,
         kb_id: &str,
@@ -237,14 +269,23 @@ impl Retriever {
             [],
             |_| Ok(true)
         ).unwrap_or(false);
-        
+
         if !fts_exists {
             return Err(KnowledgeBaseError::RetrievalError("FTS5 not available".to_string()));
         }
-        
-        // Build FTS query (convert query to OR-separated terms)
-        let fts_query = query.split_whitespace().collect::<Vec<_>>().join(" OR ");
-        
+
+        // Build FTS query: escape special characters and wrap each term in double quotes
+        // FTS5 special chars: " * ( ) : ^ [ ] { } + - AND OR NOT NEAR
+        let fts_query: String = query
+            .split_whitespace()
+            .map(|term| {
+                // Escape double quotes within the term
+                let escaped = term.replace('"', "\"\"");
+                format!("\"{}\"", escaped)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
         let mut stmt = conn.prepare(
             r#"
             SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, d.filename,
@@ -252,14 +293,14 @@ impl Retriever {
             FROM chunks_fts fts
             JOIN chunks c ON fts.rowid = c.rowid
             JOIN documents d ON c.document_id = d.id
-            WHERE c.kb_id = ?1 AND fts MATCH ?2
+            WHERE fts.kb_id = ?1 AND fts MATCH ?2
             ORDER BY rank
             LIMIT ?3
             "#
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
+
         let rows = stmt.query_map(
-            [kb_id, &fts_query, &top_k.to_string()],
+            rusqlite::params![kb_id, &fts_query, top_k],
             |row| {
                 Ok(RetrievedChunk {
                     chunk: Chunk {
@@ -277,37 +318,47 @@ impl Retriever {
                 })
             }
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
+
         let mut chunks = Vec::new();
         for row in rows {
             chunks.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
         }
-        
+
         Ok(chunks)
     }
 
     /// Search using LIKE query (fallback for when FTS is not available) - blocking version
+    /// Fix for #37: Escape LIKE wildcards in user query
     fn search_with_like_blocking(
         conn: &rusqlite::Connection,
         kb_id: &str,
         query: &str,
         top_k: i32,
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
-        // Build LIKE pattern with wildcards
-        let pattern = format!("%{}%", query.split_whitespace().collect::<Vec<_>>().join("%"));
-        
+        // Build LIKE pattern with wildcards, escaping special LIKE characters
+        let escaped_terms: Vec<String> = query
+            .split_whitespace()
+            .map(|term| {
+                // Escape % and _ characters
+                let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                escaped
+            })
+            .collect();
+
+        let pattern = format!("%{}%", escaped_terms.join("%"));
+
         let mut stmt = conn.prepare(
             r#"
             SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, d.filename
             FROM chunks c
             JOIN documents d ON c.document_id = d.id
-            WHERE c.kb_id = ?1 AND c.content LIKE ?2
+            WHERE c.kb_id = ?1 AND c.content LIKE ?2 ESCAPE '\'
             LIMIT ?3
             "#
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
+
         let rows = stmt.query_map(
-            [kb_id, &pattern, &top_k.to_string()],
+            rusqlite::params![kb_id, &pattern, top_k],
             |row| {
                 Ok(RetrievedChunk {
                     chunk: Chunk {
@@ -325,12 +376,12 @@ impl Retriever {
                 })
             }
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
+
         let mut chunks = Vec::new();
         for row in rows {
             chunks.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
         }
-        
+
         Ok(chunks)
     }
 

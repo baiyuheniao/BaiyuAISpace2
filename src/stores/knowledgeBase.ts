@@ -215,20 +215,19 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     }
   };
 
+  /**
+   * Import document to knowledge base
+   * Note: API key is no longer passed from frontend (#32).
+   * Backend retrieves it from secure storage using the KB's embedding_api_config_id.
+   */
   const importDocument = async (
     kbId: string,
     filePath: string,
-    embeddingProvider: string,
-    embeddingModel: string,
-    apiKey: string
   ): Promise<boolean> => {
     try {
       await invoke("import_document", {
         kbId,
         filePath,
-        embeddingProvider,
-        embeddingModel,
-        apiKey,
       });
       await loadDocuments(kbId);
       await loadKnowledgeBases(); // Refresh document count
@@ -241,9 +240,6 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
 
   const selectAndImportDocument = async (
     kbId: string,
-    embeddingProvider: string,
-    embeddingModel: string,
-    apiKey: string
   ): Promise<boolean> => {
     try {
       const selected = await open({
@@ -278,7 +274,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
       });
 
       if (selected && typeof selected === "string") {
-        return await importDocument(kbId, selected, embeddingProvider, embeddingModel, apiKey);
+        return await importDocument(kbId, selected);
       }
       return false;
     } catch (error) {
@@ -299,12 +295,14 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     }
   };
 
+  /**
+   * Search knowledge base
+   * Note: API key is no longer passed from frontend (#32).
+   * Backend retrieves it from secure storage using the KB's embedding_api_config_id.
+   */
   const searchKnowledgeBase = async (
     kbId: string,
     query: string,
-    embeddingProvider: string,
-    embeddingModel: string,
-    apiKey: string
   ): Promise<RetrievalResult | null> => {
     try {
       const result = await invoke<RetrievalResult>("search_knowledge_base", {
@@ -315,9 +313,6 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
           retrievalMode: retrievalSettings.value.mode,
           similarityThreshold: retrievalSettings.value.similarityThreshold,
         },
-        embeddingProvider,
-        embeddingModel,
-        apiKey,
       });
       return result;
     } catch (error) {
