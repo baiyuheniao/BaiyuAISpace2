@@ -156,8 +156,8 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Drop knowledge base table
-    pub async fn drop_kb_table(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
+    /// Delete all vectors for a knowledge base
+    pub async fn delete_kb_vectors(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
 
         conn.execute(
@@ -166,7 +166,7 @@ impl VectorStore {
         )
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        log::info!("Dropped vectors for knowledge base: {}", kb_id);
+        log::info!("Deleted vectors for knowledge base: {}", kb_id);
         Ok(())
     }
 

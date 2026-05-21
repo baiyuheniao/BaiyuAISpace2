@@ -142,7 +142,7 @@ pub async fn delete_knowledge_base(
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
     
     // Delete vector table
-    kb_state.vector_store.drop_kb_table(&kb_id).await?;
+    kb_state.vector_store.delete_kb_vectors(&kb_id).await?;
     
     log::info!("Deleted knowledge base: {}", kb_id);
     Ok(())
