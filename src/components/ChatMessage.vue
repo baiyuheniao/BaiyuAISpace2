@@ -50,20 +50,30 @@ const props = defineProps<{
 
 // ============ Markdown 配置 ============
 
-// 配置 marked (只执行一次)
-let markedConfigured = false;
-if (!markedConfigured) {
-  marked.use(
-    markedHighlight({
-      langPrefix: "hljs language-",
-      highlight(code, lang) {
-        const language = hljs.getLanguage(lang) ? lang : "plaintext";
-        return hljs.highlight(code, { language }).value;
-      },
-    })
-  );
-  markedConfigured = true;
-}
+// 使用 Promise 确保 marked 配置只执行一次
+const markedInitPromise = (() => {
+  let promise: Promise<void> | null = null;
+  return () => {
+    if (!promise) {
+      promise = new Promise((resolve) => {
+        marked.use(
+          markedHighlight({
+            langPrefix: "hljs language-",
+            highlight(code, lang) {
+              const language = hljs.getLanguage(lang) ? lang : "plaintext";
+              return hljs.highlight(code, { language }).value;
+            },
+          })
+        );
+        resolve();
+      });
+    }
+    return promise;
+  };
+})();
+
+// 初始化 marked 配置
+markedInitPromise();
 
 // ============ 计算属性 ============
 
