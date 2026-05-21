@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::types::*;
+use crate::commands::constants::EMBEDDING_BATCH_DELAY_MS;
 use serde_json::json;
 
 /// Get embedding model configuration
@@ -51,7 +52,7 @@ pub async fn generate_embeddings(
         all_embeddings.extend(batch_embeddings);
         
         if texts.len() > EMBEDDING_BATCH_SIZE {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(EMBEDDING_BATCH_DELAY_MS)).await;
         }
     }
     

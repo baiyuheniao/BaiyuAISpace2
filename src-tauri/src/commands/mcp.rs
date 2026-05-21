@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT};
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -299,7 +300,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     let stdout = child.stdout.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdout".to_string()))?;
     let mut reader = BufReader::new(stdout).lines();
 
-    let response_line = tokio::time::timeout(std::time::Duration::from_secs(30), async { reader.next().transpose() })
+    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, async { reader.next().transpose() })
         .await
         .map_err(|_| MCPError::CommunicationError("Tool list timeout".to_string()))?
         .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
@@ -344,7 +345,7 @@ async fn call_mcp_tools_http(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErro
     }
 
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        MCP_HTTP_TIMEOUT,
         req_builder
             .header("Content-Type", "application/json")
             .send(),
@@ -608,7 +609,7 @@ async fn call_mcp_tool_stdio(
 
     // Read first line (should be the JSON response)
     let response_inner = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        MCP_STDIO_TIMEOUT,
         async { lines.next().transpose() },
     )
     .await
@@ -677,7 +678,7 @@ async fn call_mcp_tool_http(
 
     // Send request with timeout
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        MCP_HTTP_TIMEOUT,
         req_builder
             .header("Content-Type", "application/json")
             .json(&request)
