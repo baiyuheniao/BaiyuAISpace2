@@ -2,12 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::db::DbState;
 use chrono::Utc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -221,8 +221,8 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
 
 fn create_http_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(LLM_REQUEST_TIMEOUT)
+        .connect_timeout(LLM_CONNECT_TIMEOUT)
         .build()
 }
 
