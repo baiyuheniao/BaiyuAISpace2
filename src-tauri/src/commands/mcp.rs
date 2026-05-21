@@ -210,6 +210,65 @@ const ALLOWED_MCP_COMMANDS: &[&str] = &[
     "bun", "deno", "go", "cargo", "ruby", "perl", "php",
 ];
 
+const ALLOWED_ENV_VARS: &[&str] = &[
+    "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
+    "npm_config_*", "npm_package_*", "npm_lifecycle_*",
+    "NODE_ENV", "NODE_OPTIONS",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE",
+    "DENO_DIR", "DENO_AUTH_TOKENS",
+];
+
+const RESTRICTED_ENV_PREFIXES: &[&str] = &[
+    "AWS_", "AZURE_", "GCP_", "GOOGLE_",
+    "SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY",
+];
+
+struct CommandValidator {
+    allowed_args: Vec<&'static str>,
+}
+
+impl CommandValidator {
+    fn new(cmd: &str) -> Option<Self> {
+        let allowed_args = match cmd {
+            "npx" => vec!["-y", "--yes", "--package", "--ignore-existing", "--no-install", "npx"],
+            "npm" => vec!["run", "start", "build", "test", "install", "i", "exec", "-y", "--yes", "--ignore-scripts", "--no-audit", "--prefer-offline"],
+            "node" => vec!["-e", "--eval", "-p", "--print", "-i", "--interactive", "-r", "--require", "-v", "--version", "--help"],
+            "python" | "python3" => vec!["-m", "-c", "--module", "-V", "--version", "-h", "--help", "-u", "--unbuffered"],
+            "pip" => vec!["install", "list", "show", "uninstall", "-r", "--requirement", "-q", "--quiet", "--no-input"],
+            "uvx" | "uv" => vec!["--from", "--package", "--python", "--refresh", "--no-cache", "--quiet", "uvx", "uv"],
+            "bun" => vec!["run", "test", "install", "-y", "--yes", "-d", "--dev", "-g", "--global"],
+            "deno" => vec!["run", "eval", "cache", "-A", "--allow-all", "--no-check", "-r", "--reload", "-q", "--quiet"],
+            "go" => vec!["run", "build", "test", "get", "install", "mod", "env"],
+            "cargo" => vec!["build", "run", "test", "check", "clippy", "fmt", "clean", "update"],
+            _ => return None,
+        };
+        Some(Self { allowed_args })
+    }
+    
+    fn validate_args(&self, args: &[String]) -> Result<(), MCPError> {
+        for arg in args {
+            let is_allowed = self.allowed_args.iter().any(|allowed| {
+                arg == *allowed || 
+                arg.starts_with("--") || 
+                arg.starts_with("-") && arg.len() == 2 ||
+                arg.starts_with("npm_package_") ||
+                arg.starts_with("npm_config_")
+            });
+            
+            if !is_allowed && !arg.is_empty() {
+                let dangerous_chars = ["&&", "||", "|", ">", ">>", "<", "`", "$(", ";", "$(", "\n", "\r", "\0"];
+                let has_dangerous = dangerous_chars.iter().any(|c| arg.contains(*c));
+                if has_dangerous {
+                    return Err(MCPError::LaunchError(format!(
+                        "Argument '{}' contains dangerous pattern", arg
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> {
     let cmd_path = Path::new(command);
     let cmd_name = cmd_path
@@ -224,7 +283,7 @@ fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> 
         )));
     }
 
-    let dangerous_patterns = ["--eval", "-e", "&&", "||", "|", ">", ">>", "<", "`", "$(", ";"];
+    let dangerous_patterns = ["--eval", "-e", "&&", "||", "|", ">", ">>", "<", "`", "$(", ";", "\n", "\r", "\0"];
     for arg in args {
         for pattern in dangerous_patterns {
             if arg.contains(pattern) {
@@ -234,8 +293,39 @@ fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> 
                 )));
             }
         }
+        
+        if arg.contains('\0') {
+            return Err(MCPError::LaunchError(format!(
+                "Argument contains null byte: possible injection attempt"
+            )));
+        }
     }
 
+    if let Some(validator) = CommandValidator::new(cmd_name) {
+        validator.validate_args(args)?;
+    }
+
+    Ok(())
+}
+
+fn validate_env_vars(env: &HashMap<String, String>) -> Result<(), MCPError> {
+    for (key, value) in env {
+        for prefix in RESTRICTED_ENV_PREFIXES {
+            if key.to_uppercase().contains(prefix) {
+                return Err(MCPError::LaunchError(format!(
+                    "Environment variable '{}' contains restricted prefix '{}'",
+                    key, prefix
+                )));
+            }
+        }
+        
+        if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+            return Err(MCPError::LaunchError(format!(
+                "Environment variable '{}' contains dangerous characters",
+                key
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -279,6 +369,8 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     let request_json = serde_json::to_string(&request).map_err(MCPError::JsonError)?;
 
     validate_mcp_command(&server.command, &server.args)?;
+
+    validate_env_vars(&server.env)?;
 
     let mut child = Command::new(&server.command)
         .args(&server.args)
@@ -576,6 +668,7 @@ async fn call_mcp_tool_stdio(
     log::debug!("MCP Request: {}", request_json);
 
     validate_mcp_command(&server.command, &server.args)?;
+    validate_env_vars(&server.env)?;
 
     // Execute the server process
     let mut child = Command::new(&server.command)
