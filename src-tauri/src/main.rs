@@ -68,22 +68,44 @@ fn main() {
                 }
             });
             
-            // Initialize knowledge base tables
-            let conn = rusqlite::Connection::open(&db.path).expect("Failed to open DB");
+            let conn = match rusqlite::Connection::open(&db.path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to open database: {}", e);
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            
             if let Err(e) = init_knowledge_base(&conn) {
                 log::error!("Failed to initialize knowledge base tables: {}", e);
             }
             
-            // Initialize vector store
-            let app_data_dir = app.handle().path().app_data_dir().expect("Failed to get app data dir");
-            let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap().to_string();
+            let app_data_dir = match app.handle().path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    log::error!("Failed to get app data dir: {}", e);
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap_or("vector_store").to_string();
             
             let vector_store = runtime.block_on(async {
-                knowledge_base::db::VectorStore::new(&vector_db_path).await
-                    .expect("Failed to initialize vector store")
+                match knowledge_base::db::VectorStore::new(&vector_db_path).await {
+                    Ok(vs) => Ok(vs),
+                    Err(e) => {
+                        log::error!("Failed to initialize vector store: {}", e);
+                        Err(e)
+                    }
+                }
             });
             
-            // Clone path before moving db
+            let vector_store = match vector_store {
+                Ok(vs) => vs,
+                Err(e) => {
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            
             let db_path = db.path.clone();
             
             app.manage(DbState(Arc::new(Mutex::new(db))));
