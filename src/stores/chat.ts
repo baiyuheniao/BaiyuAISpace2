@@ -753,16 +753,30 @@ ${toolDefs}
   };
 
   // ============ 流式中断功能 ============
-  const stopStream = () => {
-    if (isLoading.value && currentSession.value) {
-      isLoading.value = false;
-      const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-      if (lastMessage && lastMessage.role === "assistant") {
-        lastMessage.streaming = false;
-      }
-      currentStreamContent.value = "";
-      console.log("[Stream] Stopped by user");
+  const stopStream = async () => {
+    if (!isLoading.value || !currentSession.value) return;
+    
+    const sessionId = currentSession.value.id;
+    
+    // Call backend to cancel the stream
+    try {
+      await invoke("cancel_stream", { sessionId });
+      console.log("[Stream] Cancellation request sent to backend");
+    } catch (error) {
+      // Log warning but continue with frontend cleanup
+      console.warn("[Stream] Failed to cancel stream on backend:", error);
     }
+    
+    // Update frontend state
+    isLoading.value = false;
+    const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
+    if (lastMessage && lastMessage.role === "assistant") {
+      lastMessage.streaming = false;
+      // Save the partial message to database
+      await saveMessageToDb(lastMessage);
+    }
+    currentStreamContent.value = "";
+    console.log("[Stream] Stopped by user");
   };
 
   // ============ 返回公共接口 ============
