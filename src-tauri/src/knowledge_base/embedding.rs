@@ -96,7 +96,6 @@ async fn generate_embeddings_batch(
     );
     
     if provider == "zhipu" {
-        // Zhipu uses Authorization: Bearer token
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", api_key).parse().unwrap(),
@@ -127,55 +126,33 @@ async fn generate_embeddings_batch(
     let json: serde_json::Value = response.json().await
         .map_err(|e| KnowledgeBaseError::EmbeddingError(format!("Failed to parse response: {}", e)))?;
     
-    // Parse embeddings based on provider format
-    let embeddings = parse_embedding_response(&json, provider)?;
+    let embeddings = parse_embedding_response(&json)?;
     
     log::info!("Generated {} embeddings", embeddings.len());
     Ok(embeddings)
 }
 
-/// Parse embedding response
-fn parse_embedding_response(json: &serde_json::Value, provider: &str) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
-    match provider {
-        "zhipu" => {
-            // Zhipu format: data[].embedding
-            let data = json.get("data")
-                .and_then(|d| d.as_array())
-                .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Invalid response format".to_string()))?;
-            
-            let mut embeddings = Vec::new();
-            for item in data {
-                let embedding = item.get("embedding")
-                    .and_then(|e| e.as_array())
-                    .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Missing embedding field".to_string()))?;
-                
-                let vec: Vec<f32> = embedding.iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect();
-                embeddings.push(vec);
-            }
-            Ok(embeddings)
-        }
-        _ => {
-            // OpenAI format: data[].embedding
-            let data = json.get("data")
-                .and_then(|d| d.as_array())
-                .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Invalid response format".to_string()))?;
-            
-            let mut embeddings = Vec::new();
-            for item in data {
-                let embedding = item.get("embedding")
-                    .and_then(|e| e.as_array())
-                    .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Missing embedding field".to_string()))?;
-                
-                let vec: Vec<f32> = embedding.iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect();
-                embeddings.push(vec);
-            }
-            Ok(embeddings)
-        }
+fn parse_embedding_array(data: &[serde_json::Value]) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
+    let mut embeddings = Vec::new();
+    for item in data {
+        let embedding = item.get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Missing embedding field".to_string()))?;
+        
+        let vec: Vec<f32> = embedding.iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+        embeddings.push(vec);
     }
+    Ok(embeddings)
+}
+
+fn parse_embedding_response(json: &serde_json::Value) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
+    let data = json.get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| KnowledgeBaseError::EmbeddingError("Invalid response format".to_string()))?;
+    
+    parse_embedding_array(data)
 }
 
 /// Generate single embedding
