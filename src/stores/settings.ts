@@ -80,6 +80,10 @@ export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }>
     name: "零一万物 (Yi)",
     baseUrl: "https://api.lingyiwanwu.com/v1",
   },
+  local: {
+    name: "本地模型 (Ollama)",
+    baseUrl: "http://localhost:11434/v1",
+  },
   custom: {
     name: "自定义 (OpenAI 兼容)",
     baseUrl: "http://localhost:11434/v1",

@@ -105,6 +105,7 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("siliconflow", "https://api.siliconflow.cn/v1/chat/completions", "bearer"),
     ("minimax", "https://api.minimax.chat/v1/text/chatcompletion_v2", "bearer"),
     ("yi", "https://api.lingyiwanwu.com/v1/chat/completions", "bearer"),
+    ("local", "", "none"),
     ("custom", "", "bearer"),
 ];
 
@@ -130,6 +131,7 @@ fn build_url(provider: &str, base_url: &str, model: &str) -> String {
             }
         }
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
+        "local" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         _ => {
             if let Some((_, url, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
                 url.to_string()
@@ -256,6 +258,10 @@ fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
         "anthropic" => {
             headers.insert("x-api-key", api_key.parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        }
+        "local" => {
+            // Local models (e.g. Ollama) don't require authentication
+            // No Authorization header needed
         }
         _ => {
             headers.insert(
@@ -731,6 +737,10 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), LLMError> {
 }
 
 fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
+    // Local models don't require API keys
+    if request.provider == "local" {
+        return Ok(String::new());
+    }
     if request.api_key.is_empty() {
         return Err(LLMError::MissingApiKey);
     }

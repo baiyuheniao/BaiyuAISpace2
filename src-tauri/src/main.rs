@@ -60,6 +60,14 @@ fn main() {
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
+            // Local model commands
+            commands::local_model::check_ollama_status,
+            commands::local_model::list_local_models,
+            commands::local_model::show_local_model,
+            commands::local_model::pull_local_model,
+            commands::local_model::delete_local_model,
+            commands::local_model::get_model_sources_cmd,
+            commands::local_model::get_ollama_version,
         ])
         .setup(move |app| {
             let db = Database::new(app.handle());
