@@ -21,6 +21,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { 
   NLayout, 
   NLayoutContent, 
@@ -69,6 +71,26 @@ const settings = useSettingsStore();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
+
+// ============ 日志导出 ============
+
+const exportLogs = async () => {
+  try {
+    // 让用户选择保存位置
+    const filePath = await save({
+      defaultPath: `BaiyuAISpace2_logs_${new Date().toISOString().split('T')[0]}.log`,
+      filters: [{ name: "Log Files", extensions: ["log"] }]
+    });
+    
+    if (filePath) {
+      // 调用后端复制日志文件
+      const result = await invoke<string>("copy_log_file", { destPath: filePath });
+      message.success("日志已导出到: " + result);
+    }
+  } catch (error) {
+    message.error("导出日志失败: " + error);
+  }
+};
 
 // ============ 弹窗状态 ============
 
@@ -800,6 +822,19 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               >
                 baiyuheniao/BaiyuAISpace2
               </n-text>
+            </div>
+            
+            <div
+              class="about-item"
+              style="margin-top: 16px;"
+            >
+              <n-button 
+                type="primary" 
+                size="small"
+                @click="exportLogs"
+              >
+                导出日志
+              </n-button>
             </div>
           </div>
         </n-card>

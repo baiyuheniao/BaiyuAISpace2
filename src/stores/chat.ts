@@ -135,6 +135,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       // 从后端获取会话列表
       const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
+      console.log("[Chat] get_sessions_cmd returned:", dbSessions.length, "sessions");
       
       // 转换为前端格式 (snake_case -> camelCase)
       sessions.value = dbSessions.map(s => ({
@@ -154,6 +155,17 @@ export const useChatStore = defineStore("chat", () => {
           error: m.error,
         })),
       }));
+      console.log("[Chat] sessions.value updated, first session messages:", sessions.value[0]?.messages?.length);
+      
+      // 如果有当前会话，同步更新当前会话的数据
+      if (currentSession.value) {
+        const currentId = String(currentSession.value.id);
+        const freshCurrent = sessions.value.find(s => String(s.id) === currentId);
+        if (freshCurrent) {
+          currentSession.value = { ...freshCurrent };
+          console.log("[Chat] Updated currentSession with fresh data, messages:", freshCurrent.messages.length);
+        }
+      }
     } catch (error) {
       console.error("Failed to load sessions:", error);
     }
@@ -174,32 +186,62 @@ export const useChatStore = defineStore("chat", () => {
     // 监听 SSE 流式事件
     unlistenFn = await listen<StreamChunk>("stream-chunk", async (event) => {
       const chunk = event.payload;
+      console.log("[Stream] Received chunk, session_id:", chunk.session_id, "currentSession:", currentSession.value?.id, "done:", chunk.done);
       
-      // 如果没有当前会话或会话 ID 不匹配，忽略
-      if (!currentSession.value) return;
-      if (chunk.session_id !== currentSession.value.id) return;
+      // 如果没有当前会话，忽略
+      if (!currentSession.value) {
+        console.log("[Stream] No current session, ignored");
+        return;
+      }
 
-      // 如果用户已停止，不再处理后续内容
-      if (!isLoading.value && !chunk.done) return;
+      const currentId = String(currentSession.value.id);
+      const chunkId = String(chunk.session_id);
+
+      // 处理流结束信号 - 允许任何会话结束（清理之前的状态）
+      if (chunk.done) {
+        console.log("[Stream] Stream done, checking session match:", chunkId === currentId);
+        // 只有当前会话的流才需要更新 UI
+        if (chunkId === currentId) {
+          const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
+          if (lastMessage && lastMessage.role === "assistant") {
+            lastMessage.streaming = false;
+          }
+          isLoading.value = false;
+          currentStreamContent.value = "";
+          // 保存到数据库
+          const msgToSave = currentSession.value.messages[currentSession.value.messages.length - 1];
+          if (msgToSave) {
+            console.log("[Stream] Saving message to DB:", msgToSave.id, "content length:", msgToSave.content.length);
+            await saveMessageToDb(msgToSave);
+            await saveSessionToDb();
+          }
+        }
+        return;
+      }
+
+      // 处理流内容 - 必须匹配当前会话
+      if (chunkId !== currentId) {
+        console.log("[Stream] Session mismatch, ignored. chunk:", chunkId, "current:", currentId);
+        return;
+      }
+
+      // 如果不是当前会话在生成，忽略
+      if (!isLoading.value) {
+        console.log("[Stream] Not loading, ignored");
+        return;
+      }
 
       // 获取最后一条消息
       const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-      if (!lastMessage || lastMessage.role !== "assistant") return;
-
-      // 处理流式响应完成
-      if (chunk.done) {
-        lastMessage.streaming = false;
-        isLoading.value = false;
-        currentStreamContent.value = "";
-        
-        // 保存到数据库
-        await saveMessageToDb(lastMessage);
-        await saveSessionToDb();
-      } else {
-        // 累加内容 (打字机效果)
-        lastMessage.content += chunk.content;
-        currentStreamContent.value = lastMessage.content;
+      if (!lastMessage || lastMessage.role !== "assistant") {
+        console.log("[Stream] No assistant message found");
+        return;
       }
+
+      // 累加内容 (打字机效果)
+      lastMessage.content += chunk.content;
+      currentStreamContent.value = lastMessage.content;
+      console.log("[Stream] Updated content, length:", lastMessage.content.length);
     });
   };
 
@@ -269,6 +311,13 @@ export const useChatStore = defineStore("chat", () => {
       return null;
     }
 
+    // 如果有正在进行的流，先停止它
+    if (isLoading.value) {
+      console.log("[Chat] Stopping existing stream before creating new session");
+      isLoading.value = false;
+      currentStreamContent.value = "";
+    }
+    
     // 构建新会话对象
     const session: ChatSession = {
       id: crypto.randomUUID(),
@@ -299,7 +348,40 @@ export const useChatStore = defineStore("chat", () => {
    * @returns void
    */
   const loadSession = async (session: ChatSession) => {
-    currentSession.value = session;
+    console.log("[Chat] loadSession called:", session.id, "messages count:", session.messages?.length);
+    
+    // 清理之前的状态
+    isLoading.value = false;
+    currentStreamContent.value = "";
+    
+    // 尝试从数据库重新加载会话数据（确保消息最新）
+    let sessionWithMessages = session;
+    try {
+      const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
+      console.log("[Chat] Loaded sessions from DB:", dbSessions.length);
+      const freshSession = dbSessions.find(s => String(s.id) === String(session.id));
+      console.log("[Chat] Found fresh session:", freshSession?.id, "messages:", freshSession?.messages?.length);
+      if (freshSession) {
+        // 创建新对象确保响应式更新
+        sessionWithMessages = {
+          ...session,
+          messages: freshSession.messages.map(m => ({
+            id: m.id,
+            role: m.role as "user" | "assistant" | "system",
+            content: m.content,
+            timestamp: m.timestamp,
+            error: m.error,
+          }))
+        };
+        console.log("[Chat] Created new session object with messages:", sessionWithMessages.messages.length);
+      }
+    } catch (error) {
+      console.warn("Failed to reload session from DB, using cached data:", error);
+    }
+    
+    // 设置当前会话并设置流式监听器
+    currentSession.value = sessionWithMessages;
+    console.log("[Chat] currentSession set, messages:", currentSession.value?.messages?.length);
     await setupStreamListener();
   };
 
@@ -586,8 +668,11 @@ export const useChatStore = defineStore("chat", () => {
 
       // ============ 调用后端流式消息 API ============
       try {
+        console.log("[sendMessage] Calling stream_message, sessionId:", requestPayload.sessionId, "messageCount:", requestPayload.messages.length);
         await invoke('stream_message', { request: requestPayload });
+        console.log("[sendMessage] stream_message completed");
       } catch (e) {
+        console.error('[sendMessage] stream_message error:', e);
         if (import.meta.env.DEV) console.error('stream_message error', e);
         throw e;
       }

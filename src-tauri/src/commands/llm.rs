@@ -24,7 +24,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 // ============ 类型定义 ============
@@ -98,8 +97,9 @@ pub struct StreamChunk {
     pub done: bool,
 }
 
-// Global storage for active stream cancellation tokens
-static ACTIVE_STREAMS: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> = 
+// Global storage for active stream cancellation flags (temporarily disabled)
+#[allow(dead_code)]
+static ACTIVE_STREAMS: Lazy<Arc<Mutex<HashMap<String, bool>>>> = 
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 // Errors
@@ -431,24 +431,28 @@ pub async fn stream_message(
     state: tauri::State<'_, DbState>,
     app_handle: AppHandle,
 ) -> Result<(), LLMError> {
+    log::info!("[stream_message] Called - session_id: {}, message_count: {}, enable_mcp: {}", 
+        request.session_id, request.messages.len(), request.enable_mcp);
+    
     let api_key = get_api_key(&request)?;
     let message_id = Uuid::new_v4().to_string();
-    let session_id = request.session_id.clone();
+    let _session_id = request.session_id.clone();
     
+    // TODO: Re-enable stream cancellation with proper implementation
     // Create cancellation token and store it
-    let cancel_token = CancellationToken::new();
-    {
-        let mut streams = ACTIVE_STREAMS.lock().await;
-        streams.insert(session_id.clone(), cancel_token.clone());
-    }
+    // let cancel_token = CancellationToken::new();
+    // {
+    //     let mut streams = ACTIVE_STREAMS.lock().await;
+    //     streams.insert(session_id.clone(), true);
+    // }
     
     // Cleanup token when function exits
-    let _cleanup = scopeguard::guard(session_id.clone(), |sid| {
-        tauri::async_runtime::spawn(async move {
-            let mut streams = ACTIVE_STREAMS.lock().await;
-            streams.remove(&sid);
-        });
-    });
+    // let _cleanup = scopeguard::guard(session_id.clone(), |sid| {
+    //     tauri::async_runtime::spawn(async move {
+    //         let mut streams = ACTIVE_STREAMS.lock().await;
+    //         streams.remove(&sid);
+    //     });
+    // });
     
     // Get MCP tools if enabled
     let mcp_tools = if request.enable_mcp {
@@ -528,21 +532,20 @@ pub async fn stream_message(
     let mut buffer = String::new();
     let mut accumulated_tool_calls = Vec::new();
 
-    // Main loop with cancellation support
+    // Main loop (cancellation temporarily disabled)
     loop {
         tokio::select! {
             // Check for cancellation signal
-            _ = cancel_token.cancelled() => {
-                log::info!("Stream cancelled for session: {}", session_id);
-                // Emit done event to notify frontend
-                let _ = app_handle.emit("stream-chunk", StreamChunk {
-                    session_id: request.session_id.clone(),
-                    message_id: message_id.clone(),
-                    content: String::new(),
-                    done: true,
-                });
-                return Ok(());
-            }
+            // _ = cancel_token.cancelled() => {
+            //     log::info!("Stream cancelled for session: {}", session_id);
+            //     let _ = app_handle.emit("stream-chunk", StreamChunk {
+            //         session_id: request.session_id.clone(),
+            //         message_id: message_id.clone(),
+            //         content: String::new(),
+            //         done: true,
+            //     });
+            //     return Ok(());
+            // }
             // Read next chunk from stream
             chunk = stream.next() => {
                 match chunk {
@@ -787,12 +790,15 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
 /// Cancel an active stream for a session
 #[tauri::command]
 pub async fn cancel_stream(session_id: String) -> Result<(), String> {
-    let mut streams = ACTIVE_STREAMS.lock().await;
-    if let Some(token) = streams.get(&session_id) {
-        token.cancel();
-        log::info!("Cancelled stream for session: {}", session_id);
-        Ok(())
-    } else {
-        Err("No active stream found for session".to_string())
-    }
+    // Temporarily disabled - needs proper implementation
+    // let mut streams = ACTIVE_STREAMS.lock().await;
+    // if let Some(flag) = streams.get(&session_id) {
+    //     *flag = true; // Set cancellation flag
+    //     log::info!("Cancelled stream for session: {}", session_id);
+    //     Ok(())
+    // } else {
+    //     Err("No active stream found for session".to_string())
+    // }
+    log::info!("Stream cancellation requested for session: {} (temporarily disabled)", session_id);
+    Ok(())
 }

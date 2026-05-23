@@ -83,6 +83,7 @@ watch(
 onMounted(async () => {
   // 从数据库加载所有会话列表
   await chat.loadSessionsFromDb();
+  console.log("[ChatView] loadSessionsFromDb done, currentSession:", chat.currentSession?.id, "messages:", chat.currentSession?.messages?.length);
   
   // 如果没有当前选中的会话
   if (!chat.currentSession) {
@@ -94,6 +95,7 @@ onMounted(async () => {
     // 为已有会话设置流式响应监听器
     await chat.loadSession(chat.currentSession);
   }
+  console.log("[ChatView] setup done, currentSession:", chat.currentSession?.id, "messages:", chat.currentSession?.messages?.length);
 });
 </script>
 

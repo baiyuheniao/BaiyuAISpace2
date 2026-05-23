@@ -23,14 +23,12 @@ use crate::commands::mcp::{MCPServer, MCPServerType};
 use keyring::Entry;
 use std::sync::Arc;
 use tauri::Manager;
-use tokio::sync::Mutex;
 
 const MCP_KEYRING_SERVICE: &str = "mcp_api_key";
 
-// Database instance wrapper
 pub struct Database {
-    /// 数据库文件路径
     pub path: String,
+    pub conn: rusqlite::Connection,
 }
 
 impl Database {
@@ -47,8 +45,12 @@ impl Database {
             .expect("Failed to get app data dir");
         std::fs::create_dir_all(&app_dir).expect("Failed to create app data dir");
         let db_path = app_dir.join("app.db");
+        
+        let conn = rusqlite::Connection::open(&db_path).expect("Failed to open database");
+        
         Self {
             path: db_path.to_str().unwrap().to_string(),
+            conn,
         }
     }
 
@@ -62,14 +64,10 @@ impl Database {
      * 
      * 同时创建索引以优化查询性能
      */
-    pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
-        // Enable foreign key constraints
-        conn.execute("PRAGMA foreign_keys = ON", [])?;
+    pub fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
-        // Create sessions table
-        conn.execute(
+        self.conn.execute(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -84,23 +82,21 @@ impl Database {
             [],
         )?;
 
-        // Add api_config_id column if it doesn't exist (for database migration)
-        let has_column = conn.query_row(
+        let has_column = self.conn.query_row(
             "SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'api_config_id'",
             [],
             |_| Ok(true),
         )
         .unwrap_or(false);
         if !has_column {
-            conn.execute(
+            self.conn.execute(
                 "ALTER TABLE sessions ADD COLUMN api_config_id TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
             log::info!("Database migration: added api_config_id column");
         }
 
-        // Create messages table
-        conn.execute(
+        self.conn.execute(
             r#"
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
@@ -115,8 +111,7 @@ impl Database {
             [],
         )?;
 
-        // Create MCP servers table
-        conn.execute(
+        self.conn.execute(
             r#"
             CREATE TABLE IF NOT EXISTS mcp_servers (
                 id TEXT PRIMARY KEY,
@@ -124,8 +119,8 @@ impl Database {
                 description TEXT,
                 server_type TEXT NOT NULL,
                 command TEXT,
-                args TEXT, -- JSON array of strings
-                env TEXT, -- JSON object of key-value pairs
+                args TEXT,
+                env TEXT,
                 port INTEGER,
                 url TEXT,
                 api_key TEXT,
@@ -137,20 +132,19 @@ impl Database {
             [],
         )?;
 
-        // Create indexes
-        conn.execute(
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)",
             [],
         )?;
-        conn.execute(
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)",
             [],
         )?;
-        conn.execute(
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)",
             [],
         )?;
-        conn.execute(
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled)",
             [],
         )?;
@@ -165,9 +159,7 @@ impl Database {
      * @param session: 要保存的会话对象
      */
     pub fn save_session(&self, session: &ChatSession) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
-        conn.execute(
+        self.conn.execute(
             r#"
             INSERT OR REPLACE INTO sessions (id, title, provider, model, api_config_id, created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -193,9 +185,7 @@ impl Database {
      * @param session_id: 要删除的会话 ID
      */
     pub fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
-        conn.execute(
+        self.conn.execute(
             "DELETE FROM sessions WHERE id = ?1",
             [session_id],
         )?;
@@ -211,9 +201,7 @@ impl Database {
      * @return 会话列表 (包含消息)
      */
     pub fn get_sessions(&self) -> Result<Vec<ChatSession>, Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
-        let mut stmt = conn.prepare(
+        let mut stmt = self.conn.prepare(
             r#"
             SELECT id, title, provider, model, api_config_id, created_at, updated_at 
             FROM sessions 
@@ -251,6 +239,9 @@ impl Database {
         }
 
         log::info!("Loaded {} sessions", sessions.len());
+        for s in &sessions {
+            log::debug!("Session {} has {} messages", s.id, s.messages.len());
+        }
         Ok(sessions)
     }
 
@@ -266,12 +257,15 @@ impl Database {
         session_id: &str,
         message: &ChatMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
+        log::info!("[save_message] Saving message - session_id: {}, message_id: {}, role: {}, content_len: {}, db_path: {}", 
+            session_id, message.id, message.role, message.content.len(), self.path);
         
-        conn.execute(
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        
+        let affected = self.conn.execute(
             r#"
             INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, error)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            VALUES (?, ?, ?, ?, ?, ?)
             "#,
             [
                 &message.id,
@@ -282,12 +276,28 @@ impl Database {
                 &message.error.as_deref().unwrap_or(""),
             ],
         )?;
+        log::info!("[save_message] INSERT affected rows: {}, session_id='{}' (len={})", affected, session_id, session_id.len());
 
-        // Update session's updated_at
-        conn.execute(
+        self.conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             [&chrono::Utc::now().timestamp_millis().to_string(), session_id],
         )?;
+        
+        self.conn.execute("COMMIT", [])?;
+        
+        let session_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE id = ?",
+            [session_id],
+            |row| row.get(0)
+        )?;
+        log::info!("[save_message] VERIFY: sessions table has {} row(s) for id={}", session_count, session_id);
+        
+        let verify: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            [session_id],
+            |row| row.get(0)
+        )?;
+        log::info!("[save_message] VERIFY: messages for session {} after commit: {}", session_id, verify);
 
         Ok(())
     }
@@ -303,17 +313,17 @@ impl Database {
         &self,
         session_id: &str,
     ) -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
+        log::info!("[get_messages] Querying messages for session_id: {}, db_path: {}", session_id, self.path);
         
-        let mut stmt = conn.prepare(
+        let mut stmt = self.conn.prepare(
             r#"
             SELECT id, role, content, timestamp, error 
             FROM messages 
-            WHERE session_id = ?1 
+            WHERE session_id = ? 
             ORDER BY timestamp ASC
             "#,
         )?;
-
+        
         let rows = stmt.query_map([session_id], |row| {
             let error: Option<String> = row.get(4)?;
             Ok(ChatMessage {
@@ -326,6 +336,7 @@ impl Database {
         })?;
 
         let messages: Result<Vec<_>, _> = rows.collect();
+        log::info!("get_messages for session {}: {} messages", session_id, messages.as_ref().map(|m| m.len()).unwrap_or(0));
         Ok(messages?)
     }
 
@@ -335,8 +346,6 @@ impl Database {
      * @param server: MCP 服务器配置
      */
     pub fn save_mcp_server(&self, server: &MCPServer) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
         let args_json = serde_json::to_string(&server.args)?;
         let env_json = serde_json::to_string(&server.env)?;
         let server_type = match server.server_type {
@@ -360,7 +369,7 @@ impl Database {
         
         let has_api_key_in_keyring = server.api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
         
-        conn.execute(
+        self.conn.execute(
             r#"
             INSERT OR REPLACE INTO mcp_servers 
             (id, name, description, server_type, command, args, env, port, url, api_key, enabled, created_at, updated_at)
@@ -393,9 +402,7 @@ impl Database {
     }
 
     pub fn get_mcp_servers(&self) -> Result<Vec<MCPServer>, Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
-        let mut stmt = conn.prepare(
+        let mut stmt = self.conn.prepare(
             r#"
             SELECT id, name, description, server_type, command, args, env, port, url, api_key, enabled, created_at, updated_at
             FROM mcp_servers 
@@ -419,8 +426,8 @@ impl Database {
             let api_key = api_key_placeholder
                 .filter(|k| k == "__KEYRING__")
                 .and_then(|_| {
-                    let id: String = row.get(0)?;
-                    Self::get_mcp_api_key_from_keyring(&id)
+                    let id: Result<String, _> = row.get(0);
+                    id.ok().and_then(|id_str| Self::get_mcp_api_key_from_keyring(&id_str))
                 });
             
             Ok(MCPServer {
@@ -450,13 +457,11 @@ impl Database {
      * @param server_id: 要删除的服务器 ID
      */
     pub fn delete_mcp_server(&self, server_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.path)?;
-        
         if let Ok(entry) = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server_id, "api_key")) {
             let _ = entry.delete_credential();
         }
         
-        conn.execute(
+        self.conn.execute(
             "DELETE FROM mcp_servers WHERE id = ?1",
             [server_id],
         )?;
@@ -468,4 +473,4 @@ impl Database {
 
 /// 数据库状态封装结构
 /// 用于在 Tauri 应用中共享数据库实例
-pub struct DbState(pub Arc<Mutex<Database>>);
+pub struct DbState(pub Arc<tokio::sync::Mutex<Database>>);

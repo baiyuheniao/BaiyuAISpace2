@@ -23,7 +23,7 @@
 -->
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import {
   NLayout,
   NLayoutContent,
@@ -65,6 +65,12 @@ const mcp = useMCPStore();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
+
+// ============ 生命周期 ============
+
+onMounted(() => {
+  mcp.loadServers();
+});
 
 // ============ 弹窗状态 ============
 

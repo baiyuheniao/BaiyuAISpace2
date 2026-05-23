@@ -2,6 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 /**
  * BaiyuAISpace 后端入口文件
  * 
@@ -19,8 +21,6 @@
  * - secure_storage: API 密钥安全存储
  */
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 // 引入模块
 mod commands;
 mod db;
@@ -33,8 +33,70 @@ use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use std::sync::Arc;
+use std::path::PathBuf;
 use tauri::Manager;
 use tokio::sync::Mutex;
+
+static LOG_DIR: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
+
+pub fn get_log_dir() -> Option<&'static PathBuf> {
+    LOG_DIR.get()
+}
+
+fn init_logging() {
+    use fern::colors::{ColoredLevelConfig, Color};
+    
+    // 获取应用数据目录用于存放日志
+    let log_dir = if let Ok(app_data) = std::env::var("APPDATA") {
+        let dir = PathBuf::from(app_data).join("BaiyuAISpace2").join("logs");
+        std::fs::create_dir_all(&dir).ok();
+        dir
+    } else {
+        PathBuf::from("logs")
+    };
+    
+    // 保存日志目录路径
+    let _ = LOG_DIR.set(log_dir.clone());
+    
+    // 创建日志文件名（按日期）
+    let log_file = log_dir.join(format!(
+        "app_{}.log",
+        chrono::Local::now().format("%Y-%m-%d")
+    ));
+    
+    // 配置颜色
+    let colors = ColoredLevelConfig::new()
+        .error(Color::Red)
+        .warn(Color::Yellow)
+        .info(Color::Blue)
+        .debug(Color::White);
+    
+    // 配置日志系统
+    let mut dispatch = fern::Dispatch::new()
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "[{}] {} - {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                colors.color(record.level()),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Info)
+        .chain(std::io::stdout());
+    
+    // 添加文件日志
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+    {
+        dispatch = dispatch.chain(file);
+    }
+    
+    dispatch.apply().ok();
+    
+    log::info!("Logging initialized, log file: {:?}", log_file);
+}
 
 /**
  * 应用入口函数
@@ -49,9 +111,10 @@ use tokio::sync::Mutex;
  */
 fn main() {
     // 初始化日志系统
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .init();
+    // 初始化日志系统 - 输出到控制台和文件
+    init_logging();
+    
+    log::info!("Starting BaiyuAISpace2 application...");
 
     // 创建 Tokio 异步运行时
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -96,16 +159,17 @@ fn main() {
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
+            // 日志相关命令
+            get_log_path,
+            read_log_file,
+            copy_log_file,
         ])
         // 应用初始化设置
         .setup(move |app| {
-            // 初始化 SQLite 数据库
             let db = Database::new(app.handle());
-            runtime.block_on(async {
-                if let Err(e) = db.init().await {
-                    log::error!("Failed to initialize database: {}", e);
-                }
-            });
+            if let Err(e) = db.init() {
+                log::error!("Failed to initialize database: {}", e);
+            }
             
             let conn = match rusqlite::Connection::open(&db.path) {
                 Ok(c) => c,
@@ -155,6 +219,15 @@ fn main() {
             });
             log::info!("Database and vector store initialized");
             
+            // 确保主窗口显示并聚焦（解决窗口启动后被遮挡的问题）
+            if let Some(window) = app.get_webview_window("main") {
+                log::info!("Showing and focusing main window...");
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                log::info!("Main window shown and focused");
+            }
+            
             Ok(())
         })
         // 运行应用
@@ -197,4 +270,56 @@ async fn delete_session_cmd(
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
     db.delete_session(&session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_log_path() -> Result<String, String> {
+    if let Some(log_dir) = get_log_dir() {
+        // 获取当天的日志文件
+        let log_file = log_dir.join(format!(
+            "app_{}.log",
+            chrono::Local::now().format("%Y-%m-%d")
+        ));
+        if log_file.exists() {
+            return Ok(log_file.to_string_lossy().to_string());
+        }
+        Err("日志文件不存在".to_string())
+    } else {
+        Err("无法获取日志目录".to_string())
+    }
+}
+
+#[tauri::command]
+fn read_log_file() -> Result<String, String> {
+    if let Some(log_dir) = get_log_dir() {
+        let log_file = log_dir.join(format!(
+            "app_{}.log",
+            chrono::Local::now().format("%Y-%m-%d")
+        ));
+        if log_file.exists() {
+            return std::fs::read_to_string(&log_file)
+                .map_err(|e| format!("读取日志文件失败: {}", e));
+        }
+        Err("日志文件不存在".to_string())
+    } else {
+        Err("无法获取日志目录".to_string())
+    }
+}
+
+#[tauri::command]
+fn copy_log_file(dest_path: String) -> Result<String, String> {
+    if let Some(log_dir) = get_log_dir() {
+        let log_file = log_dir.join(format!(
+            "app_{}.log",
+            chrono::Local::now().format("%Y-%m-%d")
+        ));
+        if log_file.exists() {
+            std::fs::copy(&log_file, &dest_path)
+                .map_err(|e| format!("复制日志文件失败: {}", e))?;
+            return Ok(dest_path);
+        }
+        Err("日志文件不存在".to_string())
+    } else {
+        Err("无法获取日志目录".to_string())
+    }
 }
