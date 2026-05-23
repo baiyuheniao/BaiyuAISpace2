@@ -20,12 +20,14 @@
 
 use crate::commands::llm::{ChatMessage, ChatSession};
 use crate::commands::mcp::{MCPServer, MCPServerType};
+use keyring::Entry;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-/// 数据库实例包装结构
-/// 包含数据库文件路径
+const MCP_KEYRING_SERVICE: &str = "mcp_api_key";
+
+// Database instance wrapper
 pub struct Database {
     /// 数据库文件路径
     pub path: String,
@@ -346,7 +348,18 @@ impl Database {
         
         let now = chrono::Utc::now().timestamp_millis();
         let port = server.port.map(|p| p as i64);
-
+        
+        if let Some(ref api_key) = server.api_key {
+            if !api_key.is_empty() {
+                let entry = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server.id, "api_key"))
+                    .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+                entry.set_password(api_key)
+                    .map_err(|e| format!("Failed to store API key in keyring: {}", e))?;
+            }
+        }
+        
+        let has_api_key_in_keyring = server.api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+        
         conn.execute(
             r#"
             INSERT OR REPLACE INTO mcp_servers 
@@ -363,23 +376,22 @@ impl Database {
                 &env_json,
                 &port,
                 &server.url,
-                &server.api_key,
+                if has_api_key_in_keyring { Some("__KEYRING__") } else { None },
                 &server.enabled,
                 &now,
                 &now,
             ],
         )?;
 
-        log::info!("MCP server saved: {}", server.id);
+        log::info!("MCP server saved: {} (API key stored in keyring)", server.id);
         Ok(())
     }
 
-    /**
-     * 获取所有 MCP 服务器配置
-     * 按名称升序排列
-     * 
-     * @return MCP 服务器列表
-     */
+    fn get_mcp_api_key_from_keyring(server_id: &str) -> Option<String> {
+        let entry = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server_id, "api_key")).ok()?;
+        entry.get_password().ok()
+    }
+
     pub fn get_mcp_servers(&self) -> Result<Vec<MCPServer>, Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
@@ -397,11 +409,19 @@ impl Database {
                 "stdio" => MCPServerType::Stdio,
                 "sse" => MCPServerType::SSE,
                 "http" => MCPServerType::HTTP,
-                _ => MCPServerType::Stdio, // default
+                _ => MCPServerType::Stdio,
             };
             
             let args_json: String = row.get(5)?;
             let env_json: String = row.get(6)?;
+            let api_key_placeholder: Option<String> = row.get(9)?;
+            
+            let api_key = api_key_placeholder
+                .filter(|k| k == "__KEYRING__")
+                .and_then(|_| {
+                    let id: String = row.get(0)?;
+                    Self::get_mcp_api_key_from_keyring(&id)
+                });
             
             Ok(MCPServer {
                 id: row.get(0)?,
@@ -413,7 +433,7 @@ impl Database {
                 env: serde_json::from_str(&env_json).unwrap_or_default(),
                 port: row.get::<_, Option<i64>>(7)?.map(|p| p as u16),
                 url: row.get(8)?,
-                api_key: row.get(9)?,
+                api_key,
                 enabled: row.get(10)?,
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
@@ -432,12 +452,16 @@ impl Database {
     pub fn delete_mcp_server(&self, server_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let conn = rusqlite::Connection::open(&self.path)?;
         
+        if let Ok(entry) = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server_id, "api_key")) {
+            let _ = entry.delete_credential();
+        }
+        
         conn.execute(
             "DELETE FROM mcp_servers WHERE id = ?1",
             [server_id],
         )?;
 
-        log::info!("MCP server deleted: {}", server_id);
+        log::info!("MCP server deleted: {} (including keyring entry)", server_id);
         Ok(())
     }
 }

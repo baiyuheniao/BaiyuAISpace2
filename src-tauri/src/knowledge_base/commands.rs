@@ -53,8 +53,14 @@ pub async fn create_knowledge_base(
     log::info!("[KB] Creating knowledge base: {:?}", request);
     
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open_with_flags(
+        &db.path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+    
+    // Enable WAL mode for better concurrent read/write performance
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp_millis();
@@ -172,7 +178,7 @@ pub async fn delete_knowledge_base(
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
     
     // Delete vector table
-    kb_state.vector_store.drop_kb_table(&kb_id).await?;
+    kb_state.vector_store.delete_kb_vectors(&kb_id).await?;
     
     log::info!("Deleted knowledge base: {}", kb_id);
     Ok(())
@@ -314,11 +320,16 @@ pub async fn import_document(
             ],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
         
-        // Also insert into FTS5 for keyword search (ignore errors if FTS5 not available)
-        let _ = conn.execute(
+        // Also insert into FTS5 for keyword search
+        if let Err(e) = conn.execute(
             "INSERT INTO chunks_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
             [chunk_text],
-        );
+        ) {
+            log::warn!(
+                "[KB] FTS5 indexing failed for chunk {} in document {}: {}",
+                chunk_id, doc_id, e
+            );
+        }
         
         all_chunk_ids.push(chunk_id);
     }
@@ -448,10 +459,12 @@ pub async fn delete_document(
     kb_state.vector_store.delete_document_vectors(&kb_id, &doc_id).await?;
     
     // Delete from FTS5 (must delete before deleting chunks since we need rowid)
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
         [&doc_id],
-    );
+    ) {
+        log::warn!("[KB] FTS5 cleanup failed for document {}: {}", doc_id, e);
+    }
     
     // Delete from SQLite (cascade will delete chunks)
     conn.execute(

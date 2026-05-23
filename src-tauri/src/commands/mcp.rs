@@ -334,6 +334,15 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         .spawn()
         .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
 
+    // Read stderr in a separate thread to prevent pipe blocking
+    let stderr = child.stderr.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stderr".to_string()))?;
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            log::debug!("[MCP stderr] {}", line);
+        }
+    });
+
     {
         let mut stdin = child.stdin.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdin".to_string()))?;
         stdin
@@ -632,6 +641,17 @@ async fn call_mcp_tool_stdio(
         .spawn()
         .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
 
+    // Read stderr in a separate thread to prevent pipe blocking
+    let stderr = child.stderr.take().ok_or_else(|| {
+        MCPError::CommunicationError("Failed to open stderr".to_string())
+    })?;
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            log::debug!("[MCP stderr] {}", line);
+        }
+    });
+
     // Send request to stdin
     {
         let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -767,10 +787,21 @@ pub async fn test_mcp_connection(
     match server_type.as_str() {
         "stdio" => {
             if let Some(cmd) = command {
-                // Try to execute command and verify it responds
-                let output = Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                // Parse command and arguments to avoid shell injection
+                let parts: Vec<&str> = cmd.split_whitespace().collect();
+                if parts.is_empty() {
+                    return Err(MCPError::InvalidConfig("stdio requires a non-empty command".to_string()));
+                }
+
+                let executable = parts[0];
+                let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+                // Validate against command whitelist and dangerous patterns
+                validate_mcp_command(executable, &args)?;
+
+                // Execute directly without shell to prevent injection
+                let output = Command::new(executable)
+                    .args(&args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()

@@ -66,7 +66,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // LLM 相关命令
             commands::llm::stream_message,
-            // 认证相关命令
+            commands::llm::cancel_stream,
+            // Auth commands
             commands::auth::get_baidu_access_token,
             // 数据库相关命令
             save_session_cmd,
@@ -106,22 +107,44 @@ fn main() {
                 }
             });
             
-            // 初始化知识库表结构
-            let conn = rusqlite::Connection::open(&db.path).expect("Failed to open DB");
+            let conn = match rusqlite::Connection::open(&db.path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to open database: {}", e);
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            
             if let Err(e) = init_knowledge_base(&conn) {
                 log::error!("Failed to initialize knowledge base tables: {}", e);
             }
             
-            // 初始化向量数据库
-            let app_data_dir = app.handle().path().app_data_dir().expect("Failed to get app data dir");
-            let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap().to_string();
+            let app_data_dir = match app.handle().path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    log::error!("Failed to get app data dir: {}", e);
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap_or("vector_store").to_string();
             
             let vector_store = runtime.block_on(async {
-                knowledge_base::db::VectorStore::new(&vector_db_path).await
-                    .expect("Failed to initialize vector store")
+                match knowledge_base::db::VectorStore::new(&vector_db_path).await {
+                    Ok(vs) => Ok(vs),
+                    Err(e) => {
+                        log::error!("Failed to initialize vector store: {}", e);
+                        Err(e)
+                    }
+                }
             });
             
-            // 克隆数据库路径 (因为 db 会被 move)
+            let vector_store = match vector_store {
+                Ok(vs) => vs,
+                Err(e) => {
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+            
             let db_path = db.path.clone();
             
             // 注册全局状态

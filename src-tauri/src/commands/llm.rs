@@ -16,10 +16,15 @@ use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::db::DbState;
 use chrono::Utc;
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 // ============ 类型定义 ============
@@ -93,9 +98,11 @@ pub struct StreamChunk {
     pub done: bool,
 }
 
-// ============ 错误类型 ============
+// Global storage for active stream cancellation tokens
+static ACTIVE_STREAMS: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> = 
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-/// LLM 错误类型
+// Errors
 #[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum LLMError {
@@ -426,6 +433,22 @@ pub async fn stream_message(
 ) -> Result<(), LLMError> {
     let api_key = get_api_key(&request)?;
     let message_id = Uuid::new_v4().to_string();
+    let session_id = request.session_id.clone();
+    
+    // Create cancellation token and store it
+    let cancel_token = CancellationToken::new();
+    {
+        let mut streams = ACTIVE_STREAMS.lock().await;
+        streams.insert(session_id.clone(), cancel_token.clone());
+    }
+    
+    // Cleanup token when function exits
+    let _cleanup = scopeguard::guard(session_id.clone(), |sid| {
+        tauri::async_runtime::spawn(async move {
+            let mut streams = ACTIVE_STREAMS.lock().await;
+            streams.remove(&sid);
+        });
+    });
     
     // Get MCP tools if enabled
     let mcp_tools = if request.enable_mcp {
@@ -505,119 +528,144 @@ pub async fn stream_message(
     let mut buffer = String::new();
     let mut accumulated_tool_calls = Vec::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e: reqwest::Error| LLMError::StreamError(e.to_string()))?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
-
-        // Process complete lines
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer = buffer[pos + 1..].to_string();
-
-            if line.is_empty() {
-                continue;
+    // Main loop with cancellation support
+    loop {
+        tokio::select! {
+            // Check for cancellation signal
+            _ = cancel_token.cancelled() => {
+                log::info!("Stream cancelled for session: {}", session_id);
+                // Emit done event to notify frontend
+                let _ = app_handle.emit("stream-chunk", StreamChunk {
+                    session_id: request.session_id.clone(),
+                    message_id: message_id.clone(),
+                    content: String::new(),
+                    done: true,
+                });
+                return Ok(());
             }
+            // Read next chunk from stream
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(chunk)) => {
+                        let text = String::from_utf8_lossy(&chunk);
+                        buffer.push_str(&text);
 
-            if let Some(content) = parse_sse_line(&request.provider, &line) {
-                match content {
-                    StreamContent::Text(text) => {
-                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                            session_id: request.session_id.clone(),
-                            message_id: message_id.clone(),
-                            content: text,
-                            done: false,
-                        });
-                    }
-                    StreamContent::ToolCalls(calls) => {
-                        accumulated_tool_calls.extend(calls);
-                    }
-                    StreamContent::Done => {
-                        // Process accumulated tool calls if any
-                        if !accumulated_tool_calls.is_empty() && request.enable_mcp {
-                            let tool_calls = std::mem::take(&mut accumulated_tool_calls);
-                            for tool_call in tool_calls {
-                                // Find the tool and execute it
-                                if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
-                                    log::info!("Executing MCP tool: {}", tool.name);
-                                    
-                                    match call_mcp_tool(
-                                        state.clone(),
-                                        Some(tool.server_id.clone()),
-                                        tool.name.clone(),
-                                        serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
-                                    ).await {
-                                        Ok(result) => {
-                                            log::info!("Tool execution result: {:?}", result);
+                        // Process complete lines
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].trim().to_string();
+                            buffer = buffer[pos + 1..].to_string();
 
-                                            // Send tool result back to the LLM for continued reasoning
-                                            let tool_result_content = format!(
-                                                "工具 {} 调用结果：{}",
-                                                tool.name,
-                                                serde_json::to_string(&result).unwrap_or_else(|_| "<serialize error>".to_string())
-                                            );
+                            if line.is_empty() {
+                                continue;
+                            }
 
-                                            let mut follow_up_messages = request.messages.clone();
-                                            follow_up_messages.push(ChatMessage {
-                                                id: Uuid::new_v4().to_string(),
-                                                role: "assistant".to_string(),
-                                                content: tool_result_content.clone(),
-                                                timestamp: Utc::now().timestamp_millis(),
-                                                error: None,
-                                            });
+                            if let Some(content) = parse_sse_line(&request.provider, &line) {
+                                match content {
+                                    StreamContent::Text(text) => {
+                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
+                                            session_id: request.session_id.clone(),
+                                            message_id: message_id.clone(),
+                                            content: text,
+                                            done: false,
+                                        });
+                                    }
+                                    StreamContent::ToolCalls(calls) => {
+                                        accumulated_tool_calls.extend(calls);
+                                    }
+                                    StreamContent::Done => {
+                                        // Process accumulated tool calls if any
+                                        if !accumulated_tool_calls.is_empty() && request.enable_mcp {
+                                            let tool_calls = std::mem::take(&mut accumulated_tool_calls);
+                                            for tool_call in tool_calls {
+                                                // Find the tool and execute it
+                                                if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
+                                                    log::info!("Executing MCP tool: {}", tool.name);
+                                                    
+                                                    match call_mcp_tool(
+                                                        state.clone(),
+                                                        Some(tool.server_id.clone()),
+                                                        tool.name.clone(),
+                                                        serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
+                                                    ).await {
+                                                        Ok(result) => {
+                                                            log::info!("Tool execution result: {:?}", result);
 
-                                            match request_llm_once(
-                                                &request.provider,
-                                                &request.model,
-                                                &request.api_key,
-                                                &request.base_url,
-                                                &follow_up_messages,
-                                                &mcp_tools,
-                                            )
-                                            .await
-                                            {
-                                                Ok(live_reply) => {
-                                                    let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                                        session_id: request.session_id.clone(),
-                                                        message_id: message_id.clone(),
-                                                        content: live_reply,
-                                                        done: false,
-                                                    });
-                                                }
-                                                Err(err) => {
-                                                    log::error!("Failed to continue reasoning after tool call: {}", err);
+                                                            // Send tool result back to the LLM for continued reasoning
+                                                            let tool_result_content = format!(
+                                                                "工具 {} 调用结果：{}",
+                                                                tool.name,
+                                                                serde_json::to_string(&result).unwrap_or_else(|_| "<serialize error>".to_string())
+                                                            );
+
+                                                            let mut follow_up_messages = request.messages.clone();
+                                                            follow_up_messages.push(ChatMessage {
+                                                                id: Uuid::new_v4().to_string(),
+                                                                role: "assistant".to_string(),
+                                                                content: tool_result_content.clone(),
+                                                                timestamp: Utc::now().timestamp_millis(),
+                                                                error: None,
+                                                            });
+
+                                                            match request_llm_once(
+                                                                &request.provider,
+                                                                &request.model,
+                                                                &request.api_key,
+                                                                &request.base_url,
+                                                                &follow_up_messages,
+                                                                &mcp_tools,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(live_reply) => {
+                                                                    let _ = app_handle.emit("stream-chunk", StreamChunk {
+                                                                        session_id: request.session_id.clone(),
+                                                                        message_id: message_id.clone(),
+                                                                        content: live_reply,
+                                                                        done: false,
+                                                                    });
+                                                                }
+                                                                Err(err) => {
+                                                                    log::error!("Failed to continue reasoning after tool call: {}", err);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            log::error!("Tool execution failed: {}", e);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        Err(e) => {
-                                            log::error!("Tool execution failed: {}", e);
-                                        }
+                                        
+                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
+                                            session_id: request.session_id.clone(),
+                                            message_id: message_id.clone(),
+                                            content: String::new(),
+                                            done: true,
+                                        });
+                                        return Ok(());
                                     }
                                 }
                             }
                         }
-                        
+                    }
+                    Some(Err(e)) => {
+                        return Err(LLMError::StreamError(e.to_string()));
+                    }
+                    None => {
+                        // Stream ended naturally
                         let _ = app_handle.emit("stream-chunk", StreamChunk {
                             session_id: request.session_id.clone(),
                             message_id: message_id.clone(),
                             content: String::new(),
                             done: true,
                         });
+                        return Ok(());
                     }
                 }
             }
         }
     }
-
-    // Emit final done event
-    let _ = app_handle.emit("stream-chunk", StreamChunk {
-        session_id: request.session_id,
-        message_id,
-        content: String::new(),
-        done: true,
-    });
-
-    Ok(())
 }
 
 async fn request_llm_once(
@@ -734,4 +782,17 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
         return Err(LLMError::MissingApiKey);
     }
     Ok(request.api_key.clone())
+}
+
+/// Cancel an active stream for a session
+#[tauri::command]
+pub async fn cancel_stream(session_id: String) -> Result<(), String> {
+    let mut streams = ACTIVE_STREAMS.lock().await;
+    if let Some(token) = streams.get(&session_id) {
+        token.cancel();
+        log::info!("Cancelled stream for session: {}", session_id);
+        Ok(())
+    } else {
+        Err("No active stream found for session".to_string())
+    }
 }

@@ -13,7 +13,10 @@
 
 use super::types::*;
 
-/// 向量存储结构 (使用 SQLite)
+const MAX_VECTOR_SEARCH_CANDIDATES: usize = 10000;
+const SEARCH_BATCH_SIZE: usize = 1000;
+
+/// Vector store using SQLite with cosine similarity search
 pub struct VectorStore {
     /// 数据库路径
     db_path: String,
@@ -103,9 +106,10 @@ impl VectorStore {
         top_k: i32,
     ) -> Result<Vec<(String, String, String, f32)>, KnowledgeBaseError> {
         let conn = self.get_conn()?;
-
-        // Query all vectors for this knowledge base
-        // For better performance with large datasets, consider using approximate methods
+        
+        let effective_top_k = top_k.max(1) as usize;
+        let max_candidates = MAX_VECTOR_SEARCH_CANDIDATES.min(effective_top_k * 10).max(100);
+        
         let mut stmt = conn
             .prepare(
                 r#"
@@ -113,12 +117,13 @@ impl VectorStore {
                 FROM vectors v
                 JOIN chunks c ON v.chunk_id = c.id
                 WHERE v.kb_id = ?1
+                LIMIT ?2
                 "#,
             )
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
         let rows = stmt
-            .query_map([kb_id], |row| {
+            .query_map([kb_id, &max_candidates.to_string()], |row| {
                 let chunk_id: String = row.get(0)?;
                 let document_id: String = row.get(1)?;
                 let content: String = row.get(2)?;
@@ -128,22 +133,33 @@ impl VectorStore {
             })
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Calculate cosine similarity for all vectors
         let mut scored_results: Vec<(String, String, String, f32)> = Vec::new();
+        let mut loaded_count = 0;
+        
         for row in rows {
+            if loaded_count >= max_candidates {
+                break;
+            }
+            
             let (chunk_id, document_id, content, vector) =
                 row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
             let similarity = cosine_similarity(&query_vector, &vector);
             scored_results.push((chunk_id, document_id, content, similarity));
+            loaded_count += 1;
+            
+            if scored_results.len() >= effective_top_k * 2 && loaded_count % SEARCH_BATCH_SIZE == 0 {
+                scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+                scored_results.truncate(effective_top_k);
+            }
         }
 
-        // Sort by similarity (descending) and take top_k
         scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
-        scored_results.truncate(top_k as usize);
+        scored_results.truncate(effective_top_k);
 
         log::info!(
-            "Vector search for {} returned {} results",
+            "Vector search for {} loaded {} candidates, returned {} results",
             kb_id,
+            loaded_count,
             scored_results.len()
         );
         Ok(scored_results)
@@ -167,8 +183,8 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Drop knowledge base table
-    pub async fn drop_kb_table(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
+    /// Delete all vectors for a knowledge base
+    pub async fn delete_kb_vectors(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
 
         conn.execute(
@@ -177,7 +193,7 @@ impl VectorStore {
         )
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        log::info!("Dropped vectors for knowledge base: {}", kb_id);
+        log::info!("Deleted vectors for knowledge base: {}", kb_id);
         Ok(())
     }
 
