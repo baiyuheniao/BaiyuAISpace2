@@ -161,8 +161,14 @@ impl Database {
     pub fn save_session(&self, session: &ChatSession) -> Result<(), Box<dyn std::error::Error>> {
         self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO sessions (id, title, provider, model, api_config_id, created_at, updated_at)
+            INSERT INTO sessions (id, title, provider, model, api_config_id, created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                provider = excluded.provider,
+                model = excluded.model,
+                api_config_id = excluded.api_config_id,
+                updated_at = excluded.updated_at
             "#,
             [
                 &session.id,
@@ -264,8 +270,11 @@ impl Database {
         
         let affected = self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, error)
+            INSERT INTO messages (id, session_id, role, content, timestamp, error)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                content = excluded.content,
+                error = excluded.error
             "#,
             [
                 &message.id,

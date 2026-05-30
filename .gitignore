@@ -164,3 +164,6 @@ src-tauri/gen/schemas/*.json
 *.njsproj
 *.sln
 *.sw?
+
+# Visual code documentation (ASCII block diagrams)
+visual-code/

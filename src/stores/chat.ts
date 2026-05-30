@@ -197,24 +197,20 @@ export const useChatStore = defineStore("chat", () => {
       const currentId = String(currentSession.value.id);
       const chunkId = String(chunk.session_id);
 
-      // 处理流结束信号 - 允许任何会话结束（清理之前的状态）
+      // 处理流结束信号
       if (chunk.done) {
-        console.log("[Stream] Stream done, checking session match:", chunkId === currentId);
-        // 只有当前会话的流才需要更新 UI
-        if (chunkId === currentId) {
-          const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-          if (lastMessage && lastMessage.role === "assistant") {
-            lastMessage.streaming = false;
-          }
-          isLoading.value = false;
-          currentStreamContent.value = "";
-          // 保存到数据库
-          const msgToSave = currentSession.value.messages[currentSession.value.messages.length - 1];
-          if (msgToSave) {
-            console.log("[Stream] Saving message to DB:", msgToSave.id, "content length:", msgToSave.content.length);
-            await saveMessageToDb(msgToSave);
-            await saveSessionToDb();
-          }
+        console.log("[Stream] Stream done for session:", chunkId);
+        
+        // 无论消息是否存在，都要重置加载状态
+        isLoading.value = false;
+        currentStreamContent.value = "";
+        
+        const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
+        if (lastMessage && lastMessage.role === "assistant") {
+          lastMessage.streaming = false;
+          console.log("[Stream] Saving message to DB:", lastMessage.id, "content length:", lastMessage.content.length);
+          await saveMessageToDb(lastMessage);
+          await saveSessionToDb();
         }
         return;
       }
@@ -362,9 +358,15 @@ export const useChatStore = defineStore("chat", () => {
       const freshSession = dbSessions.find(s => String(s.id) === String(session.id));
       console.log("[Chat] Found fresh session:", freshSession?.id, "messages:", freshSession?.messages?.length);
       if (freshSession) {
-        // 创建新对象确保响应式更新
+        // 创建新对象确保响应式更新，使用数据库中的最新数据
         sessionWithMessages = {
-          ...session,
+          id: freshSession.id,
+          title: freshSession.title,
+          provider: freshSession.provider,
+          model: freshSession.model,
+          apiConfigId: freshSession.api_config_id || freshSession.id,
+          createdAt: freshSession.created_at,
+          updatedAt: freshSession.updated_at,
           messages: freshSession.messages.map(m => ({
             id: m.id,
             role: m.role as "user" | "assistant" | "system",
