@@ -6,12 +6,12 @@
  * LLM 聊天模块
  * 
  * 功能说明:
- * - 支持多种 LLM 提供商 (OpenAI, Anthropic, Google 等)
+ * - 支持多种 LLM 提供�?(OpenAI, Anthropic, Google �?
  * - 流式响应处理 (Server-Sent Events)
  * - MCP 工具集成
- * - 会话和消息管理
- */
+ * - 会话和消息管�? */
 
+use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::db::DbState;
 use chrono::Utc;
@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
@@ -37,9 +37,9 @@ pub struct ChatMessage {
     pub role: String,
     /// 消息内容
     pub content: String,
-    /// 时间戳 (毫秒)
+    /// 时间�?(毫秒)
     pub timestamp: i64,
-    /// 错误信息 (如果有)
+    /// 错误信息 (如果�?
     pub error: Option<String>,
 }
 
@@ -52,28 +52,24 @@ pub struct ChatSession {
     pub title: String,
     /// 消息列表
     pub messages: Vec<ChatMessage>,
-    /// 创建时间戳
-    pub created_at: i64,
+    /// 创建时间�?    pub created_at: i64,
     /// 最后更新时间戳
     pub updated_at: i64,
-    /// LLM 提供商
-    pub provider: String,
+    /// LLM 提供�?    pub provider: String,
     /// 模型名称
     pub model: String,
     /// API 配置 ID
     pub api_config_id: String,
 }
 
-/// 发送消息请求结构
-#[derive(Debug, Serialize, Deserialize)]
+/// 发送消息请求结�?#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
     /// 会话 ID
     pub session_id: String,
     /// 消息历史
     pub messages: Vec<ChatMessage>,
-    /// LLM 提供商
-    pub provider: String,
+    /// LLM 提供�?    pub provider: String,
     /// 模型名称
     pub model: String,
     /// API 密钥
@@ -132,12 +128,10 @@ impl Serialize for LLMError {
     }
 }
 
-/// LLM 提供商配置
-/// 格式: (提供商标识符, API 端点, 认证头类型)
+/// LLM 提供商配�?/// 格式: (提供商标识符, API 端点, 认证头类�?
 /// 
 /// - bearer: 使用 Authorization: Bearer token
-/// - x_api_key: 使用 x-api-key 头
-const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
+/// - x_api_key: 使用 x-api-key �?const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("openai", "https://api.openai.com/v1/chat/completions", "bearer"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "x_api_key"),
     ("google", "https://generativelanguage.googleapis.com/v1beta/models/", "bearer"),
@@ -277,8 +271,8 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
 
 fn create_http_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(LLM_REQUEST_TIMEOUT)
+        .connect_timeout(LLM_CONNECT_TIMEOUT)
         .build()
 }
 
