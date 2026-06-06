@@ -6,17 +6,16 @@
  * MCP (Model Context Protocol) 模块
  * 
  * 功能说明:
- * - MCP 服务器管理 (stdio/SSE/HTTP 类型)
+ * - MCP 服务器管�?(stdio/SSE/HTTP 类型)
  * - 工具列表获取
  * - 工具调用
- * - 服务器连接测试
- * 
- * MCP 服务器类型:
+ * - 服务器连接测�? * 
+ * MCP 服务器类�?
  * - stdio: 标准输入输出 (本地进程)
- * - SSE: 服务器发送事件
- * - HTTP: HTTP API
+ * - SSE: 服务器发送事�? * - HTTP: HTTP API
  */
 
+use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT};
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -33,8 +32,7 @@ pub enum MCPError {
     /// 服务器未找到
     #[error("MCP server not found: {0}")]
     ServerNotFound(String),
-    /// 启动服务器失败
-    #[error("Failed to launch MCP server: {0}")]
+    /// 启动服务器失�?    #[error("Failed to launch MCP server: {0}")]
     LaunchError(String),
     /// 通信错误
     #[error("MCP communication error: {0}")]
@@ -60,45 +58,37 @@ impl Serialize for MCPError {
     }
 }
 
-/// MCP 服务器配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// MCP 服务器配�?#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServer {
-    /// 服务器 ID
+    /// 服务�?ID
     pub id: String,
-    /// 服务器名称
-    pub name: String,
-    /// 服务器描述
-    pub description: String,
-    /// 服务器类型 (stdio/SSE/HTTP)
+    /// 服务器名�?    pub name: String,
+    /// 服务器描�?    pub description: String,
+    /// 服务器类�?(stdio/SSE/HTTP)
     pub server_type: MCPServerType,
     /// 启动命令 (stdio 类型使用)
     pub command: String,
-    /// 命令行参数
-    pub args: Vec<String>,
+    /// 命令行参�?    pub args: Vec<String>,
     /// 环境变量
     pub env: HashMap<String, String>,
-    /// 端口号 (SSE/HTTP 类型使用)
+    /// 端口�?(SSE/HTTP 类型使用)
     pub port: Option<u16>,
-    /// 服务器 URL (HTTP 类型使用)
+    /// 服务�?URL (HTTP 类型使用)
     pub url: Option<String>,
-    /// API 密钥 (可选)
+    /// API 密钥 (可�?
     pub api_key: Option<String>,
     /// 是否启用
     pub enabled: bool,
-    /// 创建时间戳
-    pub created_at: i64,
-    /// 更新时间戳
-    pub updated_at: i64,
+    /// 创建时间�?    pub created_at: i64,
+    /// 更新时间�?    pub updated_at: i64,
 }
 
-/// MCP 服务器类型枚举
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// MCP 服务器类型枚�?#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MCPServerType {
     /// 标准输入输出 (本地进程)
     #[serde(rename = "stdio")]
     Stdio,
-    /// 服务器发送事件
-    #[serde(rename = "sse")]
+    /// 服务器发送事�?    #[serde(rename = "sse")]
     SSE,
     /// HTTP API
     #[serde(rename = "http")]
@@ -110,8 +100,7 @@ pub enum MCPServerType {
 pub struct MCPTool {
     /// 所属服务器 ID
     pub server_id: String,
-    /// 服务器名称
-    pub server_name: String,
+    /// 服务器名�?    pub server_name: String,
     /// 工具名称
     pub name: String,
     /// 工具描述
@@ -353,7 +342,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     let stdout = child.stdout.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdout".to_string()))?;
     let mut reader = BufReader::new(stdout).lines();
 
-    let response_line = tokio::time::timeout(std::time::Duration::from_secs(30), async { reader.next().transpose() })
+    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, async { reader.next().transpose() })
         .await
         .map_err(|_| MCPError::CommunicationError("Tool list timeout".to_string()))?
         .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
@@ -398,7 +387,7 @@ async fn call_mcp_tools_http(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErro
     }
 
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        MCP_HTTP_TIMEOUT,
         req_builder
             .header("Content-Type", "application/json")
             .send(),
@@ -673,7 +662,7 @@ async fn call_mcp_tool_stdio(
 
     // Read first line (should be the JSON response)
     let response_inner = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        MCP_STDIO_TIMEOUT,
         async { lines.next().transpose() },
     )
     .await
@@ -742,7 +731,7 @@ async fn call_mcp_tool_http(
 
     // Send request with timeout
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        MCP_HTTP_TIMEOUT,
         req_builder
             .header("Content-Type", "application/json")
             .json(&request)
