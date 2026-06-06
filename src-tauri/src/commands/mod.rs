@@ -10,9 +10,11 @@
  * - llm: LLM 聊天相关命令 (流式消息、对话管理)
  * - mcp: MCP 服务器相关命令 (工具调用、服务器管理)
  * - constants: 超时和延迟常量
+ * - local_model: 本地模型管理命令 (Ollama 集成)
  */
 
 pub mod auth;
 pub mod constants;
 pub mod llm;
+pub mod local_model;
 pub mod mcp;

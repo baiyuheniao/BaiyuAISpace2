@@ -43,6 +43,9 @@ import {
   NIcon,
   NText,
   NEmpty,
+  NProgress,
+  NAlert,
+  NTooltip,
   useMessage
 } from "naive-ui";
 import { 
@@ -51,6 +54,11 @@ import {
   type ApiConfig,
   type EmbeddingApiConfig
 } from "@/stores/settings";
+import {
+  useLocalModelStore,
+  type LocalModelInfo,
+  type ModelSource
+} from "@/stores/localModel";
 import { 
   ServerOutline, 
   KeyOutline, 
@@ -61,13 +69,22 @@ import {
   CreateOutline,
   CheckmarkCircle,
   LinkOutline,
-  CubeOutline
+  CubeOutline,
+  CloudDownloadOutline,
+  HardwareChipOutline,
+  RefreshOutline,
+  CheckmarkOutline,
+  CloseOutline,
+  AlertCircleOutline,
 } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
 
 // 设置 Store - 管理 API 配置和主题
 const settings = useSettingsStore();
+
+// 本地模型 Store
+const localModel = useLocalModelStore();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
@@ -137,6 +154,31 @@ const embeddingFormData = ref({
   model: "text-embedding-3-small",  // 默认模型
   apiKey: "",                // API 密钥
 });
+
+// ============ 本地模型相关状态 ============
+
+/** 是否显示下载模型弹窗 */
+const showPullModal = ref(false);
+
+/** 下载模型表单数据 */
+const pullFormData = ref({
+  modelName: "",
+  sourceId: "ollama",
+});
+
+/** Ollama 地址编辑状态 */
+const ollamaUrlEditing = ref(false);
+
+/** Ollama 地址编辑值 */
+const ollamaUrlEditValue = ref(localModel.ollamaBaseUrl);
+
+/** 下载源选项 */
+const sourceOptions = computed(() =>
+  localModel.modelSources.map((source: ModelSource) => ({
+    label: source.name,
+    value: source.id,
+  }))
+);
 
 // ============ 表单方法 ============
 
@@ -425,6 +467,73 @@ const handleSetEmbeddingActive = (configId: string) => {
  * 从 Store 获取预设的提供商列表
  */
 const providerOptions = computed(() => settings.presetProviderOptions);
+
+// ============ 本地模型方法 ============
+
+/** 下载模型 */
+const handlePullModel = async () => {
+  if (!pullFormData.value.modelName.trim()) {
+    message.warning("请输入模型名称");
+    return;
+  }
+  try {
+    await localModel.pullModel(pullFormData.value.modelName, pullFormData.value.sourceId);
+    showPullModal.value = false;
+    pullFormData.value.modelName = "";
+    message.success("开始下载模型");
+  } catch (error) {
+    message.error(`下载失败: ${error}`);
+  }
+};
+
+/** 删除本地模型 */
+const handleDeleteModel = async (name: string) => {
+  try {
+    await localModel.deleteModel(name);
+    message.success(`已删除模型: ${name}`);
+  } catch (error) {
+    message.error(`删除失败: ${error}`);
+  }
+};
+
+/** 刷新本地模型列表 */
+const handleRefreshModels = async () => {
+  try {
+    await localModel.refreshModels();
+    message.success("已刷新模型列表");
+  } catch (error) {
+    message.error(`刷新失败: ${error}`);
+  }
+};
+
+/** 创建本地模型 API 配置 */
+const handleCreateLocalConfig = (modelInfo: LocalModelInfo) => {
+  const configName = `local-${modelInfo.name}`;
+  settings.addApiConfig({
+    name: configName,
+    provider: "local",
+    baseUrl: localModel.ollamaBaseUrl.replace(/\/$/, ""),
+    model: modelInfo.name,
+    apiKey: "",
+  });
+  message.success(`已创建配置: ${configName}`);
+};
+
+/** 保存 Ollama 地址 */
+const handleSaveOllamaUrl = () => {
+  localModel.setOllamaBaseUrl(ollamaUrlEditValue.value);
+  ollamaUrlEditing.value = false;
+  message.success("Ollama 地址已更新");
+};
+
+/** 格式化文件大小 */
+const formatSize = (bytes: number): string => {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+};
 </script>
 
 <template>
@@ -733,6 +842,271 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               </n-icon>
               Embedding API 用于知识库的文档向量化和检索查询
             </n-text>
+          </template>
+        </n-card>
+
+        <!-- 本地模型管理卡片 -->
+        <n-card
+          class="settings-card"
+          title="本地模型管理"
+          :bordered="false"
+          :segmented="{ content: true, footer: true }"
+        >
+          <template #header-extra>
+            <n-space align="center">
+              <n-button
+                size="small"
+                @click="handleRefreshModels"
+                :loading="localModel.isLoadingModels"
+              >
+                <template #icon>
+                  <n-icon><RefreshOutline /></n-icon>
+                </template>
+                刷新
+              </n-button>
+              <n-button
+                type="primary"
+                size="small"
+                @click="showPullModal = true"
+                :disabled="!localModel.isOllamaOnline"
+              >
+                <template #icon>
+                  <n-icon><CloudDownloadOutline /></n-icon>
+                </template>
+                下载模型
+              </n-button>
+            </n-space>
+          </template>
+
+          <!-- Ollama 状态区域 -->
+          <div class="ollama-status-section">
+            <n-space
+              align="center"
+              justify="space-between"
+            >
+              <n-space align="center">
+                <n-icon
+                  size="20"
+                  :color="localModel.isOllamaOnline ? '#18a058' : '#d03050'"
+                >
+                  <HardwareChipOutline />
+                </n-icon>
+                <n-text v-if="localModel.isOllamaOnline">
+                  Ollama 在线
+                  <n-tag
+                    v-if="localModel.ollamaVersion"
+                    size="small"
+                    type="success"
+                    style="margin-left: 8px;"
+                  >
+                    v{{ localModel.ollamaVersion }}
+                  </n-tag>
+                </n-text>
+                <n-text
+                  v-else
+                  type="error"
+                >
+                  Ollama 离线
+                </n-text>
+              </n-space>
+              <n-space align="center">
+                <template v-if="ollamaUrlEditing">
+                  <n-input
+                    v-model:value="ollamaUrlEditValue"
+                    size="small"
+                    style="width: 250px;"
+                    placeholder="http://localhost:11434"
+                  />
+                  <n-button
+                    size="small"
+                    type="primary"
+                    @click="handleSaveOllamaUrl"
+                  >
+                    <template #icon>
+                      <n-icon><CheckmarkOutline /></n-icon>
+                    </template>
+                  </n-button>
+                  <n-button
+                    size="small"
+                    @click="ollamaUrlEditing = false"
+                  >
+                    <template #icon>
+                      <n-icon><CloseOutline /></n-icon>
+                    </template>
+                  </n-button>
+                </template>
+                <template v-else>
+                  <n-text
+                    depth="3"
+                    style="font-size: 12px;"
+                  >
+                    {{ localModel.ollamaBaseUrl }}
+                  </n-text>
+                  <n-button
+                    size="tiny"
+                    @click="ollamaUrlEditing = true; ollamaUrlEditValue = localModel.ollamaBaseUrl"
+                  >
+                    编辑
+                  </n-button>
+                </template>
+              </n-space>
+            </n-space>
+          </div>
+
+          <!-- 模型列表 -->
+          <n-empty
+            v-if="!localModel.isLoadingModels && localModel.localModels.length === 0"
+            description="暂无本地模型，点击上方「下载模型」添加"
+            style="margin-top: 12px;"
+          />
+
+          <!-- 加载中 -->
+          <div
+            v-if="localModel.isLoadingModels"
+            style="text-align: center; padding: 20px;"
+          >
+            <n-text depth="3">加载模型列表中...</n-text>
+          </div>
+
+          <!-- 下载进度 -->
+          <n-alert
+            v-if="localModel.isPulling"
+            type="info"
+            style="margin: 12px 0;"
+          >
+            <template #icon>
+              <n-icon><CloudDownloadOutline /></n-icon>
+            </template>
+            正在下载: {{ localModel.pullingModelName }}
+            <n-progress
+              v-if="localModel.pullProgress > 0"
+              type="line"
+              :percentage="localModel.pullProgress"
+              :indicator-placement="'inside'"
+              processing
+              style="margin-top: 8px;"
+            />
+          </n-alert>
+
+          <!-- 模型列表内容 -->
+          <n-list
+            v-if="localModel.localModels.length > 0"
+            bordered
+            style="margin-top: 12px;"
+          >
+            <n-list-item
+              v-for="model in localModel.localModels"
+              :key="model.name"
+            >
+              <n-thing>
+                <template #header>
+                  <n-space align="center">
+                    <n-icon><HardwareChipOutline /></n-icon>
+                    {{ model.name }}
+                  </n-space>
+                </template>
+                <template #description>
+                  <n-space
+                    size="small"
+                    style="margin-top: 4px;"
+                  >
+                    <n-tag
+                      v-if="model.details?.parameterSize"
+                      size="small"
+                      type="info"
+                    >
+                      {{ model.details.parameterSize }}
+                    </n-tag>
+                    <n-tag
+                      v-if="model.details?.quantizationLevel"
+                      size="small"
+                    >
+                      {{ model.details.quantizationLevel }}
+                    </n-tag>
+                    <n-tag
+                      v-if="model.size"
+                      size="small"
+                    >
+                      {{ formatSize(model.size) }}
+                    </n-tag>
+                    <n-tag
+                      v-if="model.details?.format"
+                      size="small"
+                    >
+                      {{ model.details.format }}
+                    </n-tag>
+                    <n-tag
+                      v-if="model.details?.family"
+                      size="small"
+                      type="success"
+                    >
+                      {{ model.details.family }}
+                    </n-tag>
+                  </n-space>
+                </template>
+              </n-thing>
+              <template #suffix>
+                <n-space>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button
+                        size="small"
+                        type="primary"
+                        @click="handleCreateLocalConfig(model)"
+                      >
+                        <template #icon>
+                          <n-icon><CheckmarkOutline /></n-icon>
+                        </template>
+                      </n-button>
+                    </template>
+                    创建 API 配置用于聊天
+                  </n-tooltip>
+                  <n-popconfirm @positive-click="handleDeleteModel(model.name)">
+                    <template #trigger>
+                      <n-button
+                        size="small"
+                        type="error"
+                      >
+                        <template #icon>
+                          <n-icon><TrashOutline /></n-icon>
+                        </template>
+                      </n-button>
+                    </template>
+                    确定删除模型 {{ model.name }}？
+                  </n-popconfirm>
+                </n-space>
+              </template>
+            </n-list-item>
+          </n-list>
+
+          <!-- 下载源设置 -->
+          <template #footer>
+            <n-space
+              align="center"
+              justify="space-between"
+            >
+              <n-space align="center">
+                <n-text
+                  depth="3"
+                  style="font-size: 12px;"
+                >
+                  默认下载源:
+                </n-text>
+                <n-select
+                  :value="localModel.selectedSourceId"
+                  :options="sourceOptions"
+                  size="small"
+                  style="width: 180px;"
+                  @update:value="localModel.setSelectedSourceId"
+                />
+              </n-space>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                {{ localModel.localModels.length }} 个本地模型
+              </n-text>
+            </n-space>
           </template>
         </n-card>
 
@@ -1241,6 +1615,98 @@ const providerOptions = computed(() => settings.presetProviderOptions);
         </n-space>
       </template>
     </n-modal>
+
+    <!-- 下载本地模型弹窗 -->
+    <n-modal
+      v-model:show="showPullModal"
+      title="下载本地模型"
+      preset="card"
+      style="width: 500px"
+      :mask-closable="false"
+    >
+      <n-form
+        label-placement="left"
+        label-width="100px"
+      >
+        <n-form-item
+          label="下载源"
+          required
+        >
+          <n-select
+            v-model:value="pullFormData.sourceId"
+            :options="sourceOptions"
+            placeholder="选择下载源"
+          />
+          <template #feedback>
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
+              {{ localModel.modelSources.find(s => s.id === pullFormData.sourceId)?.description }}
+            </n-text>
+          </template>
+        </n-form-item>
+
+        <n-form-item
+          label="模型名称"
+          required
+        >
+          <n-input
+            v-model:value="pullFormData.modelName"
+            placeholder="例如：llama3, qwen2, mistral, gemma2..."
+          />
+          <template #feedback>
+            <n-text
+              depth="3"
+              style="font-size: 12px;"
+            >
+              <template v-if="pullFormData.sourceId === 'ollama'">
+                输入 Ollama 模型名称，如 llama3:8b、qwen2:7b。浏览可用模型请访问
+                <n-a
+                  href="https://ollama.com/library"
+                  target="_blank"
+                >
+                  ollama.com/library
+                </n-a>
+              </template>
+              <template v-else-if="pullFormData.sourceId === 'huggingface'">
+                输入 HuggingFace 模型路径，如 user/model-name。浏览可用模型请访问
+                <n-a
+                  href="https://huggingface.co/models"
+                  target="_blank"
+                >
+                  huggingface.co/models
+                </n-a>
+              </template>
+              <template v-else-if="pullFormData.sourceId === 'modelscope'">
+                输入 ModelScope 模型名称。浏览可用模型请访问
+                <n-a
+                  href="https://modelscope.cn/models"
+                  target="_blank"
+                >
+                  modelscope.cn/models
+                </n-a>
+              </template>
+            </n-text>
+          </template>
+        </n-form-item>
+      </n-form>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showPullModal = false">
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="localModel.isPulling"
+            @click="handlePullModel"
+          >
+            {{ localModel.isPulling ? '下载中...' : '开始下载' }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </n-layout>
 </template>
 
@@ -1292,5 +1758,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   .n-button {
     margin-left: auto;
   }
+}
+
+/* Ollama 状态区域 */
+.ollama-status-section {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--n-border-color);
+  margin-bottom: 4px;
 }
 </style>
