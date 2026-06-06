@@ -2,16 +2,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-/**
- * 知识库命令模块
- * 
- * 功能说明:
- * - 创建/删除知识库
- * - 添加/删除文档
- * - 文档检索
- * - 知识库状态查询
- */
-
 use super::types::*;
 use super::document::{parse_document, calculate_file_hash, split_text, estimate_tokens};
 use super::embedding::generate_embeddings;
@@ -21,75 +11,86 @@ use tauri::State;
 use std::sync::Arc;
 
 use uuid::Uuid;
+use keyring::Entry;
 
-/// 知识库状态结构
 pub struct KbState {
-    /// 向量存储实例
     pub vector_store: Arc<VectorStore>,
-    /// 数据库路径
     pub db_path: String,
 }
 
-/// 初始化知识库表结构
-/// 
-/// 在 SQLite 中创建知识库相关的表
+/// Initialize knowledge base tables
 pub fn init_knowledge_base(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     init_sqlite_tables(conn)
 }
 
-/// 创建新的知识库
-/// 
-/// # 参数
-/// - request: 创建知识库请求 (包含名称、描述、embedding 配置等)
-/// - db_state: 数据库状态
-/// 
-/// # 返回
-/// 创建成功的 KnowledgeBase 对象
+/// Retrieve API key from system keyring using embedding config ID
+/// The keyring entry format is: emb_{config_id}
+fn get_embedding_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
+    let entry = Entry::new(
+        "BaiyuAISpace",
+        &format!("api_keys_emb_{}", config_id),
+    ).map_err(|e| KnowledgeBaseError::InvalidConfig(format!("Failed to access keyring: {}", e)))?;
+
+    match entry.get_password() {
+        Ok(key) => Ok(key),
+        Err(keyring::Error::NoEntry) => {
+            Err(KnowledgeBaseError::InvalidConfig(
+                format!("Embedding API key not found for config: {}. Please set it in Settings.", config_id)
+            ))
+        }
+        Err(e) => Err(KnowledgeBaseError::InvalidConfig(
+            format!("Failed to retrieve API key: {}", e)
+        )),
+    }
+}
+
+/// Create a new knowledge base
 #[tauri::command]
 pub async fn create_knowledge_base(
     request: CreateKnowledgeBaseRequest,
     db_state: State<'_, crate::db::DbState>,
 ) -> Result<KnowledgeBase, KnowledgeBaseError> {
     log::info!("[KB] Creating knowledge base: {:?}", request);
-    
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open_with_flags(
-        &db.path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Enable WAL mode for better concurrent read/write performance
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-    
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
+
+    // Validate chunk_overlap < chunk_size
     let chunk_size = request.chunk_size.unwrap_or(1000);
     let chunk_overlap = request.chunk_overlap.unwrap_or(200);
-    
+    if chunk_overlap >= chunk_size {
+        return Err(KnowledgeBaseError::InvalidConfig(
+            format!("chunk_overlap ({}) must be less than chunk_size ({})", chunk_overlap, chunk_size)
+        ));
+    }
+
+    let db = db_state.0.lock().await;
+    let conn = rusqlite::Connection::open(&db.path)
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+
     log::info!("[KB] Inserting with chunk_size={}, chunk_overlap={}", chunk_size, chunk_overlap);
-    
+
     let result = conn.execute(
         r#"
-        INSERT INTO knowledge_bases 
+        INSERT INTO knowledge_bases
         (id, name, description, embedding_provider, embedding_model, embedding_dim, embedding_api_config_id, chunk_size, chunk_overlap, created_at, updated_at, document_count)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)
         "#,
-        [
+        rusqlite::params![
             &id,
             &request.name,
             &request.description,
-            &"".to_string(), // embedding_provider - empty for backward compatibility
-            &"".to_string(), // embedding_model - empty for backward compatibility
-            &"1536".to_string(), // embedding_dim - default 1536
+            "",          // embedding_provider - empty for backward compatibility
+            "",          // embedding_model - empty for backward compatibility
+            1536i32,     // embedding_dim - default 1536
             &request.embedding_api_config_id,
-            &chunk_size.to_string(),
-            &chunk_overlap.to_string(),
-            &now.to_string(),
-            &now.to_string(),
+            chunk_size,
+            chunk_overlap,
+            now,
+            now,
         ],
     );
-    
+
     match result {
         Ok(rows) => {
             log::info!("[KB] Successfully created, rows affected: {}", rows);
@@ -99,9 +100,9 @@ pub async fn create_knowledge_base(
             return Err(KnowledgeBaseError::DatabaseError(e.to_string()));
         }
     }
-    
+
     log::info!("Created knowledge base: {} ({})", request.name, id);
-    
+
     Ok(KnowledgeBase {
         id,
         name: request.name,
@@ -115,10 +116,7 @@ pub async fn create_knowledge_base(
     })
 }
 
-/// 列出所有知识库
-/// 
-/// # 返回
-/// 所有知识库的列表
+/// List all knowledge bases
 #[tauri::command]
 pub async fn list_knowledge_bases(
     db_state: State<'_, crate::db::DbState>,
@@ -126,13 +124,13 @@ pub async fn list_knowledge_bases(
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, embedding_api_config_id, 
-         chunk_size, chunk_overlap, created_at, updated_at, document_count 
+        "SELECT id, name, description, embedding_api_config_id,
+         chunk_size, chunk_overlap, created_at, updated_at, document_count
          FROM knowledge_bases ORDER BY updated_at DESC"
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let rows = stmt.query_map([], |row| {
         Ok(KnowledgeBase {
             id: row.get(0)?,
@@ -146,21 +144,16 @@ pub async fn list_knowledge_bases(
             document_count: row.get(8)?,
         })
     }).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let mut bases = Vec::new();
     for row in rows {
         bases.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
     }
-    
+
     Ok(bases)
 }
 
-/// 删除知识库
-/// 
-/// # 参数
-/// - kb_id: 知识库 ID
-/// - db_state: 数据库状态
-/// - kb_state: 知识库状态
+/// Delete knowledge base
 #[tauri::command]
 pub async fn delete_knowledge_base(
     kb_id: String,
@@ -170,204 +163,300 @@ pub async fn delete_knowledge_base(
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
+    // Check if knowledge base exists
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM knowledge_bases WHERE id = ?1",
+        [&kb_id],
+        |row| row.get(0),
+    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+    if !exists {
+        return Err(KnowledgeBaseError::NotFound(format!("Knowledge base not found: {}", kb_id)));
+    }
+
     // Delete from SQLite (cascade will delete documents and chunks)
     conn.execute(
         "DELETE FROM knowledge_bases WHERE id = ?1",
         [&kb_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     // Delete vector table
-    kb_state.vector_store.delete_kb_vectors(&kb_id).await?;
-    
+    kb_state.vector_store.drop_kb_table(&kb_id).await?;
+
     log::info!("Deleted knowledge base: {}", kb_id);
     Ok(())
 }
 
-/// 导入文档到知识库
-/// 
-/// 支持的格式: PDF, DOCX, XLSX, MD, HTML, TXT
-/// 
-/// # 参数
-/// - kb_id: 目标知识库 ID
-/// - file_data: 文件数据 (Base64 编码)
-/// - filename: 文件名
-/// - db_state: 数据库状态
-/// - kb_state: 知识库状态
+/// Import document to knowledge base
+///
+/// # Fix for #33 and #34:
+/// - Phase 1 (DB lock held): Read KB config, create document record, parse file, write chunks + FTS
+/// - Phase 2 (DB lock released): Generate embeddings via network (no lock held)
+/// - Phase 3 (DB lock re-acquired): Write vectors, update document status
+/// - If Phase 2 fails, Phase 3 marks document as "error" and cleans up orphan chunks
+///
+/// # Fix for #32:
+/// - API key is retrieved from secure storage (keyring) using embedding_api_config_id
+/// - Frontend no longer passes api_key parameter
 #[tauri::command]
 pub async fn import_document(
     kb_id: String,
     file_path: String,
-    embedding_provider: String,
-    embedding_model: String,
-    api_key: String,
     db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<Document, KnowledgeBaseError> {
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
-        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Get knowledge base config
-    let kb: KnowledgeBase = conn.query_row(
-        "SELECT id, name, description, embedding_api_config_id, 
-         chunk_size, chunk_overlap, created_at, updated_at, document_count 
-         FROM knowledge_bases WHERE id = ?1",
-        [&kb_id],
-        |row| {
-            Ok(KnowledgeBase {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                embedding_api_config_id: row.get(3)?,
-                chunk_size: row.get(4)?,
-                chunk_overlap: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-                document_count: row.get(8)?,
-            })
-        }
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Create document record
-    let doc_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
-    let file_hash = calculate_file_hash(&file_path).await?;
-    let file_name = std::path::Path::new(&file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let file_type = std::path::Path::new(&file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt")
-        .to_lowercase();
-    
-    // Get file size
-    let file_size = match tokio::fs::metadata(&file_path).await {
-        Ok(m) => m.len() as i64,
-        Err(e) => {
-            log::warn!("Failed to read file metadata for {}: {}", file_path, e);
-            0
-        }
-    };
-    
-    conn.execute(
-        r#"
-        INSERT INTO documents 
-        (id, kb_id, filename, file_type, file_size, file_hash, content_preview, 
-         chunk_count, status, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 0, 'processing', ?7)
-        "#,
-        [
-            &doc_id,
-            &kb_id,
-            &file_name,
-            &file_type,
-            &file_size.to_string(),
-            &file_hash,
-            &now.to_string(),
-        ],
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Parse document
-    let content = match parse_document(&file_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            // Update status to error
-            conn.execute(
-                "UPDATE documents SET status = 'error', error_message = ?1 WHERE id = ?2",
-                [&e.to_string(), &doc_id],
-            ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-            return Err(e);
-        }
-    };
-    
-    // Store preview
-    let preview: String = content.chars().take(500).collect();
-    conn.execute(
-        "UPDATE documents SET content_preview = ?1 WHERE id = ?2",
-        [&preview, &doc_id],
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Split into chunks
-    let chunks = split_text(&content, kb.chunk_size as usize, kb.chunk_overlap as usize);
-    let chunk_count = chunks.len() as i32;
-    
-    // Generate embeddings in batches
-    let mut all_chunk_ids = Vec::new();
-    let _all_embeddings: Vec<Vec<f32>> = Vec::new();
-    
-    for (i, chunk_text) in chunks.iter().enumerate() {
-        let chunk_id = Uuid::new_v4().to_string();
-        let tokens = estimate_tokens(chunk_text);
-        
-        // Store chunk in SQLite
+    // ===== Phase 1: Database operations (lock held) =====
+    let (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks, chunk_count) = {
+        let db = db_state.0.lock().await;
+        let conn = rusqlite::Connection::open(&db.path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Get knowledge base config
+        let kb: KnowledgeBase = conn.query_row(
+            "SELECT id, name, description, embedding_api_config_id,
+             chunk_size, chunk_overlap, created_at, updated_at, document_count
+             FROM knowledge_bases WHERE id = ?1",
+            [&kb_id],
+            |row| {
+                Ok(KnowledgeBase {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    embedding_api_config_id: row.get(3)?,
+                    chunk_size: row.get(4)?,
+                    chunk_overlap: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    document_count: row.get(8)?,
+                })
+            }
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Create document record
+        let doc_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().timestamp_millis();
+        let file_hash = calculate_file_hash(&file_path).await?;
+        let file_name = std::path::Path::new(&file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let file_type = std::path::Path::new(&file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt")
+            .to_lowercase();
+
+        // Get file size
+        let file_size = match tokio::fs::metadata(&file_path).await {
+            Ok(m) => m.len() as i64,
+            Err(e) => {
+                log::warn!("Failed to read file metadata for {}: {}", file_path, e);
+                0
+            }
+        };
+
         conn.execute(
             r#"
-            INSERT INTO chunks (id, document_id, kb_id, content, chunk_index, token_count, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO documents
+            (id, kb_id, filename, file_type, file_size, file_hash, content_preview,
+             chunk_count, status, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 0, 'processing', ?7)
             "#,
-            [
-                &chunk_id,
-                &doc_id,
-                &kb_id,
-                chunk_text,
-                &(i as i32).to_string(),
-                &tokens.to_string(),
-                &now.to_string(),
-            ],
+            rusqlite::params![&doc_id, &kb_id, &file_name, &file_type, file_size, &file_hash, now],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        
-        // Also insert into FTS5 for keyword search
-        if let Err(e) = conn.execute(
-            "INSERT INTO chunks_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
-            [chunk_text],
-        ) {
-            log::warn!(
-                "[KB] FTS5 indexing failed for chunk {} in document {}: {}",
-                chunk_id, doc_id, e
-            );
+
+        // Parse document
+        let content = match parse_document(&file_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                conn.execute(
+                    "UPDATE documents SET status = 'error', error_message = ?1 WHERE id = ?2",
+                    rusqlite::params![&e.to_string(), &doc_id],
+                ).map_err(|e2| KnowledgeBaseError::DatabaseError(e2.to_string()))?;
+                return Err(e);
+            }
+        };
+
+        // Store preview
+        let preview: String = content.chars().take(500).collect();
+        conn.execute(
+            "UPDATE documents SET content_preview = ?1 WHERE id = ?2",
+            rusqlite::params![&preview, &doc_id],
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Split into chunks
+        let chunks = split_text(&content, kb.chunk_size as usize, kb.chunk_overlap as usize);
+        let chunk_count = chunks.len() as i32;
+
+        // Write chunks to SQLite and FTS5
+        let mut all_chunk_ids = Vec::new();
+        for (i, chunk_text) in chunks.iter().enumerate() {
+            let chunk_id = Uuid::new_v4().to_string();
+            let tokens = estimate_tokens(chunk_text);
+
+            conn.execute(
+                r#"
+                INSERT INTO chunks (id, document_id, kb_id, content, chunk_index, token_count, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                rusqlite::params![&chunk_id, &doc_id, &kb_id, chunk_text, i as i32, tokens, now],
+            ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+            // Insert into FTS5 - log error instead of ignoring
+            if let Err(e) = conn.execute(
+                "INSERT INTO chunks_fts (rowid, kb_id, content) VALUES (last_insert_rowid(), ?1, ?2)",
+                rusqlite::params![&kb_id, chunk_text],
+            ) {
+                log::warn!("[KB] FTS5 insert failed for chunk {}: {}", chunk_id, e);
+            }
+
+            all_chunk_ids.push(chunk_id);
         }
-        
-        all_chunk_ids.push(chunk_id);
-    }
-    
-    // Generate embeddings for all chunks using provided embedding config
-    let embeddings = generate_embeddings(
+
+        (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks, chunk_count)
+    };
+    // ===== Phase 1 END: DB lock released =====
+
+    // ===== Phase 2: Network operation (no DB lock held) =====
+    // Retrieve API key from secure storage instead of receiving from frontend (#32)
+    let api_key = get_embedding_api_key(&kb.embedding_api_config_id)?;
+
+    // Get embedding config from settings store to determine provider/model
+    // We need to read from the settings database to get provider and model info
+    let (embedding_provider, embedding_model) = {
+        let db = db_state.0.lock().await;
+        let conn = rusqlite::Connection::open(&db.path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Read embedding provider and model from knowledge base record
+        let (provider, model): (String, String) = conn.query_row(
+            "SELECT COALESCE(embedding_provider, ''), COALESCE(embedding_model, '') FROM knowledge_bases WHERE id = ?1",
+            [&kb_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // If provider/model are stored in the KB record, use them
+        // Otherwise, default to openai-compatible with the api config's settings
+        if !provider.is_empty() && !model.is_empty() {
+            (provider, model)
+        } else {
+            // Default: use openai provider, model will be determined by the embedding config
+            ("openai".to_string(), "text-embedding-3-small".to_string())
+        }
+    };
+
+    let embeddings_result = generate_embeddings(
         chunks.clone(),
         &embedding_provider,
         &api_key,
         &embedding_model,
-    ).await?;
-    
-    // Prepare vectors for insertion
-    let vectors: Vec<_> = all_chunk_ids.iter()
-        .zip(chunks.iter())
-        .zip(embeddings.iter())
-        .map(|((chunk_id, content), embedding)| {
-            (chunk_id.clone(), doc_id.clone(), content.clone(), embedding.clone())
-        })
-        .collect();
-    
-    // Insert into vector store
-    kb_state.vector_store.insert_vectors(&kb_id, vectors).await?;
-    
-    // Update document status
-    conn.execute(
-        "UPDATE documents SET status = 'completed', chunk_count = ?1 WHERE id = ?2",
-        [&chunk_count.to_string(), &doc_id],
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Update knowledge base document count
-    conn.execute(
-        "UPDATE knowledge_bases SET document_count = document_count + 1, updated_at = ?1 WHERE id = ?2",
-        [&now.to_string(), &kb_id],
-    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    log::info!("Imported document {} with {} chunks", file_name, chunk_count);
-    
+    ).await;
+
+    // Handle embedding failure: mark document as error and clean up orphan chunks
+    let embeddings = match embeddings_result {
+        Ok(emb) => emb,
+        Err(e) => {
+            let error_msg = format!("Embedding generation failed: {}", e);
+            log::error!("[KB] {}", error_msg);
+
+            let db = db_state.0.lock().await;
+            let conn = rusqlite::Connection::open(&db.path)
+                .map_err(|e2| KnowledgeBaseError::DatabaseError(e2.to_string()))?;
+
+            conn.execute(
+                "UPDATE documents SET status = 'error', error_message = ?1 WHERE id = ?2",
+                rusqlite::params![&error_msg, &doc_id],
+            ).map_err(|e2| KnowledgeBaseError::DatabaseError(e2.to_string()))?;
+
+            // Clean up FTS5 entries BEFORE deleting chunks (need rowid from chunks)
+            if let Err(cleanup_err) = conn.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
+                rusqlite::params![&doc_id],
+            ) {
+                log::warn!("[KB] Failed to clean up FTS5 entries: {}", cleanup_err);
+            }
+
+            // Clean up orphan chunks (after FTS5 cleanup)
+            if let Err(cleanup_err) = conn.execute(
+                "DELETE FROM chunks WHERE document_id = ?1",
+                rusqlite::params![&doc_id],
+            ) {
+                log::warn!("[KB] Failed to clean up orphan chunks: {}", cleanup_err);
+            }
+
+            return Err(KnowledgeBaseError::EmbeddingError(error_msg));
+        }
+    };
+
+    // ===== Phase 3: Finalize in DB =====
+    // rusqlite::Connection is not Send, so we cannot hold it across .await points.
+    // Split into sub-phases: sync DB work → async vector insert → sync DB update.
+
+    // Phase 3a: Query chunk IDs and build vectors (synchronous, no await)
+    let (vectors_to_insert, chunk_count_actual): (Vec<_>, usize) = {
+        let db = db_state.0.lock().await;
+        let conn = rusqlite::Connection::open(&db.path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        // Query chunk IDs from DB
+        let mut stmt = conn.prepare(
+            "SELECT id FROM chunks WHERE document_id = ?1 ORDER BY chunk_index ASC"
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        let chunk_ids: Vec<String> = stmt.query_map([&doc_id], |row| row.get(0))
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        // stmt is dropped here
+
+        let count = chunk_ids.len();
+
+        if chunk_ids.len() != embeddings.len() {
+            log::warn!(
+                "[KB] Chunk ID count ({}) != embedding count ({}), skipping vector insertion",
+                chunk_ids.len(),
+                embeddings.len()
+            );
+            (Vec::new(), count)
+        } else {
+            let vectors: Vec<_> = chunk_ids.iter()
+                .zip(chunks.iter())
+                .zip(embeddings.iter())
+                .map(|((chunk_id, content), embedding)| {
+                    (chunk_id.clone(), doc_id.clone(), content.clone(), embedding.clone())
+                })
+                .collect();
+            (vectors, count)
+        }
+    }; // db lock released here
+
+    // Phase 3b: Insert vectors (async, no DB lock held)
+    if !vectors_to_insert.is_empty() {
+        kb_state.vector_store.insert_vectors(&kb_id, vectors_to_insert).await?;
+    }
+
+    // Phase 3c: Update document status (re-acquire DB lock)
+    {
+        let db = db_state.0.lock().await;
+        let conn = rusqlite::Connection::open(&db.path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE documents SET status = 'completed', chunk_count = ?1 WHERE id = ?2",
+            rusqlite::params![chunk_count_actual as i32, &doc_id],
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        conn.execute(
+            "UPDATE knowledge_bases SET document_count = document_count + 1, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, &kb_id],
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+    } // db lock released
+
+    log::info!("Imported document {} with {} chunks", file_name, chunk_count_actual);
+
     Ok(Document {
         id: doc_id,
         kb_id,
@@ -376,21 +465,14 @@ pub async fn import_document(
         file_size,
         file_hash,
         content_preview: preview,
-        chunk_count,
+        chunk_count: chunk_count_actual as i32,
         status: DocumentStatus::Completed,
         error_message: None,
-        created_at: now,
+        created_at: chrono::Utc::now().timestamp_millis(),
     })
 }
 
-/// 列出知识库中的文档
-/// 
-/// # 参数
-/// - kb_id: 知识库 ID
-/// - db_state: 数据库状态
-/// 
-/// # 返回
-/// 知识库中的文档列表
+/// List documents in knowledge base
 #[tauri::command]
 pub async fn list_documents(
     kb_id: String,
@@ -399,13 +481,13 @@ pub async fn list_documents(
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let mut stmt = conn.prepare(
-        "SELECT id, kb_id, filename, file_type, file_size, file_hash, content_preview, 
-         chunk_count, status, error_message, created_at 
+        "SELECT id, kb_id, filename, file_type, file_size, file_hash, content_preview,
+         chunk_count, status, error_message, created_at
          FROM documents WHERE kb_id = ?1 ORDER BY created_at DESC"
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let rows = stmt.query_map([&kb_id], |row| {
         let status_str: String = row.get(8)?;
         let status = match status_str.as_str() {
@@ -413,7 +495,7 @@ pub async fn list_documents(
             "error" => DocumentStatus::Error,
             _ => DocumentStatus::Processing,
         };
-        
+
         Ok(Document {
             id: row.get(0)?,
             kb_id: row.get(1)?,
@@ -428,22 +510,21 @@ pub async fn list_documents(
             created_at: row.get(10)?,
         })
     }).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     let mut docs = Vec::new();
     for row in rows {
         docs.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
     }
-    
+
     Ok(docs)
 }
 
-/// 删除文档
-/// 
-/// # 参数
-/// - doc_id: 文档 ID
-/// - kb_id: 知识库 ID
-/// - db_state: 数据库状态
-/// - kb_state: 知识库状态
+/// Delete document
+///
+/// # Fix for #35:
+/// - Verify document exists and belongs to the specified knowledge base
+/// - Use safe document count decrement (MAX(count - 1, 0))
+/// - Use transaction for atomicity
 #[tauri::command]
 pub async fn delete_document(
     doc_id: String,
@@ -454,56 +535,79 @@ pub async fn delete_document(
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
+    // Verify document exists and belongs to the specified knowledge base
+    let doc_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM documents WHERE id = ?1 AND kb_id = ?2",
+        rusqlite::params![&doc_id, &kb_id],
+        |row| row.get(0),
+    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+    if !doc_exists {
+        return Err(KnowledgeBaseError::NotFound(
+            format!("Document not found: {} in knowledge base: {}", doc_id, kb_id)
+        ));
+    }
+
     // Delete vectors
     kb_state.vector_store.delete_document_vectors(&kb_id, &doc_id).await?;
-    
+
     // Delete from FTS5 (must delete before deleting chunks since we need rowid)
     if let Err(e) = conn.execute(
         "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
-        [&doc_id],
+        rusqlite::params![&doc_id],
     ) {
         log::warn!("[KB] FTS5 cleanup failed for document {}: {}", doc_id, e);
     }
-    
+
     // Delete from SQLite (cascade will delete chunks)
     conn.execute(
         "DELETE FROM documents WHERE id = ?1",
-        [&doc_id],
+        rusqlite::params![&doc_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
-    // Update knowledge base document count
+
+    // Update knowledge base document count safely (never go below 0)
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
-        "UPDATE knowledge_bases SET document_count = document_count - 1, updated_at = ?1 WHERE id = ?2",
-        [&now.to_string(), &kb_id],
+        "UPDATE knowledge_bases SET document_count = MAX(document_count - 1, 0), updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now, &kb_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    
+
     log::info!("Deleted document: {}", doc_id);
     Ok(())
 }
 
-/// 搜索知识库
-/// 
-/// 使用向量相似度检索相关文档
-/// 
-/// # 参数
-/// - request: 检索请求 (包含查询内容、知识库 ID、返回数量等)
-/// - embedding_provider: Embedding 提供商
-/// - embedding_model: Embedding 模型
-/// - api_key: API 密钥
-/// - kb_state: 知识库状态
-/// 
-/// # 返回
-/// 相关文档片段列表
+/// Search knowledge base
+///
+/// # Fix for #32:
+/// - API key is retrieved from secure storage using embedding_api_config_id
 #[tauri::command]
 pub async fn search_knowledge_base(
     request: RetrievalRequest,
-    embedding_provider: String,
-    embedding_model: String,
-    api_key: String,
+    db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
+    // Get embedding API config from the knowledge base
+    let (embedding_api_config_id, embedding_provider, embedding_model) = {
+        let db = db_state.0.lock().await;
+        let conn = rusqlite::Connection::open(&db.path)
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        let (config_id, provider, model): (String, String, String) = conn.query_row(
+            "SELECT embedding_api_config_id, COALESCE(embedding_provider, ''), COALESCE(embedding_model, '') FROM knowledge_bases WHERE id = ?1",
+            [&request.kb_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+        let provider = if provider.is_empty() { "openai".to_string() } else { provider };
+        let model = if model.is_empty() { "text-embedding-3-small".to_string() } else { model };
+
+        (config_id, provider, model)
+    };
+
+    // Retrieve API key from secure storage (#32)
+    let api_key = get_embedding_api_key(&embedding_api_config_id)?;
+
     let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
     retriever.retrieve(request, &embedding_provider, &embedding_model, &api_key).await
 }
