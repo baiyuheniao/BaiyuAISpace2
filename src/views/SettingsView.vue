@@ -75,7 +75,6 @@ import {
   RefreshOutline,
   CheckmarkOutline,
   CloseOutline,
-  AlertCircleOutline,
 } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
@@ -499,7 +498,7 @@ const handleDeleteModel = async (name: string) => {
 /** 刷新本地模型列表 */
 const handleRefreshModels = async () => {
   try {
-    await localModel.refreshModels();
+    await localModel.loadModels();
     message.success("已刷新模型列表");
   } catch (error) {
     message.error(`刷新失败: ${error}`);
@@ -509,13 +508,13 @@ const handleRefreshModels = async () => {
 /** 创建本地模型 API 配置 */
 const handleCreateLocalConfig = (modelInfo: LocalModelInfo) => {
   const configName = `local-${modelInfo.name}`;
-  settings.addApiConfig({
-    name: configName,
-    provider: "local",
-    baseUrl: localModel.ollamaBaseUrl.replace(/\/$/, ""),
-    model: modelInfo.name,
-    apiKey: "",
-  });
+  settings.createApiConfig(
+    configName,
+    "local",
+    modelInfo.name,
+    "",
+    localModel.ollamaBaseUrl.replace(/\/$/, "")
+  );
   message.success(`已创建配置: ${configName}`);
 };
 
@@ -868,7 +867,7 @@ const formatSize = (bytes: number): string => {
                 type="primary"
                 size="small"
                 @click="showPullModal = true"
-                :disabled="!localModel.isOllamaOnline"
+                :disabled="!localModel.isOnline"
               >
                 <template #icon>
                   <n-icon><CloudDownloadOutline /></n-icon>
@@ -887,11 +886,11 @@ const formatSize = (bytes: number): string => {
               <n-space align="center">
                 <n-icon
                   size="20"
-                  :color="localModel.isOllamaOnline ? '#18a058' : '#d03050'"
+                  :color="localModel.isOnline ? '#18a058' : '#d03050'"
                 >
                   <HardwareChipOutline />
                 </n-icon>
-                <n-text v-if="localModel.isOllamaOnline">
+                <n-text v-if="localModel.isOnline">
                   Ollama 在线
                   <n-tag
                     v-if="localModel.ollamaVersion"
@@ -979,9 +978,9 @@ const formatSize = (bytes: number): string => {
             </template>
             正在下载: {{ localModel.pullingModelName }}
             <n-progress
-              v-if="localModel.pullProgress > 0"
+              v-if="localModel.downloadPercent !== null"
               type="line"
-              :percentage="localModel.pullProgress"
+              :percentage="localModel.downloadPercent"
               :indicator-placement="'inside'"
               processing
               style="margin-top: 8px;"

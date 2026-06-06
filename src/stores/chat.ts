@@ -549,10 +549,7 @@ export const useChatStore = defineStore("chat", () => {
           // 执行知识库检索
           const result = await kbStore.searchKnowledgeBase(
             selectedKnowledgeBaseId.value,
-            content,
-            embeddingConfig.provider,
-            embeddingConfig.model,
-            embeddingConfig.apiKey
+            content
           );
           
           // 如果检索到相关内容，构建增强上下文
