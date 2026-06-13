@@ -9,8 +9,12 @@
 //! for downloading/pulling models.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::process::Child;
+use once_cell::sync::Lazy;
 
 // ============ Types ============
 
@@ -424,4 +428,810 @@ pub async fn get_ollama_version(
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
     Ok(body["version"].as_str().unwrap_or("unknown").to_string())
+}
+
+// ============ Ollama Installation & Service Management ============
+
+/// Global state for the managed Ollama service process
+static OLLAMA_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
+
+/// Ollama installation detection result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaInstallInfo {
+    /// Whether Ollama is installed on the system
+    pub installed: bool,
+    /// Path to the Ollama executable (if found)
+    pub install_path: Option<String>,
+    /// Ollama version (if detectable)
+    pub version: Option<String>,
+}
+
+/// Ollama service status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaServiceStatus {
+    /// Whether the Ollama service is currently running
+    pub running: bool,
+    /// Whether the service was started by our application
+    pub managed_by_app: bool,
+}
+
+/// Model search result from Ollama library
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSearchResult {
+    /// Model name (e.g. "llama3.2")
+    pub name: String,
+    /// Display description
+    pub description: String,
+    /// Available tags (e.g. ["1b", "3b", "7b", "70b"])
+    pub tags: Vec<String>,
+    /// Model size info string
+    pub size_info: String,
+}
+
+/// Ollama installer download progress event
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaInstallProgress {
+    /// Current stage: "downloading" | "installing" | "completed" | "error"
+    pub stage: String,
+    /// Download progress percentage (0-100)
+    pub progress_percent: u64,
+    /// Downloaded bytes
+    pub downloaded_bytes: u64,
+    /// Total bytes (if known)
+    pub total_bytes: Option<u64>,
+    /// Status message
+    pub message: String,
+}
+
+/// Ollama download mirror sources
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaDownloadMirror {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub description: String,
+}
+
+/// Get the platform-specific Ollama download filename
+fn get_ollama_download_filename() -> (&'static str, &'static str) {
+    if cfg!(target_os = "windows") {
+        ("OllamaSetup.exe", "OllamaSetup.exe")
+    } else if cfg!(target_os = "macos") {
+        ("Ollama-darwin.zip", "Ollama-darwin.zip")
+    } else {
+        ("ollama-linux-amd64.tgz", "ollama-linux-amd64.tgz")
+    }
+}
+
+/// Get available Ollama download mirrors
+/// Returns platform-appropriate download URLs
+pub fn get_ollama_download_mirrors() -> Vec<OllamaDownloadMirror> {
+    let (filename, _) = get_ollama_download_filename();
+    let github_base = format!(
+        "https://github.com/ollama/ollama/releases/latest/download/{}",
+        filename
+    );
+
+    let mut mirrors = vec![OllamaDownloadMirror {
+        id: "github".to_string(),
+        name: "GitHub (官方)".to_string(),
+        url: github_base.clone(),
+        description: "Ollama 官方 GitHub Releases".to_string(),
+    }];
+
+    mirrors.push(OllamaDownloadMirror {
+        id: "ghproxy".to_string(),
+        name: "GHProxy 镜像".to_string(),
+        url: format!("https://mirror.ghproxy.com/{}", github_base),
+        description: "GitHub 代理镜像，国内下载速度更快".to_string(),
+    });
+
+    mirrors.push(OllamaDownloadMirror {
+        id: "ghfast".to_string(),
+        name: "GHFast 镜像".to_string(),
+        url: format!("https://ghfast.top/{}", github_base),
+        description: "GitHub 加速镜像".to_string(),
+    });
+
+    // Linux: add official install script as the recommended option
+    if cfg!(target_os = "linux") {
+        mirrors.insert(0, OllamaDownloadMirror {
+            id: "install_script".to_string(),
+            name: "官方安装脚本 (推荐)".to_string(),
+            url: "https://ollama.com/install.sh".to_string(),
+            description: "Ollama 官方安装脚本，自动检测系统并安装".to_string(),
+        });
+    }
+
+    mirrors
+}
+
+/// Parse Ollama version from `ollama --version` output
+/// Handles formats like "ollama version is 0.5.7" or just "0.5.7"
+fn parse_ollama_version(output: &str) -> String {
+    let trimmed = output.trim();
+    // Try to extract version number from common patterns
+    // "ollama version is 0.5.7" -> "0.5.7"
+    if let Some(version) = trimmed.rsplit(' ').next() {
+        // Check if it looks like a version number (starts with digit)
+        if version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            return version.to_string();
+        }
+    }
+    // Fallback: return the whole trimmed output
+    trimmed.to_string()
+}
+
+/// Detect Ollama installation on the system
+/// Searches PATH and common install locations
+#[tauri::command]
+pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
+    // Common Ollama install paths on Windows
+    let search_paths: Vec<PathBuf> = if cfg!(target_os = "windows") {
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+        vec![
+            PathBuf::from(format!("{}\\Programs\\Ollama\\ollama.exe", local_app_data)),
+            PathBuf::from(format!("{}\\Ollama\\ollama.exe", program_files)),
+            PathBuf::from("ollama.exe".to_string()), // Check PATH
+        ]
+    } else if cfg!(target_os = "macos") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        vec![
+            PathBuf::from("/usr/local/bin/ollama"),
+            PathBuf::from("/opt/homebrew/bin/ollama"),
+            PathBuf::from(format!("{}/.ollama/bin/ollama", home)),
+            PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
+            PathBuf::from("ollama".to_string()),
+        ]
+    } else {
+        vec![
+            PathBuf::from("/usr/local/bin/ollama"),
+            PathBuf::from("/usr/bin/ollama"),
+            PathBuf::from(format!("{}/.ollama/bin/ollama", std::env::var("HOME").unwrap_or_default())),
+            PathBuf::from("ollama".to_string()),
+        ]
+    };
+
+    for path in &search_paths {
+        // For PATH-based lookup (just "ollama" or "ollama.exe"), use `which`
+        if path.parent().is_none() || path.as_os_str() == "ollama" || path.as_os_str() == "ollama.exe" {
+            if let Ok(output) = tokio::process::Command::new("ollama")
+                .arg("--version")
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let version_str = parse_ollama_version(&String::from_utf8_lossy(&output.stdout));
+                    return Ok(OllamaInstallInfo {
+                        installed: true,
+                        install_path: Some("ollama".to_string()),
+                        version: Some(version_str),
+                    });
+                }
+            }
+            continue;
+        }
+
+        // For absolute paths, check if file exists
+        if path.exists() {
+            // Try to get version
+            let version = tokio::process::Command::new(path)
+                .arg("--version")
+                .output()
+                .await
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| parse_ollama_version(&String::from_utf8_lossy(&o.stdout)));
+
+            return Ok(OllamaInstallInfo {
+                installed: true,
+                install_path: Some(path.to_string_lossy().to_string()),
+                version,
+            });
+        }
+    }
+
+    Ok(OllamaInstallInfo {
+        installed: false,
+        install_path: None,
+        version: None,
+    })
+}
+
+/// Start Ollama service in background
+/// If Ollama is already running, returns success immediately
+#[tauri::command]
+pub async fn start_ollama_service(
+    ollama_base_url: String,
+) -> Result<OllamaServiceStatus, String> {
+    // First check if already running
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let url = build_ollama_url(&ollama_base_url, "/api/tags");
+    if let Ok(response) = client.get(&url).send().await {
+        if response.status().is_success() {
+            return Ok(OllamaServiceStatus {
+                running: true,
+                managed_by_app: false,
+            });
+        }
+    }
+
+    // Find ollama executable
+    let install_info = detect_ollama_installation().await?;
+    if !install_info.installed {
+        return Err("Ollama is not installed".to_string());
+    }
+
+    let ollama_path = install_info.install_path.ok_or("Cannot find Ollama executable")?;
+
+    // Start ollama serve in background
+    let child = tokio::process::Command::new(&ollama_path)
+        .arg("serve")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start Ollama service: {}", e))?;
+
+    // Store the child process for later management
+    {
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        *proc = Some(child);
+    }
+
+    log::info!("Ollama service started, waiting for it to be ready...");
+
+    // Wait for service to become available (with timeout)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let max_retries = 30u32;
+    let mut retries = 0u32;
+
+    while retries < max_retries {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Ok(response) = client.get(&url).send().await {
+            if response.status().is_success() {
+                log::info!("Ollama service is ready");
+                return Ok(OllamaServiceStatus {
+                    running: true,
+                    managed_by_app: true,
+                });
+            }
+        }
+
+        retries += 1;
+    }
+
+    // Service didn't start in time, but it might still be starting
+    log::warn!("Ollama service didn't respond within timeout, but process was started");
+    Ok(OllamaServiceStatus {
+        running: false,
+        managed_by_app: true,
+    })
+}
+
+/// Stop the Ollama service process managed by our application
+#[tauri::command]
+pub async fn stop_ollama_service() -> Result<(), String> {
+    let mut child = {
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        proc.take()
+    };
+
+    if let Some(mut child) = child {
+        child.kill().await.map_err(|e| format!("Failed to stop Ollama: {}", e))?;
+        log::info!("Ollama service stopped");
+    }
+
+    Ok(())
+}
+
+/// Get current Ollama service status
+#[tauri::command]
+pub async fn get_ollama_service_status(
+    ollama_base_url: String,
+) -> Result<OllamaServiceStatus, String> {
+    // Check if our managed process is still alive
+    let managed_by_app = {
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        match proc.as_mut() {
+            Some(child) => {
+                // Try to check if the process has exited
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        // Process has exited, clean up
+                        *proc = None;
+                        false
+                    }
+                    Ok(None) => true, // Still running
+                    Err(_) => {
+                        // Can't check, assume still running
+                        true
+                    }
+                }
+            }
+            None => false,
+        }
+    };
+
+    // Check if service is actually responding
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let url = build_ollama_url(&ollama_base_url, "/api/tags");
+    let running = match client.get(&url).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    };
+
+    Ok(OllamaServiceStatus {
+        running,
+        managed_by_app,
+    })
+}
+
+/// Download Ollama installer with progress events
+#[tauri::command]
+pub async fn download_ollama(
+    mirror_id: Option<String>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let mirrors = get_ollama_download_mirrors();
+    let mirror = mirror_id.and_then(|id| mirrors.into_iter().find(|m| m.id == id))
+        .unwrap_or_else(|| get_ollama_download_mirrors().into_iter().next().unwrap());
+
+    let download_url = mirror.url;
+
+    log::info!("Downloading Ollama from: {}", download_url);
+
+    // Determine save path based on platform
+    let temp_dir = std::env::temp_dir();
+    let (_, raw_filename) = get_ollama_download_filename();
+
+    // For Linux install script mirror, save as .sh instead
+    let actual_filename = if download_url.ends_with("/install.sh") {
+        "ollama_install.sh"
+    } else {
+        raw_filename
+    };
+    let installer_path = temp_dir.join(actual_filename);
+
+    let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+        stage: "downloading".to_string(),
+        progress_percent: 0,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        message: format!("正在从 {} 下载 Ollama...", mirror.name),
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client.get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status: {}", response.status()));
+    }
+
+    let total_size = response.content_length();
+    let mut downloaded: u64 = 0;
+
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(&installer_path)
+        .await
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    let mut stream = response.bytes_stream();
+    let mut last_progress_emit = std::time::Instant::now();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
+        file.write_all(&chunk).await.map_err(|e| format!("Write error: {}", e))?;
+
+        downloaded += chunk.len() as u64;
+        let percent = total_size
+            .map(|total| (downloaded * 100) / total)
+            .unwrap_or(0);
+
+        // Throttle progress events to avoid flooding
+        if last_progress_emit.elapsed() >= Duration::from_millis(200) {
+            let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+                stage: "downloading".to_string(),
+                progress_percent: percent,
+                downloaded_bytes: downloaded,
+                total_bytes: total_size,
+                message: format!("正在下载... {}%", percent),
+            });
+            last_progress_emit = std::time::Instant::now();
+        }
+    }
+
+    file.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+
+    let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+        stage: "completed".to_string(),
+        progress_percent: 100,
+        downloaded_bytes: downloaded,
+        total_bytes: total_size,
+        message: "下载完成，准备安装...".to_string(),
+    });
+
+    log::info!("Ollama installer downloaded to: {:?}", installer_path);
+
+    Ok(installer_path.to_string_lossy().to_string())
+}
+
+/// Run the Ollama installer
+/// Platform-specific installation logic
+#[tauri::command]
+pub async fn install_ollama(
+    installer_path: String,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let path = PathBuf::from(&installer_path);
+    if !path.exists() {
+        return Err(format!("Installer not found: {}", installer_path));
+    }
+
+    let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+        stage: "installing".to_string(),
+        progress_percent: 0,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        message: "正在安装 Ollama，请等待...".to_string(),
+    });
+
+    log::info!("Installing Ollama from: {}", installer_path);
+
+    let install_result = if cfg!(target_os = "windows") {
+        install_ollama_windows(&path).await
+    } else if cfg!(target_os = "macos") {
+        install_ollama_macos(&path).await
+    } else {
+        install_ollama_linux(&path).await
+    };
+
+    match install_result {
+        Ok(()) => {
+            let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+                stage: "completed".to_string(),
+                progress_percent: 100,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                message: "Ollama 安装完成！".to_string(),
+            });
+            log::info!("Ollama installed successfully");
+            let _ = tokio::fs::remove_file(&installer_path).await;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
+                stage: "error".to_string(),
+                progress_percent: 0,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                message: format!("安装失败: {}", e),
+            });
+            Err(e)
+        }
+    }
+}
+
+/// Windows: run NSIS installer with /S flag for silent install
+async fn install_ollama_windows(installer_path: &PathBuf) -> Result<(), String> {
+    let output = tokio::process::Command::new(installer_path)
+        .arg("/S")
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run installer: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Installer failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// macOS: extract zip and copy Ollama.app to /Applications
+async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
+    let extension = installer_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if extension != "zip" {
+        return Err(format!("Unsupported installer format on macOS: {}", extension));
+    }
+
+    let default_tmp = PathBuf::from("/tmp");
+    let temp_dir = installer_path.parent().unwrap_or(&default_tmp);
+    let extract_dir = temp_dir.join("ollama_extract");
+
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    tokio::fs::create_dir_all(&extract_dir)
+        .await
+        .map_err(|e| format!("Failed to create extract dir: {}", e))?;
+
+    // Use ditto to extract (macOS native, preserves resource forks)
+    let output = tokio::process::Command::new("ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(installer_path)
+        .arg(&extract_dir)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to extract zip: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Extraction failed: {}", stderr));
+    }
+
+    // Find Ollama.app in the extracted directory
+    let app_path = extract_dir.join("Ollama.app");
+    let app_path = if !app_path.exists() {
+        // Search for it
+        let find_output = tokio::process::Command::new("find")
+            .arg(&extract_dir)
+            .arg("-name")
+            .arg("Ollama.app")
+            .arg("-maxdepth")
+            .arg("2")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to find Ollama.app: {}", e))?;
+
+        let found_path = String::from_utf8_lossy(&find_output.stdout).trim().to_string();
+        if found_path.is_empty() {
+            return Err("Could not find Ollama.app in the downloaded archive".to_string());
+        }
+        PathBuf::from(&found_path)
+    } else {
+        app_path
+    };
+
+    // Copy to /Applications
+    let dest = PathBuf::from("/Applications/Ollama.app");
+    if dest.exists() {
+        let _ = tokio::process::Command::new("rm")
+            .arg("-rf")
+            .arg(&dest)
+            .output()
+            .await;
+    }
+
+    let copy_output = tokio::process::Command::new("cp")
+        .arg("-R")
+        .arg(&app_path)
+        .arg(&dest)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to copy Ollama.app: {}", e))?;
+
+    if !copy_output.status.success() {
+        let stderr = String::from_utf8_lossy(&copy_output.stderr);
+        if stderr.contains("Permission denied") || stderr.contains("denied") {
+            log::warn!("Permission denied copying to /Applications, trying with osascript");
+            let osascript_output = tokio::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "do shell script \"cp -R '{}' '/Applications/Ollama.app'\" with administrator privileges",
+                    app_path.display()
+                ))
+                .output()
+                .await
+                .map_err(|e| format!("Failed to request admin privileges: {}", e))?;
+
+            if !osascript_output.status.success() {
+                let err = String::from_utf8_lossy(&osascript_output.stderr);
+                return Err(format!("Failed to copy with admin privileges: {}", err));
+            }
+        } else {
+            return Err(format!("Failed to copy Ollama.app: {}", stderr));
+        }
+    }
+
+    // Clean up extraction directory
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+    // Ensure the ollama CLI symlink exists
+    let ollama_symlink = PathBuf::from("/usr/local/bin/ollama");
+    if !ollama_symlink.exists() {
+        let cli_path = dest.join("Contents/Resources/ollama");
+        if cli_path.exists() {
+            let _ = tokio::process::Command::new("ln")
+                .arg("-sf")
+                .arg(&cli_path)
+                .arg(&ollama_symlink)
+                .output()
+                .await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Linux: use install script or extract tgz to /usr/local/bin
+async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
+    let filename = installer_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if filename.ends_with(".sh") {
+        // Run the official install script
+        let output = tokio::process::Command::new("sh")
+            .arg(installer_path)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run install script: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Install script failed: {}", stderr));
+        }
+    } else if filename.ends_with(".tgz") || filename.ends_with(".tar.gz") {
+        // Extract the binary to /usr/local/bin
+        let output = tokio::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(installer_path)
+            .arg("-C")
+            .arg("/usr/local/bin")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to extract: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("Permission denied") || stderr.contains("denied") {
+                log::warn!("Permission denied extracting to /usr/local/bin, trying with pkexec");
+                let pkexec_output = tokio::process::Command::new("pkexec")
+                    .arg("tar")
+                    .arg("-xzf")
+                    .arg(installer_path)
+                    .arg("-C")
+                    .arg("/usr/local/bin")
+                    .output()
+                    .await
+                    .map_err(|e| format!("Failed to run with pkexec: {}", e))?;
+
+                if !pkexec_output.status.success() {
+                    let err = String::from_utf8_lossy(&pkexec_output.stderr);
+                    return Err(format!("Failed to extract with elevated privileges: {}", err));
+                }
+            } else {
+                return Err(format!("Extraction failed: {}", stderr));
+            }
+        }
+    } else {
+        return Err(format!("Unsupported installer format on Linux: {}", filename));
+    }
+
+    Ok(())
+}
+
+/// Search for models in the Ollama library
+/// Uses the Ollama website search to find models matching the query
+#[tauri::command]
+pub async fn search_ollama_models(
+    query: String,
+) -> Result<Vec<ModelSearchResult>, String> {
+    if query.trim().is_empty() {
+        return Ok(vec![]);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    // Try Ollama library search API
+    let search_url = format!("https://ollama.com/library?q={}", urlencoding::encode(&query));
+
+    let response = client.get(&search_url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .await
+        .map_err(|e| format!("Search request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Search failed with status: {}", response.status()));
+    }
+
+    let html = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+
+    // Parse the HTML to extract model information
+    // Ollama library page contains model cards with data we can extract
+    let mut results = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    // Look for model card links: /library/{model-name}
+    // Pattern: href="/library/model-name"
+    for line in html.lines() {
+        if let Some(start) = line.find("href=\"/library/") {
+            let rest = &line[start + 15..];
+            if let Some(end) = rest.find('"') {
+                let model_name = &rest[..end];
+                // Skip non-model paths
+                if model_name.contains('/') || model_name.contains('?') || model_name.contains('#') || model_name.is_empty() {
+                    continue;
+                }
+                if seen_names.contains(model_name) {
+                    continue;
+                }
+                seen_names.insert(model_name.to_string());
+
+                // Try to extract description from nearby text
+                let description = extract_nearby_text(&html, model_name);
+
+                results.push(ModelSearchResult {
+                    name: model_name.to_string(),
+                    description,
+                    tags: vec![], // Tags would need more detailed parsing
+                    size_info: String::new(),
+                });
+
+                if results.len() >= 20 {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Extract description text near a model name in the HTML
+fn extract_nearby_text(html: &str, model_name: &str) -> String {
+    // Find the model name in the HTML and look for description text nearby
+    let search_pattern = format!("/library/{}\"", model_name);
+    if let Some(pos) = html.find(&search_pattern) {
+        // Look ahead for text content (simplified parsing)
+        let nearby = &html[pos..std::cmp::min(pos + 500, html.len())];
+        // Try to find text between > and < tags
+        if let Some(start) = nearby.find(">") {
+            let after_tag = &nearby[start + 1..];
+            if let Some(end) = after_tag.find("<") {
+                let text = after_tag[..end].trim();
+                if !text.is_empty() && text != model_name {
+                    return text.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Get available Ollama download mirrors
+#[tauri::command]
+pub async fn get_ollama_download_mirrors_cmd() -> Result<Vec<OllamaDownloadMirror>, String> {
+    Ok(get_ollama_download_mirrors())
 }

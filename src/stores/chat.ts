@@ -328,6 +328,7 @@ export const useChatStore = defineStore("chat", () => {
     
     // 设置为当前会话
     currentSession.value = session;
+    lastRetrievalResult.value = null;
     
     // 设置流式监听、保存并刷新列表
     await setupStreamListener();
@@ -383,6 +384,7 @@ export const useChatStore = defineStore("chat", () => {
     
     // 设置当前会话并设置流式监听器
     currentSession.value = sessionWithMessages;
+    lastRetrievalResult.value = null;
     console.log("[Chat] currentSession set, messages:", currentSession.value?.messages?.length);
     await setupStreamListener();
   };
@@ -544,20 +546,18 @@ export const useChatStore = defineStore("chat", () => {
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
       const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
       if (kb) {
-        const embeddingConfig = settings.embeddingApiConfigs.find(c => c.id === kb.embedding_api_config_id);
-        if (embeddingConfig?.apiKey) {
-          // 执行知识库检索
-          const result = await kbStore.searchKnowledgeBase(
-            selectedKnowledgeBaseId.value,
-            content
-          );
-          
-          // 如果检索到相关内容，构建增强上下文
-          if (result && result.chunks.length > 0) {
-            lastRetrievalResult.value = result;
-            retrievalContext = buildRagContext(result);
-            enhancedContent = `${retrievalContext}\n\n问题：${content}`;
-          }
+        // API Key is retrieved from secure storage by backend (#32)
+        // Execute knowledge base search
+        const result = await kbStore.searchKnowledgeBase(
+          selectedKnowledgeBaseId.value,
+          content
+        );
+        
+        // If relevant content found, build enhanced context
+        if (result && result.chunks.length > 0) {
+          lastRetrievalResult.value = result;
+          retrievalContext = buildRagContext(result);
+          enhancedContent = `${retrievalContext}\n\n问题：${content}`;
         }
       }
     }

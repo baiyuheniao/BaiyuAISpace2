@@ -385,4 +385,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     formatFileSize,
     formatDate,
   };
+}, {
+  persist: {
+    paths: ["retrievalSettings"],
+  },
 });

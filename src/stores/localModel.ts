@@ -11,6 +11,7 @@ import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useSettingsStore } from "./settings";
 
 /**
  * 本地模型信息
@@ -59,6 +60,54 @@ export interface DownloadProgress {
 }
 
 /**
+ * Ollama 安装检测信息
+ */
+export interface OllamaInstallInfo {
+  installed: boolean;
+  installPath: string | null;
+  version: string | null;
+}
+
+/**
+ * Ollama 服务状态
+ */
+export interface OllamaServiceStatus {
+  running: boolean;
+  managedByApp: boolean;
+}
+
+/**
+ * 模型搜索结果
+ */
+export interface ModelSearchResult {
+  name: string;
+  description: string;
+  tags: string[];
+  sizeInfo: string;
+}
+
+/**
+ * Ollama 安装进度事件
+ */
+export interface OllamaInstallProgress {
+  stage: "downloading" | "installing" | "completed" | "error";
+  progressPercent: number;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  message: string;
+}
+
+/**
+ * Ollama 下载镜像源
+ */
+export interface OllamaDownloadMirror {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+}
+
+/**
  * 本地模型 Store
  * 使用 Pinia 管理本地模型状态和业务逻辑
  */
@@ -99,6 +148,44 @@ export const useLocalModelStore = defineStore(
 
     /** 下载进度监听器取消函数 */
     let unlistenDownload: UnlistenFn | null = null;
+
+    // ============ Ollama 安装 & 服务管理状态 ============
+
+    /** Ollama 是否已安装 */
+    const ollamaInstalled = ref(false);
+
+    /** Ollama 安装路径 */
+    const ollamaInstallPath = ref<string | null>(null);
+
+    /** Ollama 安装版本（来自本地检测） */
+    const ollamaInstalledVersion = ref<string | null>(null);
+
+    /** Ollama 服务是否由本应用管理 */
+    const serviceManagedByApp = ref(false);
+
+    /** 是否正在下载/安装 Ollama */
+    const isInstallingOllama = ref(false);
+
+    /** Ollama 安装进度 */
+    const ollamaInstallProgress = ref<OllamaInstallProgress | null>(null);
+
+    /** 安装进度监听器取消函数 */
+    let unlistenInstall: UnlistenFn | null = null;
+
+    /** 可用的下载镜像列表 */
+    const downloadMirrors = ref<OllamaDownloadMirror[]>([]);
+
+    /** 当前选中的下载镜像 ID */
+    const selectedMirrorId = ref(
+      // Linux defaults to install script, others to github
+      navigator.platform.toLowerCase().includes("linux") ? "install_script" : "github"
+    );
+
+    /** 模型搜索结果 */
+    const modelSearchResults = ref<ModelSearchResult[]>([]);
+
+    /** 是否正在搜索模型 */
+    const isSearchingModels = ref(false);
 
     // ============ 计算属性 ============
 
@@ -300,6 +387,201 @@ export const useLocalModelStore = defineStore(
       return colonIndex > 0 ? modelName.substring(0, colonIndex) : modelName;
     };
 
+    // ============ Ollama 安装 & 服务管理方法 ============
+
+    /**
+     * 检测 Ollama 是否已安装
+     */
+    const detectInstallation = async () => {
+      try {
+        const info = await invoke<OllamaInstallInfo>("detect_ollama_installation");
+        ollamaInstalled.value = info.installed;
+        ollamaInstallPath.value = info.installPath;
+        ollamaInstalledVersion.value = info.version;
+        return info;
+      } catch (error) {
+        console.error("Failed to detect Ollama installation:", error);
+        ollamaInstalled.value = false;
+        return { installed: false, installPath: null, version: null } as OllamaInstallInfo;
+      }
+    };
+
+    /**
+     * 启动 Ollama 服务
+     * 如果已运行则直接返回，否则后台启动并等待就绪
+     */
+    const startService = async () => {
+      try {
+        const status = await invoke<OllamaServiceStatus>("start_ollama_service", {
+          ollamaBaseUrl: ollamaBaseUrl.value,
+        });
+        isOnline.value = status.running;
+        serviceManagedByApp.value = status.managedByApp;
+        if (status.running) {
+          await fetchVersion();
+          await loadModels();
+        }
+        return status;
+      } catch (error) {
+        console.error("Failed to start Ollama service:", error);
+        throw error;
+      }
+    };
+
+    /**
+     * 停止由本应用管理的 Ollama 服务
+     */
+    const stopService = async () => {
+      try {
+        await invoke("stop_ollama_service");
+        isOnline.value = false;
+        serviceManagedByApp.value = false;
+        ollamaVersion.value = "";
+        localModels.value = [];
+      } catch (error) {
+        console.error("Failed to stop Ollama service:", error);
+        throw error;
+      }
+    };
+
+    /**
+     * 获取 Ollama 服务状态
+     */
+    const getServiceStatus = async () => {
+      try {
+        const status = await invoke<OllamaServiceStatus>("get_ollama_service_status", {
+          ollamaBaseUrl: ollamaBaseUrl.value,
+        });
+        isOnline.value = status.running;
+        serviceManagedByApp.value = status.managedByApp;
+        return status;
+      } catch (error) {
+        console.error("Failed to get Ollama service status:", error);
+        isOnline.value = false;
+        return { running: false, managedByApp: false } as OllamaServiceStatus;
+      }
+    };
+
+    /**
+     * 下载并安装 Ollama
+     * @param mirrorId 下载镜像 ID（可选）
+     */
+    const downloadAndInstallOllama = async (mirrorId?: string) => {
+      if (isInstallingOllama.value) return;
+
+      isInstallingOllama.value = true;
+      ollamaInstallProgress.value = null;
+
+      try {
+        // Setup progress listener
+        if (unlistenInstall) {
+          unlistenInstall();
+        }
+        unlistenInstall = await listen<OllamaInstallProgress>(
+          "ollama-install-progress",
+          (event) => {
+            ollamaInstallProgress.value = event.payload;
+          }
+        );
+
+        // Step 1: Download
+        const installerPath = await invoke<string>("download_ollama", {
+          mirrorId: mirrorId || selectedMirrorId.value,
+        });
+
+        // Step 2: Install
+        await invoke("install_ollama", { installerPath });
+
+        // Step 3: Re-detect installation
+        await detectInstallation();
+
+        // Step 4: Auto-start service
+        if (ollamaInstalled.value) {
+          await startService();
+        }
+      } catch (error) {
+        console.error("Failed to download/install Ollama:", error);
+        throw error;
+      } finally {
+        isInstallingOllama.value = false;
+        if (unlistenInstall) {
+          unlistenInstall();
+          unlistenInstall = null;
+        }
+      }
+    };
+
+    /**
+     * 加载下载镜像列表
+     */
+    const loadDownloadMirrors = async () => {
+      try {
+        downloadMirrors.value = await invoke<OllamaDownloadMirror[]>("get_ollama_download_mirrors_cmd");
+      } catch (error) {
+        console.error("Failed to load download mirrors:", error);
+        downloadMirrors.value = [];
+      }
+    };
+
+    /**
+     * 搜索 Ollama 模型
+     * @param query 搜索关键词
+     */
+    const searchModels = async (query: string) => {
+      if (!query.trim()) {
+        modelSearchResults.value = [];
+        return;
+      }
+
+      isSearchingModels.value = true;
+      try {
+        modelSearchResults.value = await invoke<ModelSearchResult[]>("search_ollama_models", {
+          query,
+        });
+      } catch (error) {
+        console.error("Failed to search models:", error);
+        modelSearchResults.value = [];
+      } finally {
+        isSearchingModels.value = false;
+      }
+    };
+
+    /**
+     * 一键本地部署：启动服务 → 下载模型 → 创建 API 配置
+     * @param modelName 模型名称
+     */
+    const oneClickDeploy = async (modelName: string) => {
+      // Ensure service is running
+      if (!isOnline.value) {
+        await startService();
+        if (!isOnline.value) {
+          throw new Error("无法启动 Ollama 服务");
+        }
+      }
+
+      // Pull model
+      await pullModel(modelName, "ollama");
+
+      // Auto-create API config for this model if not exists
+      const settings = useSettingsStore();
+      const existingConfig = settings.apiConfigs.find(
+        (c) => c.provider === "local" && c.model === modelName
+      );
+
+      if (!existingConfig) {
+        const configName = `local-${modelName}`;
+        settings.createApiConfig(
+          configName,
+          "local",
+          modelName,
+          "", // Local Ollama doesn't need API key
+          ollamaBaseUrl.value.replace(/\/$/, "")
+        );
+      }
+
+      return modelName;
+    };
+
     // ============ 返回公共接口 ============
     return {
       // 状态
@@ -313,6 +595,18 @@ export const useLocalModelStore = defineStore(
       isPulling,
       pullingModelName,
       downloadProgress,
+
+      // Ollama 安装 & 服务管理状态
+      ollamaInstalled,
+      ollamaInstallPath,
+      ollamaInstalledVersion,
+      serviceManagedByApp,
+      isInstallingOllama,
+      ollamaInstallProgress,
+      downloadMirrors,
+      selectedMirrorId,
+      modelSearchResults,
+      isSearchingModels,
 
       // 计算属性
       selectedSource,
@@ -330,6 +624,16 @@ export const useLocalModelStore = defineStore(
       deleteModel,
       formatSize,
       getModelDisplayName,
+
+      // Ollama 安装 & 服务管理方法
+      detectInstallation,
+      startService,
+      stopService,
+      getServiceStatus,
+      downloadAndInstallOllama,
+      loadDownloadMirrors,
+      searchModels,
+      oneClickDeploy,
     };
   },
   {

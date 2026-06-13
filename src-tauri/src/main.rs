@@ -167,6 +167,15 @@ fn main() {
             commands::local_model::delete_local_model,
             commands::local_model::get_model_sources_cmd,
             commands::local_model::get_ollama_version,
+            // Ollama installation & service management
+            commands::local_model::detect_ollama_installation,
+            commands::local_model::start_ollama_service,
+            commands::local_model::stop_ollama_service,
+            commands::local_model::get_ollama_service_status,
+            commands::local_model::download_ollama,
+            commands::local_model::install_ollama,
+            commands::local_model::search_ollama_models,
+            commands::local_model::get_ollama_download_mirrors_cmd,
             // 日志相关命令
             get_log_path,
             read_log_file,

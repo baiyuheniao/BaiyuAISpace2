@@ -167,3 +167,6 @@ src-tauri/gen/schemas/*.json
 
 # Visual code documentation (ASCII block diagrams)
 visual-code/
+
+# Trae Settings
+.trae/rules

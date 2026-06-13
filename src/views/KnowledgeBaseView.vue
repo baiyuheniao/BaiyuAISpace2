@@ -154,6 +154,10 @@ const handleCreate = async () => {
     message.error("请选择 Embedding API 配置");
     return;
   }
+  if (createForm.value.chunk_overlap >= createForm.value.chunk_size) {
+    message.error("重叠大小必须小于分块大小");
+    return;
+  }
 
   creating.value = true;
   
@@ -230,9 +234,10 @@ const handleImport = async () => {
     c => c.id === kbStore.currentKb!.embedding_api_config_id
   );
 
-  // 验证 API 配置存在（API Key 由后端从 secure_storage 读取，前端不再传递）
+  // 验证 API 配置存在
+  // API Key is retrieved from secure storage by backend (#32)
   if (!embeddingConfig) {
-    message.error("请先在设置中创建 Embedding API 配置并填写 API Key");
+    message.error("关联的 Embedding API 配置已被删除，请重新配置知识库");
     return;
   }
 
