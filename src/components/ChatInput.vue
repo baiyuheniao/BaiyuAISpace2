@@ -753,7 +753,7 @@ const getFileDisplayName = (file: File): string => {
   gap: 12px;
   align-items: flex-end;
   background: var(--n-color-embed);
-  border-radius: 20px;
+  border-radius: $radius-pill;
   padding: 12px 16px;
   border: 1px solid var(--n-border-color);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
@@ -832,7 +832,7 @@ const getFileDisplayName = (file: File): string => {
   margin-bottom: 8px;
   background: var(--n-color);
   border: 1px solid var(--n-border-color);
-  border-radius: 12px;
+  border-radius: $radius-lg;
   padding: 16px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
   z-index: 100;

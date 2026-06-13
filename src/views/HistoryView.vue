@@ -320,7 +320,7 @@ onMounted(() => {
 /* 会话项样式 */
 .history-item {
   margin-bottom: 12px;
-  border-radius: 12px;
+  border-radius: $radius-lg;
   background: var(--n-color-embed);
   border: 1px solid transparent;
   // 过渡动画效果

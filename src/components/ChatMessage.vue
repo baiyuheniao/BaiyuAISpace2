@@ -86,7 +86,7 @@ const isAssistant = computed(() => props.message.role === "assistant");
 // 渲染后的 Markdown 内容
 const renderedContent = computed(() => {
   if (!props.message.content) return "";
-  return marked.parse(props.message.content, { async: false }) as string;
+  return marked.parse(props.message.content, { async: false, breaks: true }) as string;
 });
 
 // ============ 方法函数 ============
@@ -275,8 +275,8 @@ const handleCopy = async () => {
 .message-body {
   padding: 16px 20px;
   background: var(--n-color-embed);
-  border-radius: 18px;
-  border-bottom-left-radius: 4px;
+  border-radius: $radius-xl;
+  border-bottom-left-radius: $radius-sm;
   word-break: break-word;
   line-height: 1.7;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
@@ -289,8 +289,8 @@ const handleCopy = async () => {
 
 .message-body.user-body {
   background: rgba(0, 0, 0, 0.05);
-  border-bottom-left-radius: 18px;
-  border-bottom-right-radius: 4px;
+  border-bottom-left-radius: $radius-xl;
+  border-bottom-right-radius: $radius-sm;
 }
 
 .markdown-content {
@@ -307,7 +307,7 @@ const handleCopy = async () => {
 
 .markdown-content :deep(pre) {
   background: #1e1e2e;
-  border-radius: 12px;
+  border-radius: $radius-lg;
   padding: 16px;
   margin: 12px 0;
   overflow-x: auto;
@@ -328,7 +328,7 @@ const handleCopy = async () => {
 .markdown-content :deep(:not(pre) > code) {
   background: rgba(128, 128, 128, 0.15);
   padding: 3px 6px;
-  border-radius: 6px;
+  border-radius: $radius-sm;
   color: var(--n-text-color-1);
 }
 
@@ -347,14 +347,14 @@ const handleCopy = async () => {
   padding: 12px 16px;
   border-left: 4px solid #000000;
   background: rgba(0, 0, 0, 0.04);
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 $radius-md $radius-md 0;
 }
 
 .markdown-content :deep(table) {
   width: 100%;
   border-collapse: collapse;
   margin: 12px 0;
-  border-radius: 8px;
+  border-radius: $radius-md;
   overflow: hidden;
 }
 
@@ -408,7 +408,7 @@ const handleCopy = async () => {
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 6px;
+  border-radius: $radius-sm;
   background: transparent;
   color: var(--n-text-color-3);
   cursor: pointer;

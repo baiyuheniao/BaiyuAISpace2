@@ -67,7 +67,7 @@ onMounted(async () => {
   </n-config-provider>
 </template>
 
-<style>
+<style lang="scss">
 /* Reset and base styles */
 * {
   margin: 0;
@@ -98,7 +98,7 @@ html, body, #app {
 
 ::-webkit-scrollbar-thumb {
   background: rgba(128, 128, 128, 0.3);
-  border-radius: 3px;
+  border-radius: $radius-sm;
 }
 
 ::-webkit-scrollbar-thumb:hover {

@@ -29,7 +29,7 @@ body,
 
 ::-webkit-scrollbar-thumb {
   background: #8884;
-  border-radius: 3px;
+  border-radius: $radius-sm;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -39,7 +39,7 @@ body,
 // Code block styles
 pre {
   margin: 12px 0;
-  border-radius: 8px;
+  border-radius: $radius-md;
   overflow-x: auto;
 }
 
@@ -67,7 +67,7 @@ code {
     padding: 8px 16px;
     border-left: 4px solid $primary-color;
     background: rgba($primary-color, 0.05);
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 $radius-sm $radius-sm 0;
   }
 
   table {

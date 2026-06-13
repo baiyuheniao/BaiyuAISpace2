@@ -1936,7 +1936,7 @@ onMounted(async () => {
 /* 设置卡片样式 */
 .settings-card {
   margin-bottom: 20px;
-  border-radius: 16px;
+  border-radius: $radius-xl;
   background: var(--n-color-embed);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
 }

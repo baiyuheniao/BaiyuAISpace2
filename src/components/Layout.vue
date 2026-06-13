@@ -227,7 +227,7 @@ const handleNewChat = () => {
 .logo-img {
   width: 48px;
   height: 48px;
-  border-radius: 8px;
+  border-radius: $radius-md;
   object-fit: contain;
   image-rendering: crisp-edges;
   background: var(--n-color-embed);
@@ -277,7 +277,7 @@ const handleNewChat = () => {
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: $radius-lg;
   background: var(--n-color-embed);
   transition: background 0.2s;
 }
