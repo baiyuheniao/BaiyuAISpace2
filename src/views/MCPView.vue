@@ -71,7 +71,7 @@ const message = useMessage();
 
 /**
  * 推荐 MCP 服务预设
- * 均为社区广泛使用的官方参考实现 (modelcontextprotocol/servers)，
+ * 均为社区广泛使用的官方实现 (modelcontextprotocol/servers 或对应厂商官方仓库)，
  * 通过 npx/uvx 在首次运行时自动下载，无需用户预先下载脚本
  */
 interface MCPPreset {
@@ -81,7 +81,7 @@ interface MCPPreset {
   serverType: "stdio" | "sse" | "http";
   command: string;
   args: string[];
-  /** 若该服务需要用户修改参数 (如本地路径)，则提示文案 */
+  /** 若该服务需要用户修改参数 (如本地路径)，或有首次运行的前提条件，则提示文案 */
   needsConfig?: string;
 }
 
@@ -110,6 +110,15 @@ const MCP_PRESETS: MCPPreset[] = [
     serverType: "stdio",
     command: "uvx",
     args: ["mcp-server-fetch"],
+  },
+  {
+    id: "playwright",
+    name: "浏览器自动化",
+    description: "操控真实浏览器：打开网页、点击、填表、截图、读取页面结构等（微软官方 Playwright MCP）",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@playwright/mcp@latest"],
+    needsConfig: "首次调用浏览器类工具时会自动下载 Chromium，请确保网络畅通，可能需要等待片刻",
   },
   {
     id: "sequential-thinking",
@@ -328,7 +337,12 @@ const handleTestConnection = async () => {
     );
 
     testResult.value = result;
-    message.success(result ? "连接成功" : "连接失败");
+    console.debug("[MCP] test connection", { command: formData.value.command, args: argsArray, url: formData.value.url, result });
+    if (result) {
+      message.success("连接成功");
+    } else {
+      message.error("连接失败");
+    }
   } finally {
     testingConnection.value = false;
   }
@@ -435,6 +449,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
       server.args,
       server.url || undefined
     );
+    console.debug("[MCP] test saved server", { id: server.id, name: server.name, result });
     if (result) {
       message.success(`「${server.name}」连接成功`);
     } else {

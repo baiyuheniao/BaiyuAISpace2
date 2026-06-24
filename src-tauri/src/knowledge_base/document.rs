@@ -356,125 +356,169 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
     Ok(format!("{:x}", hash))
 }
 
-/// Returns the largest byte index <= `index` that lies on a UTF-8 char
-/// boundary of `s`. Byte offsets computed from `chunk_size`/`chunk_overlap`
-/// (character counts in the UI, but byte counts here) do not generally land
-/// on a char boundary for multi-byte text such as Chinese, so any direct
-/// `s[idx..]` slice using a raw offset must first be snapped with this.
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    let mut idx = index.min(s.len());
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
+/// 分隔符按"粗粒度 → 细粒度"优先级排列；中英文句末标点都包含在内，
+/// 修复了原先只按英文句号 `.` 切句子、导致中文文本完全切不到句子级别、
+/// 只能直接硬切的问题。
+const SPLIT_SEPARATORS: &[&str] = &[
+    "\n\n",
+    "\n",
+    "。", "！", "？", "；",
+    ". ", "! ", "? ", "; ",
+    "，", ", ",
+    " ",
+];
+
+/// 按字符数（而非字节数）统计长度。UI 上"分块大小"标注的单位是字符数
+/// （见 KnowledgeBaseView.vue「分块大小（字符数）」），中文字符在 UTF-8
+/// 下占 3 字节，如果直接用 `str::len()`（字节数）跟 chunk_size 比较，
+/// 中文文本实际分出来的块会只有用户设置值的 1/3 左右。
+fn char_count(s: &str) -> usize {
+    s.chars().count()
 }
 
-/// Hard-split text into chunks without ever cutting a UTF-8 character in
-/// half. Boundaries are derived from `char_indices()` rather than raw byte
-/// arithmetic, since `chunk_size`/`chunk_overlap` are unlikely to be
-/// multiples of a multi-byte character's encoded length.
-fn hard_split_by_chars(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    if chars.is_empty() {
+/// 返回 `s` 末尾 `n` 个字符对应的切片（按字符数而非字节数截取）
+fn tail_chars(s: &str, n: usize) -> &str {
+    let total = char_count(s);
+    if n == 0 || total == 0 {
+        return "";
+    }
+    if n >= total {
+        return s;
+    }
+    let skip = total - n;
+    let byte_idx = s.char_indices().nth(skip).map(|(b, _)| b).unwrap_or(s.len());
+    &s[byte_idx..]
+}
+
+/// 在 `text` 中按 `sep` 切分，并把分隔符保留在前一段末尾
+/// （例如 "你好。世界。" 切成 ["你好。", "世界。"]，不丢标点）
+fn split_keep_separator<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+    let mut result = Vec::new();
+    let mut last = 0usize;
+    while let Some(pos) = text[last..].find(sep) {
+        let end = last + pos + sep.len();
+        result.push(&text[last..end]);
+        last = end;
+    }
+    if last < text.len() {
+        result.push(&text[last..]);
+    }
+    result
+}
+
+/// 递归分割：依次尝试用从粗到细的分隔符切分文本。任何切出来的片段如果仍
+/// 超过 `chunk_size`（字符数），就用下一级更细的分隔符继续递归切分它；
+/// 分隔符全部用完后退化为硬字符切分。
+///
+/// 相比之前"只有 > chunk_size*2 时才按英文句号切"的实现，这里没有任意的
+/// 倍数阈值——任何超过 chunk_size 的片段都会被继续细分，块大小更可控；
+/// 分隔符同时覆盖中英文标点，中文文本也能在句子边界切分而不是直接硬切。
+fn recursive_split(text: &str, chunk_size: usize, sep_index: usize) -> Vec<String> {
+    if text.is_empty() {
         return Vec::new();
     }
+    if char_count(text) <= chunk_size {
+        return vec![text.to_string()];
+    }
+    if sep_index >= SPLIT_SEPARATORS.len() {
+        return hard_split_by_chars(text, chunk_size);
+    }
 
-    let step = chunk_size.saturating_sub(chunk_overlap).max(1);
+    let sep = SPLIT_SEPARATORS[sep_index];
+    if !text.contains(sep) {
+        return recursive_split(text, chunk_size, sep_index + 1);
+    }
+
+    let parts = split_keep_separator(text, sep);
     let mut result = Vec::new();
-    let mut start = 0usize; // index into `chars`
+    let mut current = String::new();
 
-    while start < chars.len() {
-        let start_byte = chars[start].0;
-        let mut end = start;
-        while end < chars.len() && chars[end].0 - start_byte < chunk_size {
-            end += 1;
+    for part in parts {
+        if char_count(part) > chunk_size {
+            // 这一段本身就超长，先把已攒的内容收尾，再用更细的分隔符递归切它
+            if !current.is_empty() {
+                result.push(std::mem::take(&mut current));
+            }
+            result.extend(recursive_split(part, chunk_size, sep_index + 1));
+            continue;
         }
-        if end == start {
-            end = start + 1; // always make progress, even if chunk_size is tiny
+        if char_count(&current) + char_count(part) > chunk_size && !current.is_empty() {
+            result.push(std::mem::take(&mut current));
         }
-        let end_byte = chars.get(end).map(|&(b, _)| b).unwrap_or(text.len());
-        result.push(text[start_byte..end_byte].to_string());
-
-        if end >= chars.len() {
-            break;
-        }
-
-        // Advance start by `step` bytes' worth of characters
-        let mut next = start;
-        while next < chars.len() && chars[next].0 - start_byte < step {
-            next += 1;
-        }
-        start = next.max(start + 1);
+        current.push_str(part);
+    }
+    if !current.is_empty() {
+        result.push(current);
     }
 
     result
 }
 
-/// Split text into chunks
-pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
+/// 硬字符切分（最后一道兜底）：当文本里连一个可用分隔符都没有时
+/// （例如一长串没有空格的字符或代码），按字符数（不是字节数）切分，
+/// 保证永远不会切断一个 UTF-8 字符。
+fn hard_split_by_chars(text: &str, chunk_size: usize) -> Vec<String> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
 
-    // Try to split at paragraph boundaries first
-    let paragraphs: Vec<&str> = text.split("\n\n").collect();
-    let mut current_chunk = String::new();
-
-    for para in paragraphs {
-        if current_chunk.len() + para.len() > chunk_size && !current_chunk.is_empty() {
-            chunks.push(current_chunk.clone());
-            // Keep overlap (snapped to a char boundary -- see floor_char_boundary)
-            let overlap_start = if current_chunk.len() > chunk_overlap {
-                floor_char_boundary(&current_chunk, current_chunk.len() - chunk_overlap)
-            } else {
-                0
-            };
-            current_chunk = current_chunk[overlap_start..].to_string();
-        }
-        
-        if !current_chunk.is_empty() {
-            current_chunk.push('\n');
-            current_chunk.push('\n');
-        }
-        current_chunk.push_str(para);
-    }
-    
-    if !current_chunk.is_empty() {
-        chunks.push(current_chunk);
-    }
-    
-    // If any chunk is still too large, split by sentences
-    let mut final_chunks = Vec::new();
-    for chunk in chunks {
-        if chunk.len() > chunk_size * 2 {
-            // Split by sentences
-            let sentences: Vec<&str> = chunk.split('.').collect();
-            let mut sentence_chunk = String::new();
-            
-            for sentence in sentences {
-                if sentence_chunk.len() + sentence.len() > chunk_size && !sentence_chunk.is_empty() {
-                    final_chunks.push(sentence_chunk.clone());
-                    sentence_chunk.clear();
-                }
-                sentence_chunk.push_str(sentence);
-                sentence_chunk.push('.');
-            }
-            
-            if !sentence_chunk.is_empty() {
-                final_chunks.push(sentence_chunk);
-            }
-        } else {
-            final_chunks.push(chunk);
-        }
-    }
-    
-    // Final fallback: hard split if still too large (char-boundary safe)
     let mut result = Vec::new();
-    for chunk in final_chunks {
-        if chunk.len() > chunk_size * 2 {
-            result.extend(hard_split_by_chars(&chunk, chunk_size, chunk_overlap));
+    let mut start = 0usize; // 字符下标（不是字节下标）
+
+    while start < chars.len() {
+        let end = (start + chunk_size).min(chars.len());
+        let start_byte = chars[start].0;
+        let end_byte = chars.get(end).map(|&(b, _)| b).unwrap_or(text.len());
+        result.push(text[start_byte..end_byte].to_string());
+        start = end;
+    }
+
+    result
+}
+
+/// 在切好的块之间补上重叠：每一块（除第一块）前面接上前一块末尾
+/// `chunk_overlap` 个字符，用于在块边界保留上下文连续性。
+fn apply_overlap(chunks: Vec<String>, chunk_overlap: usize) -> Vec<String> {
+    if chunk_overlap == 0 || chunks.len() <= 1 {
+        return chunks;
+    }
+
+    let mut result = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        if i == 0 {
+            result.push(chunk.clone());
         } else {
-            result.push(chunk);
+            let tail = tail_chars(&chunks[i - 1], chunk_overlap);
+            result.push(format!("{}{}", tail, chunk));
         }
     }
+    result
+}
+
+/// 文本分块：按"粗到细"的分隔符递归切分（段落 → 换行 → 中英文句末标点 →
+/// 逗号 → 空格 → 硬字符切分），再在块之间补上 `chunk_overlap` 个字符的重叠。
+///
+/// `chunk_size`/`chunk_overlap` 的单位是字符数，与设置界面"分块大小
+/// （字符数）"保持一致——这里全程用 `chars().count()` 而不是 `str::len()`
+/// 比较长度，避免中文等多字节字符被按字节数误判成更小的块。
+pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let chunk_size = chunk_size.max(1);
+
+    let chunks = recursive_split(trimmed, chunk_size, 0);
+    let result = apply_overlap(chunks, chunk_overlap);
+
+    log::debug!(
+        "split_text: {} 字符 -> {} 块 (chunk_size={}, chunk_overlap={})",
+        char_count(trimmed),
+        result.len(),
+        chunk_size,
+        chunk_overlap
+    );
 
     result
 }

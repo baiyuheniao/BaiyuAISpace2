@@ -341,7 +341,8 @@ const handleRemoveResourceFile = async (filename: string) => {
       v-model:show="showEditModal"
       :title="isNew ? '新建 Skill' : '编辑 Skill'"
       preset="card"
-      style="width: 640px"
+      style="width: 600px; max-height: 85vh"
+      :content-style="{ overflowY: 'auto' }"
       :mask-closable="false"
     >
       <n-form

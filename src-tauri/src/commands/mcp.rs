@@ -325,9 +325,14 @@ fn resolve_windows_command(command: &str) -> String {
 }
 
 fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -> Result<Vec<MCPTool>, MCPError> {
+    // MCP 协议的 tools/list 响应形如 {"result":{"tools":[...]}}} —— 工具数组在
+    // result.tools 字段下面，result 本身是一个对象而不是数组。之前直接对 result
+    // 调用 as_array() 必定返回 None，导致每一个符合协议规范的服务器（包括全部
+    // 推荐预设）解析 tools/list 时都会失败，这正是"测试连接"全部失败的根因。
     let array = result
-        .as_array()
-        .ok_or_else(|| MCPError::CommunicationError("tools/list response is not array".to_string()))?;
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| MCPError::CommunicationError("tools/list response missing tools array".to_string()))?;
 
     let mut tools = Vec::new();
     for item in array {
@@ -335,7 +340,8 @@ fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -
             .as_str()
             .ok_or_else(|| MCPError::CommunicationError("missing tool name".to_string()))?;
         let description = item["description"].as_str().unwrap_or("No description").to_string();
-        let input_schema = item["input_schema"].clone();
+        // MCP 协议字段名是 camelCase 的 inputSchema，不是 input_schema
+        let input_schema = item["inputSchema"].clone();
 
         tools.push(MCPTool {
             server_id: server.id.clone(),
@@ -345,6 +351,7 @@ fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -
             input_schema,
         });
     }
+    log::info!("Parsed {} tools from MCP server '{}'", tools.len(), server.name);
     Ok(tools)
 }
 
@@ -863,7 +870,19 @@ pub async fn test_mcp_connection(
                     updated_at: 0,
                 };
 
-                Ok(call_mcp_tools_stdio(&probe_server).await.is_ok())
+                match call_mcp_tools_stdio(&probe_server).await {
+                    Ok(tools) => {
+                        log::info!("MCP test connection succeeded for '{} {}': {} tools", executable, probe_server.args.join(" "), tools.len());
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        // 测试连接的 UI 只展示一个布尔结果，具体失败原因（启动失败/超时/
+                        // 响应解析失败等）只能从日志里查——这里记录下来，方便排查某个
+                        // 预设连不上时到底卡在哪一步
+                        log::warn!("MCP test connection failed for '{} {}': {}", executable, probe_server.args.join(" "), e);
+                        Ok(false)
+                    }
+                }
             } else {
                 Err(MCPError::InvalidConfig("stdio requires command".to_string()))
             }
@@ -872,8 +891,14 @@ pub async fn test_mcp_connection(
             if let Some(url) = url {
                 // Try HTTP request to server
                 match reqwest::Client::new().get(&url).send().await {
-                    Ok(resp) => Ok(resp.status().is_success()),
-                    Err(e) => Err(MCPError::CommunicationError(e.to_string())),
+                    Ok(resp) => {
+                        log::info!("MCP test connection to '{}' returned status {}", url, resp.status());
+                        Ok(resp.status().is_success())
+                    }
+                    Err(e) => {
+                        log::warn!("MCP test connection failed for '{}': {}", url, e);
+                        Err(MCPError::CommunicationError(e.to_string()))
+                    }
                 }
             } else {
                 Err(MCPError::InvalidConfig("HTTP/SSE requires URL".to_string()))

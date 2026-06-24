@@ -793,7 +793,8 @@ const getStatusTag = (status: Document["status"]) => {
     v-model:show="showCreateModal"
     title="创建知识库"
     preset="card"
-    style="width: 540px"
+    style="width: 600px; max-height: 85vh"
+    :content-style="{ overflowY: 'auto' }"
     :mask-closable="false"
   >
     <n-form
