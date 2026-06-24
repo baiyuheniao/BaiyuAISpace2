@@ -21,7 +21,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { NLayout, NLayoutContent, NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin } from "naive-ui";
+import { NLayout, NLayoutContent, NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
 import { ChatbubblesOutline, TimeOutline, TrashOutline, EnterOutline } from "@vicons/ionicons5";
 
@@ -64,14 +64,11 @@ const handleSessionClick = async (session: typeof chat.sessions[0]) => {
 
 /**
  * 处理删除会话
- * 删除指定 ID 的会话
- * 
+ * 删除指定 ID 的会话 (由确认弹窗的"删除"按钮触发)
+ *
  * @param sessionId - 要删除的会话 ID
- * @param event - 鼠标事件对象 (用于阻止冒泡)
  */
-const handleDelete = async (sessionId: string, event: MouseEvent) => {
-  // 阻止事件冒泡，避免触发会话点击
-  event.stopPropagation();
+const handleDelete = async (sessionId: string) => {
   await chat.deleteSession(sessionId);
 };
 
@@ -241,18 +238,27 @@ onMounted(() => {
                     {{ formatDate(session.updatedAt) }}
                   </n-text>
                   <!-- 删除按钮 (悬停时显示) -->
-                  <n-button
-                    quaternary
-                    circle
-                    size="small"
-                    type="error"
-                    class="delete-btn"
-                    @click="(e: MouseEvent) => handleDelete(session.id, e)"
+                  <n-popconfirm
+                    positive-text="删除"
+                    negative-text="取消"
+                    @positive-click="handleDelete(session.id)"
                   >
-                    <template #icon>
-                      <n-icon><TrashOutline /></n-icon>
+                    <template #trigger>
+                      <n-button
+                        quaternary
+                        circle
+                        size="small"
+                        type="error"
+                        class="delete-btn"
+                        @click.stop
+                      >
+                        <template #icon>
+                          <n-icon><TrashOutline /></n-icon>
+                        </template>
+                      </n-button>
                     </template>
-                  </n-button>
+                    确定删除这条对话记录？此操作无法撤销
+                  </n-popconfirm>
                 </n-space>
               </template>
             </n-thing>

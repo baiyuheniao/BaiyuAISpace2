@@ -127,7 +127,9 @@ impl VectorStore {
         }
 
         // Sort by similarity (descending) and take top_k
-        scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+        // unwrap_or(Equal) guards against a NaN similarity score (e.g. from a
+        // malformed embedding) ever panicking the sort
+        scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
         scored_results.truncate(top_k as usize);
 
         log::info!(
@@ -279,6 +281,14 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
     if !table_info.contains(&"embedding_api_config_id".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_api_config_id TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+    }
+
+    // Add embedding_base_url if it doesn't exist
+    if !table_info.contains(&"embedding_base_url".to_string()) {
+        let _ = conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN embedding_base_url TEXT NOT NULL DEFAULT ''",
             [],
         );
     }

@@ -14,8 +14,8 @@
 
 use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
+use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
-use chrono::Utc;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 // ============ 类型定义 ============
@@ -83,6 +84,12 @@ pub struct SendMessageRequest {
     pub base_url: String,
     /// 是否启用 MCP
     pub enable_mcp: bool,
+    /// 手动激活的 Skill ID 列表
+    #[serde(default)]
+    pub active_skill_ids: Vec<String>,
+    /// 是否允许模型自主判断调用其它已启用的 Skill
+    #[serde(default)]
+    pub enable_skill_autonomy: bool,
 }
 
 /// 流式响应事件结构
@@ -98,9 +105,9 @@ pub struct StreamChunk {
     pub done: bool,
 }
 
-// Global storage for active stream cancellation flags (temporarily disabled)
-#[allow(dead_code)]
-static ACTIVE_STREAMS: Lazy<Arc<Mutex<HashMap<String, bool>>>> = 
+// One cancellation token per in-flight stream, keyed by session_id, so
+// `cancel_stream` can signal `stream_message`'s read loop to stop early.
+static ACTIVE_STREAMS: Lazy<Arc<Mutex<HashMap<String, CancellationToken>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 // Errors
@@ -151,7 +158,7 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("doubao", "https://ark.cn-beijing.volces.com/api/v3/chat/completions", "bearer"),
     ("deepseek", "https://api.deepseek.com/v1/chat/completions", "bearer"),
     ("siliconflow", "https://api.siliconflow.cn/v1/chat/completions", "bearer"),
-    ("minimax", "https://api.minimax.chat/v1/text/chatcompletion_v2", "bearer"),
+    ("minimax", "https://api.minimax.io/v1/text/chatcompletion_v2", "bearer"),
     ("yi", "https://api.lingyiwanwu.com/v1/chat/completions", "bearer"),
     ("local", "", "none"),
     ("custom", "", "bearer"),
@@ -166,6 +173,13 @@ fn build_url(provider: &str, base_url: &str, model: &str) -> String {
             )
         }
         "azure" => {
+            // Convention used by this app (see settings.ts default placeholder
+            // "https://your-resource.openai.azure.com/openai/deployments/"):
+            // the user-supplied base_url already includes the
+            // `/openai/deployments/` segment, so we only need to append the
+            // deployment name (`model`) + `/chat/completions`. This matches
+            // the real Azure OpenAI REST path
+            // {endpoint}/openai/deployments/{deployment}/chat/completions?api-version=...
             let base = base_url.trim_end_matches('/');
             if base.is_empty() {
                 "".to_string()
@@ -175,7 +189,7 @@ fn build_url(provider: &str, base_url: &str, model: &str) -> String {
                 } else {
                     base.to_string()
                 };
-                format!("{}/chat/completions?api-version=2023-05-15", base)
+                format!("{}/chat/completions?api-version=2024-06-01", base)
             }
         }
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
@@ -220,6 +234,8 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             body
         }
         "google" => {
+            let system_msg = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
+
             let contents: Vec<_> = messages
                 .iter()
                 .filter(|m| m.role != "system")
@@ -231,12 +247,22 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 })
                 .collect();
 
-            serde_json::json!({
+            let mut body = serde_json::json!({
                 "contents": contents,
                 "generationConfig": {
                     "maxOutputTokens": 4096,
                 }
-            })
+            });
+
+            // Gemini ignores a system-role entry inside `contents` -- the system
+            // prompt must go in the separate top-level `systemInstruction` field.
+            if let Some(sys) = system_msg {
+                body["systemInstruction"] = serde_json::json!({
+                    "parts": [{ "text": sys }]
+                });
+            }
+
+            body
         }
         _ => {
             let msgs: Vec<_> = messages
@@ -275,6 +301,61 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
 
             body
         }
+    }
+}
+
+/// Build the combined instructions + readable-resource-file text for one or
+/// more activated skills, ready to be merged into a system prompt.
+async fn build_skill_context(skills: &[Skill], app_handle: &AppHandle) -> String {
+    let mut parts = Vec::new();
+    for skill in skills {
+        let mut section = format!("# Skill: {}\n{}", skill.name, skill.instructions);
+        for filename in &skill.resource_files {
+            if let Some(content) = read_skill_resource_text(app_handle, &skill.id, filename).await {
+                section.push_str(&format!("\n\n## 附带资源文件: {}\n{}", filename, content));
+            }
+        }
+        parts.push(section);
+    }
+    parts.join("\n\n---\n\n")
+}
+
+/// Append one synthetic tool definition per skill the model may autonomously
+/// invoke. The tool only carries name + description -- invoking it returns
+/// the skill's instructions as the result (see the `skill__` handling in
+/// `stream_message`'s `StreamContent::Done` branch), it never calls out to
+/// anything external by itself.
+///
+/// Only applies to the generic OpenAI-style `tools` shape -- `anthropic` and
+/// `google` use entirely different tool schemas and `build_stream_request_body`
+/// never wires `tools` through for them in the first place, so adding an
+/// OpenAI-shaped `tools` field directly onto their request body here would
+/// just send a field their API doesn't understand.
+fn append_skill_tools(body: &mut serde_json::Value, provider: &str, autonomous_skills: &[Skill]) {
+    if autonomous_skills.is_empty() || matches!(provider, "anthropic" | "google") {
+        return;
+    }
+
+    let skill_tools: Vec<_> = autonomous_skills
+        .iter()
+        .map(|skill| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": format!("skill__{}", skill.id),
+                    "description": format!(
+                        "调用「{}」技能：{}。如果当前任务和这个技能相关，调用它获取具体操作指南。",
+                        skill.name, skill.description
+                    ),
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            })
+        })
+        .collect();
+
+    match body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        Some(existing) => existing.extend(skill_tools),
+        None => body["tools"] = serde_json::json!(skill_tools),
     }
 }
 
@@ -383,26 +464,22 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
                     if let Some(content) = first_choice["delta"]["content"].as_str() {
                         return Some(StreamContent::Text(content.to_string()));
                     } else if let Some(tool_calls) = first_choice["delta"]["tool_calls"].as_array() {
-                        // Handle tool calls
-                        let calls: Vec<_> = tool_calls.iter().filter_map(|call| {
-                            if let (Some(id), Some(func)) = (
-                                call["id"].as_str(),
-                                call["function"].as_object()
-                            ) {
-                                Some(ToolCall {
-                                    _id: id.to_string(),
-                                    function: ToolFunction {
-                                        name: func["name"].as_str()?.to_string(),
-                                        arguments: func["arguments"].as_str()?.to_string(),
-                                    }
-                                })
-                            } else {
-                                None
-                            }
+                        // OpenAI streams tool calls incrementally: the first delta for a
+                        // given `index` carries `id` + `function.name`, and every
+                        // subsequent delta for that same `index` carries only a fragment
+                        // of `function.arguments` (id/name absent). Each delta here is a
+                        // partial update, not a complete tool call -- the caller must
+                        // accumulate fragments by `index` across the whole stream.
+                        let deltas: Vec<_> = tool_calls.iter().filter_map(|call| {
+                            let index = call["index"].as_u64()? as u32;
+                            let id = call["id"].as_str().map(|s| s.to_string());
+                            let name = call["function"]["name"].as_str().map(|s| s.to_string());
+                            let arguments_fragment = call["function"]["arguments"].as_str().map(|s| s.to_string());
+                            Some(ToolCallDelta { index, id, name, arguments_fragment })
                         }).collect();
-                        
-                        if !calls.is_empty() {
-                            return Some(StreamContent::ToolCalls(calls));
+
+                        if !deltas.is_empty() {
+                            return Some(StreamContent::ToolCallDeltas(deltas));
                         }
                     }
                 }
@@ -415,19 +492,41 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
 #[derive(Debug)]
 enum StreamContent {
     Text(String),
-    ToolCalls(Vec<ToolCall>),
+    ToolCallDeltas(Vec<ToolCallDelta>),
     Done,
 }
 
+/// One fragment of a streamed tool call, keyed by `index`. `id`/`name` are
+/// only present on the first fragment for a given index; `arguments_fragment`
+/// must be concatenated across every fragment sharing that index.
 #[derive(Debug)]
+struct ToolCallDelta {
+    index: u32,
+    id: Option<String>,
+    name: Option<String>,
+    arguments_fragment: Option<String>,
+}
+
+/// A fully accumulated tool call, ready to execute.
+#[derive(Debug, Clone)]
 struct ToolCall {
-    _id: String,
+    id: String,
     function: ToolFunction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ToolFunction {
     name: String,
+    arguments: String,
+}
+
+/// Accumulator for a single tool call's fragments while the stream is still
+/// in progress. `id`/`name` arrive once; `arguments` is built by
+/// concatenating every fragment seen for this index, in order.
+#[derive(Debug, Default)]
+struct PartialToolCall {
+    id: Option<String>,
+    name: Option<String>,
     arguments: String,
 }
 
@@ -443,37 +542,95 @@ pub async fn stream_message(
     
     let api_key = get_api_key(&request)?;
     let message_id = Uuid::new_v4().to_string();
-    let _session_id = request.session_id.clone();
+    let session_id = request.session_id.clone();
+
+    // Create a cancellation token and register it so `cancel_stream` can
+    // signal this in-flight request to stop early.
+    let cancel_token = CancellationToken::new();
+    {
+        let mut streams = ACTIVE_STREAMS.lock().await;
+        streams.insert(session_id.clone(), cancel_token.clone());
+    }
+
+    // Deregister the token when this function returns, by whichever path --
+    // spawned because Drop can't run the async lock acquire directly.
+    let _cleanup = scopeguard::guard(session_id.clone(), |sid| {
+        tauri::async_runtime::spawn(async move {
+            let mut streams = ACTIVE_STREAMS.lock().await;
+            streams.remove(&sid);
+        });
+    });
     
-    // TODO: Re-enable stream cancellation with proper implementation
-    // Create cancellation token and store it
-    // let cancel_token = CancellationToken::new();
-    // {
-    //     let mut streams = ACTIVE_STREAMS.lock().await;
-    //     streams.insert(session_id.clone(), true);
-    // }
-    
-    // Cleanup token when function exits
-    // let _cleanup = scopeguard::guard(session_id.clone(), |sid| {
-    //     tauri::async_runtime::spawn(async move {
-    //         let mut streams = ACTIVE_STREAMS.lock().await;
-    //         streams.remove(&sid);
-    //     });
-    // });
-    
-    // Get MCP tools if enabled
-    let mcp_tools = if request.enable_mcp {
-        match get_all_mcp_tools(state.clone()).await {
-            Ok(tools) => tools,
-            Err(e) => {
-                log::warn!("Failed to get MCP tools: {}", e);
-                vec![]
-            }
+    // Fetch every enabled MCP server's tools up front -- needed regardless of
+    // `enable_mcp` because a manually-activated Skill can bring its own bound
+    // servers' tools into the conversation even when the global MCP toggle is off.
+    let all_mcp_tools = match get_all_mcp_tools(state.clone()).await {
+        Ok(tools) => tools,
+        Err(e) => {
+            log::warn!("Failed to get MCP tools: {}", e);
+            vec![]
         }
+    };
+
+    // Load skills and split them into "manually activated this turn" and
+    // "enabled but left for the model to decide whether to invoke".
+    let all_skills = {
+        let db = state.0.lock().await;
+        db.get_skills().unwrap_or_else(|e| {
+            log::warn!("Failed to load skills: {}", e);
+            vec![]
+        })
+    };
+    let active_skills: Vec<Skill> = all_skills
+        .iter()
+        .filter(|s| s.enabled && request.active_skill_ids.contains(&s.id))
+        .cloned()
+        .collect();
+    let autonomous_skills: Vec<Skill> = if request.enable_skill_autonomy {
+        all_skills
+            .iter()
+            .filter(|s| s.enabled && !request.active_skill_ids.contains(&s.id))
+            .cloned()
+            .collect()
     } else {
         vec![]
     };
-    
+
+    // Tools actually exposed this turn: the global MCP set (if enabled) plus
+    // whatever the manually-activated skills bind, deduplicated.
+    let mut mcp_tools: Vec<MCPTool> = if request.enable_mcp { all_mcp_tools.clone() } else { vec![] };
+    for skill in &active_skills {
+        for tool in &all_mcp_tools {
+            if skill.bound_mcp_server_ids.contains(&tool.server_id)
+                && !mcp_tools.iter().any(|t| t.server_id == tool.server_id && t.name == tool.name)
+            {
+                mcp_tools.push(tool.clone());
+            }
+        }
+    }
+
+    // Inject manually-activated skills' instructions (+ readable resource
+    // file contents) as a system-prompt block, merged with any existing
+    // system message rather than replacing it.
+    let mut effective_messages = request.messages.clone();
+    if !active_skills.is_empty() {
+        let skill_context = build_skill_context(&active_skills, &app_handle).await;
+        if !skill_context.is_empty() {
+            if !effective_messages.is_empty() && effective_messages[0].role == "system" {
+                effective_messages[0].content =
+                    format!("{}\n\n{}", effective_messages[0].content, skill_context);
+            } else {
+                effective_messages.insert(0, ChatMessage {
+                    id: Uuid::new_v4().to_string(),
+                    role: "system".to_string(),
+                    content: skill_context,
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    error: None,
+                });
+            }
+        }
+    }
+
     let url = build_url(&request.provider, &request.base_url, &request.model);
     // Log provider/base/model for debugging (do not log API key)
     log::debug!(
@@ -494,7 +651,8 @@ pub async fn stream_message(
     }
 
     let client = create_http_client()?;
-    let body = build_stream_request_body(&request.provider, &request.model, &request.messages, &mcp_tools);
+    let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools);
+    append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);
 
     log::debug!("Constructed URL for provider {}: {}", request.provider, url);
@@ -537,22 +695,22 @@ pub async fn stream_message(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut accumulated_tool_calls = Vec::new();
+    let mut tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall> = std::collections::BTreeMap::new();
 
-    // Main loop (cancellation temporarily disabled)
+    // Main loop
     loop {
         tokio::select! {
             // Check for cancellation signal
-            // _ = cancel_token.cancelled() => {
-            //     log::info!("Stream cancelled for session: {}", session_id);
-            //     let _ = app_handle.emit("stream-chunk", StreamChunk {
-            //         session_id: request.session_id.clone(),
-            //         message_id: message_id.clone(),
-            //         content: String::new(),
-            //         done: true,
-            //     });
-            //     return Ok(());
-            // }
+            _ = cancel_token.cancelled() => {
+                log::info!("Stream cancelled for session: {}", session_id);
+                let _ = app_handle.emit("stream-chunk", StreamChunk {
+                    session_id: request.session_id.clone(),
+                    message_id: message_id.clone(),
+                    content: String::new(),
+                    done: true,
+                });
+                return Ok(());
+            }
             // Read next chunk from stream
             chunk = stream.next() => {
                 match chunk {
@@ -579,19 +737,54 @@ pub async fn stream_message(
                                             done: false,
                                         });
                                     }
-                                    StreamContent::ToolCalls(calls) => {
-                                        accumulated_tool_calls.extend(calls);
+                                    StreamContent::ToolCallDeltas(deltas) => {
+                                        for delta in deltas {
+                                            let entry = tool_call_acc.entry(delta.index).or_default();
+                                            if let Some(id) = delta.id {
+                                                entry.id = Some(id);
+                                            }
+                                            if let Some(name) = delta.name {
+                                                entry.name = Some(name);
+                                            }
+                                            if let Some(fragment) = delta.arguments_fragment {
+                                                entry.arguments.push_str(&fragment);
+                                            }
+                                        }
                                     }
                                     StreamContent::Done => {
-                                        // Process accumulated tool calls if any
-                                        if !accumulated_tool_calls.is_empty() && request.enable_mcp {
-                                            let tool_calls = std::mem::take(&mut accumulated_tool_calls);
-                                            for tool_call in tool_calls {
-                                                // Find the tool and execute it
-                                                if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
+                                        // Finalize accumulated tool call fragments (id/name from the
+                                        // first chunk per index, arguments concatenated across all of
+                                        // them) and execute them if any.
+                                        let tool_calls: Vec<ToolCall> = std::mem::take(&mut tool_call_acc)
+                                            .into_values()
+                                            .filter_map(|p| {
+                                                Some(ToolCall {
+                                                    id: p.id?,
+                                                    function: ToolFunction {
+                                                        name: p.name?,
+                                                        arguments: p.arguments,
+                                                    },
+                                                })
+                                            })
+                                            .collect();
+
+                                        if !tool_calls.is_empty() {
+                                            let mut tool_results = Vec::with_capacity(tool_calls.len());
+                                            for tool_call in &tool_calls {
+                                                if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
+                                                    // Autonomously-invoked Skill: the "tool result" is the
+                                                    // skill's own instructions/resources, not an MCP call.
+                                                    if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
+                                                        log::info!("Model invoked skill: {}", skill.name);
+                                                        let content = build_skill_context(std::slice::from_ref(skill), &app_handle).await;
+                                                        tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
+                                                    } else {
+                                                        log::warn!("Skill not found for autonomous call: {}", skill_id);
+                                                        tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
+                                                    }
+                                                } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
                                                     log::info!("Executing MCP tool: {}", tool.name);
-                                                    
-                                                    match call_mcp_tool(
+                                                    let result = match call_mcp_tool(
                                                         state.clone(),
                                                         Some(tool.server_id.clone()),
                                                         tool.name.clone(),
@@ -599,54 +792,48 @@ pub async fn stream_message(
                                                     ).await {
                                                         Ok(result) => {
                                                             log::info!("Tool execution result: {:?}", result);
-
-                                                            // Send tool result back to the LLM for continued reasoning
-                                                            let tool_result_content = format!(
-                                                                "工具 {} 调用结果：{}",
-                                                                tool.name,
-                                                                serde_json::to_string(&result).unwrap_or_else(|_| "<serialize error>".to_string())
-                                                            );
-
-                                                            let mut follow_up_messages = request.messages.clone();
-                                                            follow_up_messages.push(ChatMessage {
-                                                                id: Uuid::new_v4().to_string(),
-                                                                role: "assistant".to_string(),
-                                                                content: tool_result_content.clone(),
-                                                                timestamp: Utc::now().timestamp_millis(),
-                                                                error: None,
-                                                            });
-
-                                                            match request_llm_once(
-                                                                &request.provider,
-                                                                &request.model,
-                                                                &request.api_key,
-                                                                &request.base_url,
-                                                                &follow_up_messages,
-                                                                &mcp_tools,
-                                                            )
-                                                            .await
-                                                            {
-                                                                Ok(live_reply) => {
-                                                                    let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                                                        session_id: request.session_id.clone(),
-                                                                        message_id: message_id.clone(),
-                                                                        content: live_reply,
-                                                                        done: false,
-                                                                    });
-                                                                }
-                                                                Err(err) => {
-                                                                    log::error!("Failed to continue reasoning after tool call: {}", err);
-                                                                }
-                                                            }
+                                                            result
                                                         }
                                                         Err(e) => {
                                                             log::error!("Tool execution failed: {}", e);
+                                                            serde_json::json!({ "error": e.to_string() })
                                                         }
-                                                    }
+                                                    };
+                                                    tool_results.push(result);
+                                                } else {
+                                                    log::warn!("MCP tool not found: {}", tool_call.function.name);
+                                                    tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
+                                                }
+                                            }
+
+                                            // Continue the conversation with a single follow-up request
+                                            // carrying the proper assistant.tool_calls + tool-role
+                                            // messages, instead of one request per call.
+                                            match continue_after_tool_calls(
+                                                &request.provider,
+                                                &request.model,
+                                                &request.api_key,
+                                                &request.base_url,
+                                                &effective_messages,
+                                                &tool_calls,
+                                                &tool_results,
+                                            )
+                                            .await
+                                            {
+                                                Ok(live_reply) => {
+                                                    let _ = app_handle.emit("stream-chunk", StreamChunk {
+                                                        session_id: request.session_id.clone(),
+                                                        message_id: message_id.clone(),
+                                                        content: live_reply,
+                                                        done: false,
+                                                    });
+                                                }
+                                                Err(err) => {
+                                                    log::error!("Failed to continue reasoning after tool calls: {}", err);
                                                 }
                                             }
                                         }
-                                        
+
                                         let _ = app_handle.emit("stream-chunk", StreamChunk {
                                             session_id: request.session_id.clone(),
                                             message_id: message_id.clone(),
@@ -678,29 +865,72 @@ pub async fn stream_message(
     }
 }
 
-async fn request_llm_once(
+/// Continue a conversation after one or more MCP tool calls have been
+/// executed, sending a single follow-up request with the proper OpenAI
+/// function-calling message shape: the assistant turn that requested the
+/// calls (as a `tool_calls` array, not freeform text), followed by one
+/// `role: "tool"` message per result carrying the matching `tool_call_id`.
+///
+/// This only ever runs for the generic OpenAI-compatible path: `anthropic`
+/// and `google` never populate `tool_calls` in the first place (see
+/// `build_stream_request_body`, which doesn't forward `tools` for them), so
+/// there's no provider-specific branching needed here.
+async fn continue_after_tool_calls(
     provider: &str,
     model: &str,
     api_key: &str,
     base_url: &str,
-    messages: &[ChatMessage],
-    tools: &[MCPTool],
+    original_messages: &[ChatMessage],
+    tool_calls: &[ToolCall],
+    tool_results: &[serde_json::Value],
 ) -> Result<String, LLMError> {
     let url = build_url(provider, base_url, model);
     let client = create_http_client()?;
-    let mut body = build_stream_request_body(provider, model, messages, tools);
-    body["stream"] = serde_json::json!(false);
+
+    let mut msgs: Vec<serde_json::Value> = original_messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect();
+
+    let tool_calls_json: Vec<_> = tool_calls
+        .iter()
+        .map(|tc| {
+            serde_json::json!({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+            })
+        })
+        .collect();
+
+    msgs.push(serde_json::json!({
+        "role": "assistant",
+        "content": serde_json::Value::Null,
+        "tool_calls": tool_calls_json,
+    }));
+
+    for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
+        msgs.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+        }));
+    }
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "stream": false,
+    });
 
     let headers = build_headers(provider, api_key);
 
-    log::debug!("Constructed URL for provider {} (one-shot): {}", provider, url);
+    log::debug!("Constructed URL for provider {} (tool-call continuation): {}", provider, url);
 
-    let masked_auth_one_shot = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
-        match h.to_str() {
-            Ok(s) => mask_auth_header_value(s),
-            Err(_) => "<non-utf8>".to_string(),
-        }
-    } else if let Some(h) = headers.get("x-api-key") {
+    let masked_auth = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
         match h.to_str() {
             Ok(s) => mask_auth_header_value(s),
             Err(_) => "<non-utf8>".to_string(),
@@ -708,19 +938,18 @@ async fn request_llm_once(
     } else {
         "<none>".to_string()
     };
-
-    log::debug!("One-shot auth header (masked): {}", masked_auth_one_shot);
+    log::debug!("Tool-call continuation auth header (masked): {}", masked_auth);
 
     let response = match client
         .post(&url)
-        .headers(headers.clone())
+        .headers(headers)
         .json(&body)
         .send()
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            log::error!("reqwest send error (one-shot) for url '{}': {:?}", url, e);
+            log::error!("reqwest send error (tool-call continuation) for url '{}': {:?}", url, e);
             return Err(e.into());
         }
     };
@@ -735,38 +964,13 @@ async fn request_llm_once(
         .await
         .map_err(LLMError::RequestError)?;
 
-    if provider == "google" {
-        // Google Gemini format: candidates[0].content.parts[0].text
-        if let Some(text) = json
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|cand| cand.get("content"))
-            .and_then(|content| content.get("parts"))
-            .and_then(|parts| parts.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|part| part.get("text"))
-            .and_then(|t| t.as_str())
-        {
-            return Ok(text.to_string());
-        }
-    } else if provider == "anthropic" {
-        if let Some(content_array) = json["content"].as_array() {
-            if let Some(first_content) = content_array.first() {
-                if let Some(text) = first_content["text"].as_str() {
-                    return Ok(text.to_string());
-                }
+    if let Some(choices) = json["choices"].as_array() {
+        if let Some(first_choice) = choices.first() {
+            if let Some(text) = first_choice["message"]["content"].as_str() {
+                return Ok(text.to_string());
             }
-        }
-    } else {
-        if let Some(choices) = json["choices"].as_array() {
-            if let Some(first_choice) = choices.first() {
-                if let Some(text) = first_choice["message"]["content"].as_str() {
-                    return Ok(text.to_string());
-                }
-                if let Some(text) = first_choice["text"].as_str() {
-                    return Ok(text.to_string());
-                }
+            if let Some(text) = first_choice["text"].as_str() {
+                return Ok(text.to_string());
             }
         }
     }
@@ -801,15 +1005,14 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
 /// Cancel an active stream for a session
 #[tauri::command]
 pub async fn cancel_stream(session_id: String) -> Result<(), String> {
-    // Temporarily disabled - needs proper implementation
-    // let mut streams = ACTIVE_STREAMS.lock().await;
-    // if let Some(flag) = streams.get(&session_id) {
-    //     *flag = true; // Set cancellation flag
-    //     log::info!("Cancelled stream for session: {}", session_id);
-    //     Ok(())
-    // } else {
-    //     Err("No active stream found for session".to_string())
-    // }
-    log::info!("Stream cancellation requested for session: {} (temporarily disabled)", session_id);
+    let streams = ACTIVE_STREAMS.lock().await;
+    if let Some(token) = streams.get(&session_id) {
+        token.cancel();
+        log::info!("Cancelled stream for session: {}", session_id);
+    } else {
+        // The stream may have already finished naturally between the user
+        // clicking stop and this command running -- not an error condition.
+        log::info!("No active stream found for session: {} (already finished?)", session_id);
+    }
     Ok(())
 }

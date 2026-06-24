@@ -20,6 +20,7 @@
 
 use crate::commands::llm::{ChatMessage, ChatSession};
 use crate::commands::mcp::{MCPServer, MCPServerType};
+use crate::commands::skills::Skill;
 use keyring::Entry;
 use std::sync::Arc;
 use tauri::Manager;
@@ -133,6 +134,23 @@ impl Database {
         )?;
 
         self.conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                instructions TEXT NOT NULL DEFAULT '',
+                bound_mcp_server_ids TEXT NOT NULL DEFAULT '[]',
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                resource_files TEXT NOT NULL DEFAULT '[]',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)",
             [],
         )?;
@@ -146,6 +164,10 @@ impl Database {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled)",
             [],
         )?;
 
@@ -476,6 +498,82 @@ impl Database {
         )?;
 
         log::info!("MCP server deleted: {} (including keyring entry)", server_id);
+        Ok(())
+    }
+
+    /**
+     * 保存 Skill 配置 (新建或更新)
+     */
+    pub fn save_skill(&self, skill: &Skill) -> Result<(), Box<dyn std::error::Error>> {
+        let bound_servers_json = serde_json::to_string(&skill.bound_mcp_server_ids)?;
+        let resource_files_json = serde_json::to_string(&skill.resource_files)?;
+
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO skills
+            (id, name, description, instructions, bound_mcp_server_ids, enabled, resource_files, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            rusqlite::params![
+                &skill.id,
+                &skill.name,
+                &skill.description,
+                &skill.instructions,
+                &bound_servers_json,
+                &skill.enabled,
+                &resource_files_json,
+                &skill.created_at,
+                &skill.updated_at,
+            ],
+        )?;
+
+        log::info!("Skill saved: {}", skill.id);
+        Ok(())
+    }
+
+    /**
+     * 获取所有 Skill
+     */
+    pub fn get_skills(&self) -> Result<Vec<Skill>, Box<dyn std::error::Error>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, name, description, instructions, bound_mcp_server_ids, enabled, resource_files, created_at, updated_at
+            FROM skills
+            ORDER BY name ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let bound_servers_json: String = row.get(4)?;
+            let resource_files_json: String = row.get(6)?;
+
+            Ok(Skill {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                instructions: row.get(3)?,
+                bound_mcp_server_ids: serde_json::from_str(&bound_servers_json).unwrap_or_default(),
+                enabled: row.get(5)?,
+                resource_files: serde_json::from_str(&resource_files_json).unwrap_or_default(),
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+
+        let skills: Result<Vec<_>, _> = rows.collect();
+        Ok(skills?)
+    }
+
+    /**
+     * 删除 Skill
+     */
+    pub fn delete_skill(&self, skill_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.conn.execute(
+            "DELETE FROM skills WHERE id = ?1",
+            [skill_id],
+        )?;
+
+        log::info!("Skill deleted: {}", skill_id);
         Ok(())
     }
 }

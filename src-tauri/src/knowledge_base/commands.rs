@@ -52,6 +52,12 @@ pub async fn create_knowledge_base(
 ) -> Result<KnowledgeBase, KnowledgeBaseError> {
     log::info!("[KB] Creating knowledge base: {:?}", request);
 
+    if request.embedding_provider.trim().is_empty() || request.embedding_model.trim().is_empty() {
+        return Err(KnowledgeBaseError::InvalidConfig(
+            "embedding_provider and embedding_model are required".to_string()
+        ));
+    }
+
     // Validate chunk_overlap < chunk_size
     let chunk_size = request.chunk_size.unwrap_or(1000);
     let chunk_overlap = request.chunk_overlap.unwrap_or(200);
@@ -73,17 +79,18 @@ pub async fn create_knowledge_base(
     let result = conn.execute(
         r#"
         INSERT INTO knowledge_bases
-        (id, name, description, embedding_provider, embedding_model, embedding_dim, embedding_api_config_id, chunk_size, chunk_overlap, created_at, updated_at, document_count)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)
+        (id, name, description, embedding_provider, embedding_model, embedding_dim, embedding_api_config_id, embedding_base_url, chunk_size, chunk_overlap, created_at, updated_at, document_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)
         "#,
         rusqlite::params![
             &id,
             &request.name,
             &request.description,
-            "",          // embedding_provider - empty for backward compatibility
-            "",          // embedding_model - empty for backward compatibility
+            &request.embedding_provider,
+            &request.embedding_model,
             1536i32,     // embedding_dim - default 1536
             &request.embedding_api_config_id,
+            &request.embedding_base_url,
             chunk_size,
             chunk_overlap,
             now,
@@ -108,6 +115,9 @@ pub async fn create_knowledge_base(
         name: request.name,
         description: request.description,
         embedding_api_config_id: request.embedding_api_config_id,
+        embedding_provider: request.embedding_provider,
+        embedding_model: request.embedding_model,
+        embedding_base_url: request.embedding_base_url,
         chunk_size,
         chunk_overlap,
         created_at: now,
@@ -127,7 +137,8 @@ pub async fn list_knowledge_bases(
 
     let mut stmt = conn.prepare(
         "SELECT id, name, description, embedding_api_config_id,
-         chunk_size, chunk_overlap, created_at, updated_at, document_count
+         chunk_size, chunk_overlap, created_at, updated_at, document_count,
+         COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '')
          FROM knowledge_bases ORDER BY updated_at DESC"
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
@@ -142,6 +153,9 @@ pub async fn list_knowledge_bases(
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
             document_count: row.get(8)?,
+            embedding_provider: row.get(9)?,
+            embedding_model: row.get(10)?,
+            embedding_base_url: row.get(11)?,
         })
     }).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
@@ -207,7 +221,7 @@ pub async fn import_document(
     kb_state: State<'_, KbState>,
 ) -> Result<Document, KnowledgeBaseError> {
     // ===== Phase 1: Database operations (lock held) =====
-    let (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks, chunk_count) = {
+    let (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks) = {
         let db = db_state.0.lock().await;
         let conn = rusqlite::Connection::open(&db.path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -215,7 +229,8 @@ pub async fn import_document(
         // Get knowledge base config
         let kb: KnowledgeBase = conn.query_row(
             "SELECT id, name, description, embedding_api_config_id,
-             chunk_size, chunk_overlap, created_at, updated_at, document_count
+             chunk_size, chunk_overlap, created_at, updated_at, document_count,
+             COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '')
              FROM knowledge_bases WHERE id = ?1",
             [&kb_id],
             |row| {
@@ -229,6 +244,9 @@ pub async fn import_document(
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
                     document_count: row.get(8)?,
+                    embedding_provider: row.get(9)?,
+                    embedding_model: row.get(10)?,
+                    embedding_base_url: row.get(11)?,
                 })
             }
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -288,7 +306,6 @@ pub async fn import_document(
 
         // Split into chunks
         let chunks = split_text(&content, kb.chunk_size as usize, kb.chunk_overlap as usize);
-        let chunk_count = chunks.len() as i32;
 
         // Write chunks to SQLite and FTS5
         let mut all_chunk_ids = Vec::new();
@@ -315,7 +332,7 @@ pub async fn import_document(
             all_chunk_ids.push(chunk_id);
         }
 
-        (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks, chunk_count)
+        (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks)
     };
     // ===== Phase 1 END: DB lock released =====
 
@@ -323,35 +340,23 @@ pub async fn import_document(
     // Retrieve API key from secure storage instead of receiving from frontend (#32)
     let api_key = get_embedding_api_key(&kb.embedding_api_config_id)?;
 
-    // Get embedding config from settings store to determine provider/model
-    // We need to read from the settings database to get provider and model info
-    let (embedding_provider, embedding_model) = {
-        let db = db_state.0.lock().await;
-        let conn = rusqlite::Connection::open(&db.path)
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-
-        // Read embedding provider and model from knowledge base record
-        let (provider, model): (String, String) = conn.query_row(
-            "SELECT COALESCE(embedding_provider, ''), COALESCE(embedding_model, '') FROM knowledge_bases WHERE id = ?1",
-            [&kb_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-
-        // If provider/model are stored in the KB record, use them
-        // Otherwise, default to openai-compatible with the api config's settings
-        if !provider.is_empty() && !model.is_empty() {
-            (provider, model)
+    // Use the embedding provider/model/base_url stored on the knowledge base
+    // itself (set at creation time from the selected Embedding API config).
+    // Fall back to OpenAI defaults only for knowledge bases created before
+    // this field was populated.
+    let (embedding_provider, embedding_model, embedding_base_url) =
+        if !kb.embedding_provider.is_empty() && !kb.embedding_model.is_empty() {
+            (kb.embedding_provider.clone(), kb.embedding_model.clone(), kb.embedding_base_url.clone())
         } else {
-            // Default: use openai provider, model will be determined by the embedding config
-            ("openai".to_string(), "text-embedding-3-small".to_string())
-        }
-    };
+            ("openai".to_string(), "text-embedding-3-small".to_string(), String::new())
+        };
 
     let embeddings_result = generate_embeddings(
         chunks.clone(),
         &embedding_provider,
         &api_key,
         &embedding_model,
+        &embedding_base_url,
     ).await;
 
     // Handle embedding failure: mark document as error and clean up orphan chunks
@@ -588,28 +593,31 @@ pub async fn search_knowledge_base(
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
     // Get embedding API config from the knowledge base
-    let (embedding_api_config_id, embedding_provider, embedding_model) = {
+    let (embedding_api_config_id, embedding_provider, embedding_model, embedding_base_url) = {
         let db = db_state.0.lock().await;
         let conn = rusqlite::Connection::open(&db.path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        let (config_id, provider, model): (String, String, String) = conn.query_row(
-            "SELECT embedding_api_config_id, COALESCE(embedding_provider, ''), COALESCE(embedding_model, '') FROM knowledge_bases WHERE id = ?1",
+        let (config_id, provider, model, base_url): (String, String, String, String) = conn.query_row(
+            "SELECT embedding_api_config_id, COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '') FROM knowledge_bases WHERE id = ?1",
             [&request.kb_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        let provider = if provider.is_empty() { "openai".to_string() } else { provider };
-        let model = if model.is_empty() { "text-embedding-3-small".to_string() } else { model };
-
-        (config_id, provider, model)
+        // Fall back to OpenAI defaults only for knowledge bases created
+        // before embedding_provider/model were populated.
+        if provider.is_empty() || model.is_empty() {
+            (config_id, "openai".to_string(), "text-embedding-3-small".to_string(), String::new())
+        } else {
+            (config_id, provider, model, base_url)
+        }
     };
 
     // Retrieve API key from secure storage (#32)
     let api_key = get_embedding_api_key(&embedding_api_config_id)?;
 
     let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
-    retriever.retrieve(request, &embedding_provider, &embedding_model, &api_key).await
+    retriever.retrieve(request, &embedding_provider, &embedding_model, &embedding_base_url, &api_key).await
 }
 
 /// Get available embedding models

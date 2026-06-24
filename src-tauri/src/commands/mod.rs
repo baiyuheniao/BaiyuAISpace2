@@ -11,10 +11,14 @@
  * - mcp: MCP 服务器相关命令 (工具调用、服务器管理)
  * - constants: 超时和延迟常量
  * - local_model: 本地模型管理命令 (Ollama 集成)
+ * - lmstudio: 本地模型管理命令 (LM Studio 集成)
+ * - skills: Skill (技能) 管理命令
  */
 
 pub mod auth;
 pub mod constants;
 pub mod llm;
+pub mod lmstudio;
 pub mod local_model;
 pub mod mcp;
+pub mod skills;

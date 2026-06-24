@@ -55,8 +55,9 @@ import {
   Code,
   Globe,
   Terminal,
+  Sparkles,
 } from "@vicons/ionicons5";
-import { useMCPStore } from "@/stores/mcp";
+import { useMCPStore, type MCPServer } from "@/stores/mcp";
 
 // ============ 状态管理 ============
 
@@ -65,6 +66,77 @@ const mcp = useMCPStore();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
+
+// ============ 推荐服务预设 ============
+
+/**
+ * 推荐 MCP 服务预设
+ * 均为社区广泛使用的官方参考实现 (modelcontextprotocol/servers)，
+ * 通过 npx/uvx 在首次运行时自动下载，无需用户预先下载脚本
+ */
+interface MCPPreset {
+  id: string;
+  name: string;
+  description: string;
+  serverType: "stdio" | "sse" | "http";
+  command: string;
+  args: string[];
+  /** 若该服务需要用户修改参数 (如本地路径)，则提示文案 */
+  needsConfig?: string;
+}
+
+const MCP_PRESETS: MCPPreset[] = [
+  {
+    id: "filesystem",
+    name: "文件系统访问",
+    description: "读写指定目录下的本地文件",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"],
+    needsConfig: "请将最后一行参数改为你要允许访问的目录路径",
+  },
+  {
+    id: "memory",
+    name: "知识图谱记忆",
+    description: "基于知识图谱的持久化记忆，让模型记住对话中的实体与关系",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-memory"],
+  },
+  {
+    id: "fetch",
+    name: "网页内容抓取",
+    description: "抓取网页并转换为适合模型阅读的 Markdown 格式",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["mcp-server-fetch"],
+  },
+  {
+    id: "sequential-thinking",
+    name: "顺序思维链",
+    description: "帮助模型分步骤拆解复杂问题，结构化呈现推理过程",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+  },
+  {
+    id: "time",
+    name: "时间与时区",
+    description: "获取当前时间、在不同时区之间转换",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["mcp-server-time"],
+  },
+  {
+    id: "git",
+    name: "Git 仓库工具",
+    description: "读取、搜索本地 Git 仓库的提交、分支和文件",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["mcp-server-git", "--repository", "/path/to/git/repo"],
+    needsConfig: "请将仓库路径改为你本地的 Git 仓库路径",
+  },
+];
 
 // ============ 生命周期 ============
 
@@ -182,12 +254,37 @@ const openCreateModal = () => {
 /**
  * 处理服务器类型变更
  * 切换类型时重置测试结果
- * 
+ *
  * @param type - 新的服务器类型
  */
 const handleServerTypeChange = (type: string) => {
   formData.value.server_type = type as "stdio" | "sse" | "http";
   testResult.value = null;
+};
+
+/**
+ * 应用推荐服务预设
+ * 用预设数据填充表单并打开添加服务弹窗，用户仍可在弹窗中检查/修改后再保存
+ *
+ * @param preset - 选中的预设
+ */
+const applyPreset = (preset: MCPPreset) => {
+  formData.value = {
+    name: preset.name,
+    description: preset.description,
+    server_type: preset.serverType,
+    command: preset.command,
+    args: preset.args.join("\n"),
+    port: "",
+    url: "",
+    api_key: "",
+    enabled: true,
+  };
+  testResult.value = null;
+  showCreateModal.value = true;
+  if (preset.needsConfig) {
+    message.info(preset.needsConfig);
+  }
 };
 
 // ============ 业务方法 ============
@@ -213,14 +310,23 @@ const handleTestConnection = async () => {
 
   try {
     testingConnection.value = true;
-    
+
+    // 命令参数是单独一个文本框（每行一个），必须和 command 一起传给后端，
+    // 否则测试探测的是一个不带参数的裸命令（比如单独的 "npx"），和真正保存
+    // 后启动的命令完全不是一回事，会产生误报
+    const argsArray = formData.value.args
+      .split("\n")
+      .filter((arg) => arg.trim())
+      .map((arg) => arg.trim());
+
     // 调用 Store 方法测试连接
     const result = await mcp.testConnection(
       formData.value.server_type,
       formData.value.command || undefined,
+      argsArray,
       formData.value.url || undefined
     );
-    
+
     testResult.value = result;
     message.success(result ? "连接成功" : "连接失败");
   } finally {
@@ -310,6 +416,34 @@ const handleToggle = async (serverId: string) => {
     message.error("操作失败：" + String(error));
   }
 };
+
+/** 正在测试连接中的服务器 ID（用于按钮 loading 态） */
+const testingServerId = ref<string | null>(null);
+
+/**
+ * 测试已保存服务器的连接
+ * 之前只能在"添加服务"弹窗里测试，保存后的服务器没有任何重新验证连通性的入口
+ *
+ * @param server - 要测试的服务器
+ */
+const handleTestSavedServer = async (server: MCPServer) => {
+  testingServerId.value = server.id;
+  try {
+    const result = await mcp.testConnection(
+      server.server_type,
+      server.command || undefined,
+      server.args,
+      server.url || undefined
+    );
+    if (result) {
+      message.success(`「${server.name}」连接成功`);
+    } else {
+      message.error(`「${server.name}」连接失败`);
+    }
+  } finally {
+    testingServerId.value = null;
+  }
+};
 </script>
 
 <template>
@@ -330,6 +464,68 @@ const handleToggle = async (serverId: string) => {
           </n-icon>
           MCP 服务管理
         </h1>
+
+        <!-- 推荐服务预设卡片 -->
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
+          <template #header>
+            <div class="card-header">
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <Sparkles />
+              </n-icon>
+              <span>推荐服务</span>
+            </div>
+          </template>
+
+          <n-list hoverable>
+            <n-list-item
+              v-for="preset in MCP_PRESETS"
+              :key="preset.id"
+            >
+              <n-thing>
+                <template #header>
+                  {{ preset.name }}
+                </template>
+                <template #description>
+                  <n-text depth="3">
+                    {{ preset.description }}
+                  </n-text>
+                </template>
+              </n-thing>
+              <template #suffix>
+                <n-button
+                  size="small"
+                  @click="applyPreset(preset)"
+                >
+                  <template #icon>
+                    <n-icon><Add /></n-icon>
+                  </template>
+                  使用此配置
+                </n-button>
+              </template>
+            </n-list-item>
+          </n-list>
+
+          <template #footer>
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              <n-icon
+                :size="12"
+                style="margin-right: 4px"
+              >
+                <CheckmarkCircle />
+              </n-icon>
+              均为社区官方参考实现，首次运行时通过 npx/uvx 自动下载，无需手动准备脚本文件
+            </n-text>
+          </template>
+        </n-card>
 
         <!-- MCP 服务器列表卡片 -->
         <n-card
@@ -363,7 +559,6 @@ const handleToggle = async (serverId: string) => {
           <n-list
             v-if="mcp.servers.length > 0"
             hoverable
-            clickable
           >
             <n-list-item
               v-for="server in mcp.servers"
@@ -430,6 +625,18 @@ const handleToggle = async (serverId: string) => {
                 <!-- 操作按钮区域 -->
                 <template #header-extra>
                   <n-space>
+                    <!-- 测试连接按钮 -->
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      :loading="testingServerId === server.id"
+                      @click.stop="handleTestSavedServer(server)"
+                    >
+                      <template #icon>
+                        <n-icon><Play /></n-icon>
+                      </template>
+                    </n-button>
                     <!-- 启用/禁用切换按钮 -->
                     <n-button
                       quaternary
@@ -552,7 +759,8 @@ const handleToggle = async (serverId: string) => {
       v-model:show="showCreateModal"
       title="添加 MCP 服务"
       preset="card"
-      style="width: 600px"
+      style="width: 600px; max-height: 85vh"
+      :content-style="{ overflowY: 'auto' }"
       :mask-closable="false"
     >
       <n-form
@@ -615,14 +823,14 @@ const handleToggle = async (serverId: string) => {
             >
               <n-input
                 v-model:value="formData.command"
-                placeholder="例如：/path/to/mcp-server 或 python mcp_server.py"
+                placeholder="例如：npx 或 /path/to/mcp-server"
               />
               <template #feedback>
                 <n-text
                   depth="3"
                   style="font-size: 12px"
                 >
-                  完整的启动命令路径或脚本
+                  只填可执行文件本身（如 npx、python、/path/to/binary），不要包含参数或脚本名 -- 脚本名和其余参数请填到下面的"命令参数"里
                 </n-text>
               </template>
             </n-form-item>

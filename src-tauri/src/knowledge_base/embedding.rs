@@ -36,13 +36,17 @@ fn get_embedding_config(provider: &str) -> (&'static str, i32) {
 }
 
 /// 获取 Embedding API 端点 URL
-fn get_embedding_url(provider: &str) -> String {
-    match provider {
-        "openai" => "https://api.openai.com/v1/embeddings".to_string(),
-        "zhipu" => "https://open.bigmodel.cn/api/paas/v4/embeddings".to_string(),
-        "siliconflow" => "https://api.siliconflow.cn/v1/embeddings".to_string(),
-        _ => "https://api.openai.com/v1/embeddings".to_string(),
+///
+/// 直接基于用户配置的 base_url 拼接 `/embeddings`（与 llm.rs::build_url 对
+/// custom/local 提供商的处理方式一致），而不是依赖一份只覆盖 3 个服务商的
+/// 硬编码表 —— 这样能支持设置里任意一个 OpenAI 兼容的 Embedding API 配置，
+/// 而不仅仅是 openai/zhipu/siliconflow
+fn get_embedding_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "https://api.openai.com/v1/embeddings".to_string();
     }
+    format!("{}/embeddings", trimmed)
 }
 
 /// 批量处理的大小限制
@@ -63,27 +67,31 @@ pub async fn generate_embeddings(
     provider: &str,
     api_key: &str,
     model: &str,
+    base_url: &str,
 ) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     let mut all_embeddings = Vec::new();
-    
+
     for chunk in texts.chunks(EMBEDDING_BATCH_SIZE) {
         let batch_embeddings = generate_embeddings_batch(
             chunk.to_vec(),
             provider,
             api_key,
             model,
+            base_url,
         ).await?;
         all_embeddings.extend(batch_embeddings);
-        
+
         if texts.len() > EMBEDDING_BATCH_SIZE {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                crate::commands::constants::EMBEDDING_BATCH_DELAY_MS,
+            )).await;
         }
     }
-    
+
     Ok(all_embeddings)
 }
 
@@ -92,12 +100,13 @@ async fn generate_embeddings_batch(
     provider: &str,
     api_key: &str,
     model: &str,
+    base_url: &str,
 ) -> Result<Vec<Vec<f32>>, KnowledgeBaseError> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    
-    let url = get_embedding_url(provider);
+
+    let url = get_embedding_url(base_url);
     let client = reqwest::Client::new();
     
     // Build request body
@@ -124,17 +133,10 @@ async fn generate_embeddings_batch(
         "application/json".parse().unwrap(),
     );
     
-    if provider == "zhipu" {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", api_key).parse().unwrap(),
-        );
-    } else {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", api_key).parse().unwrap(),
-        );
-    }
+    let auth_value = format!("Bearer {}", api_key.trim())
+        .parse()
+        .map_err(|e| KnowledgeBaseError::EmbeddingError(format!("Invalid API key: {}", e)))?;
+    headers.insert(reqwest::header::AUTHORIZATION, auth_value);
     
     log::info!("Sending embedding request to {} for {} texts", provider, texts.len());
     
@@ -190,8 +192,9 @@ pub async fn generate_single_embedding(
     provider: &str,
     api_key: &str,
     model: &str,
+    base_url: &str,
 ) -> Result<Vec<f32>, KnowledgeBaseError> {
-    let embeddings = generate_embeddings(vec![text.to_string()], provider, api_key, model).await?;
+    let embeddings = generate_embeddings(vec![text.to_string()], provider, api_key, model, base_url).await?;
     embeddings.into_iter().next()
         .ok_or_else(|| KnowledgeBaseError::EmbeddingError("No embedding generated".to_string()))
 }

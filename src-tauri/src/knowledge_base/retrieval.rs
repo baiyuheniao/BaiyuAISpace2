@@ -23,17 +23,18 @@ impl Retriever {
         request: RetrievalRequest,
         embedding_provider: &str,
         embedding_model: &str,
+        embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
         match request.retrieval_mode {
             RetrievalMode::Vector => {
-                self.vector_search(&request, embedding_provider, embedding_model, api_key).await
+                self.vector_search(&request, embedding_provider, embedding_model, embedding_base_url, api_key).await
             }
             RetrievalMode::Keyword => {
                 self.keyword_search(&request).await
             }
             RetrievalMode::Hybrid => {
-                self.hybrid_search(&request, embedding_provider, embedding_model, api_key).await
+                self.hybrid_search(&request, embedding_provider, embedding_model, embedding_base_url, api_key).await
             }
         }
     }
@@ -44,14 +45,16 @@ impl Retriever {
         request: &RetrievalRequest,
         embedding_provider: &str,
         embedding_model: &str,
+        embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
         // Generate query embedding using provided embedding config
         let query_vector = generate_single_embedding(
-            &request.query, 
-            embedding_provider, 
-            api_key, 
-            embedding_model
+            &request.query,
+            embedding_provider,
+            api_key,
+            embedding_model,
+            embedding_base_url,
         ).await?;
         
         // Search vector store
@@ -108,16 +111,17 @@ impl Retriever {
         request: &RetrievalRequest,
         embedding_provider: &str,
         embedding_model: &str,
+        embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
         // Get results from both methods with larger top_k for better fusion
         let mut vector_request = request.clone();
         vector_request.top_k = request.top_k * 2;
-        
+
         let mut keyword_request = request.clone();
         keyword_request.top_k = request.top_k * 2;
-        
-        let vector_result = self.vector_search(&vector_request, embedding_provider, embedding_model, api_key).await?;
+
+        let vector_result = self.vector_search(&vector_request, embedding_provider, embedding_model, embedding_base_url, api_key).await?;
         let keyword_result = self.keyword_search(&keyword_request).await?;
         
         // Merge and rerank using RRF
@@ -151,8 +155,9 @@ impl Retriever {
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
             
             conn.query_row(
-                "SELECT id, name, description, embedding_api_config_id, 
-                 chunk_size, chunk_overlap, created_at, updated_at, document_count 
+                "SELECT id, name, description, embedding_api_config_id,
+                 chunk_size, chunk_overlap, created_at, updated_at, document_count,
+                 COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '')
                  FROM knowledge_bases WHERE id = ?1",
                 [&kb_id],
                 |row| {
@@ -166,6 +171,9 @@ impl Retriever {
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
                         document_count: row.get(8)?,
+                        embedding_provider: row.get(9)?,
+                        embedding_model: row.get(10)?,
+                        embedding_base_url: row.get(11)?,
                     })
                 }
             ).map_err(|e| KnowledgeBaseError::NotFound(format!("Knowledge base not found: {}", e)))
@@ -430,7 +438,7 @@ impl Retriever {
             })
             .collect();
         
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k as usize);
         
         results

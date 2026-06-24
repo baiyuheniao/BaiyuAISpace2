@@ -38,6 +38,9 @@ pub struct KnowledgeBase {
     pub name: String,
     pub description: String,
     pub embedding_api_config_id: String,  // Reference to global embedding config
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_base_url: String,
     pub chunk_size: i32,
     pub chunk_overlap: i32,
     pub created_at: i64,
@@ -123,6 +126,9 @@ pub struct CreateKnowledgeBaseRequest {
     pub name: String,
     pub description: String,
     pub embedding_api_config_id: String,
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_base_url: String,
     pub chunk_size: Option<i32>,     // default: 1000
     pub chunk_overlap: Option<i32>,  // default: 200
 }

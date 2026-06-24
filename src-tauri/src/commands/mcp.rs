@@ -20,9 +20,10 @@
 use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT};
 use crate::db::DbState;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::process::Command;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -285,6 +286,44 @@ fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> 
     Ok(())
 }
 
+/// Resolve a bare command name (e.g. "npx") to a spawnable path on Windows.
+///
+/// `std::process::Command::new` calls `CreateProcessW` directly and does
+/// *not* do the PATHEXT-based extension search a shell does -- so commands
+/// installed as `.cmd`/`.bat` shims (which is how npm installs `npx`/`npm`
+/// themselves on Windows, unlike single-file `.exe` tools such as `node` or
+/// `cargo`) fail to spawn with a plain "program not found" even though the
+/// shim is right there on PATH. Confirmed directly: `Command::new("npx")`
+/// errors with `NotFound` on Windows, while `Command::new("node")` works.
+/// Search PATH for the first matching extension and spawn that exact file
+/// instead. Only applied at the actual spawn call -- `validate_mcp_command`
+/// still checks the original bare name against the allowlist.
+#[cfg(target_os = "windows")]
+fn resolve_windows_command(command: &str) -> String {
+    let path = Path::new(command);
+    // Already has an extension or is a path with a separator: leave as-is.
+    if path.extension().is_some() || command.contains(['/', '\\']) {
+        return command.to_string();
+    }
+
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let dirs = std::env::var("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&dirs) {
+        for ext in pathext.split(';') {
+            let candidate = dir.join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    command.to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_windows_command(command: &str) -> String {
+    command.to_string()
+}
+
 fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -> Result<Vec<MCPTool>, MCPError> {
     let array = result
         .as_array()
@@ -326,7 +365,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
 
     validate_mcp_command(&server.command, &server.args)?;
 
-    let mut child = Command::new(&server.command)
+    let mut child = Command::new(resolve_windows_command(&server.command))
         .args(&server.args)
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
@@ -335,11 +374,11 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         .spawn()
         .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
 
-    // Read stderr in a separate thread to prevent pipe blocking
+    // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stderr".to_string()))?;
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
             log::debug!("[MCP stderr] {}", line);
         }
     });
@@ -348,13 +387,14 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         let mut stdin = child.stdin.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdin".to_string()))?;
         stdin
             .write_all((request_json + "\n").as_bytes())
+            .await
             .map_err(|e| MCPError::CommunicationError(format!("Failed to write to stdin: {}", e)))?;
     }
 
     let stdout = child.stdout.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdout".to_string()))?;
-    let mut reader = BufReader::new(stdout).lines();
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
 
-    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, async { reader.next().transpose() })
+    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| MCPError::CommunicationError("Tool list timeout".to_string()))?
         .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
@@ -363,8 +403,8 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     let response: JsonRpcResponse = serde_json::from_str(&response_line).map_err(MCPError::JsonError)?;
 
     // Ensure the child process is terminated
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 
     if let Some(error) = response.error {
         return Err(MCPError::CommunicationError(format!("MCP error ({}): {}", error.code, error.message)));
@@ -457,11 +497,17 @@ pub async fn get_mcp_tools(
 pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<MCPTool>, MCPError> {
     log::info!("Fetching all available MCP tools");
 
-    let db = state.0.lock().await;
-    let servers = db
-        .get_mcp_servers()
-        .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
-    let enabled_servers: Vec<_> = servers.iter().filter(|s| s.enabled).cloned().collect();
+    // Scoped so the DB lock is released before the loop below calls
+    // get_mcp_tools, which re-locks the same (non-reentrant) tokio Mutex --
+    // holding it across that await would deadlock the whole app the moment
+    // there's at least one enabled server.
+    let enabled_servers: Vec<_> = {
+        let db = state.0.lock().await;
+        let servers = db
+            .get_mcp_servers()
+            .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
+        servers.into_iter().filter(|s| s.enabled).collect()
+    };
 
     let mut all_tools = Vec::new();
     for server in enabled_servers {
@@ -633,7 +679,7 @@ async fn call_mcp_tool_stdio(
     validate_mcp_command(&server.command, &server.args)?;
 
     // Execute the server process
-    let mut child = Command::new(&server.command)
+    let mut child = Command::new(resolve_windows_command(&server.command))
         .args(&server.args)
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
@@ -642,13 +688,13 @@ async fn call_mcp_tool_stdio(
         .spawn()
         .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
 
-    // Read stderr in a separate thread to prevent pipe blocking
+    // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| {
         MCPError::CommunicationError("Failed to open stderr".to_string())
     })?;
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
             log::debug!("[MCP stderr] {}", line);
         }
     });
@@ -661,6 +707,7 @@ async fn call_mcp_tool_stdio(
 
         stdin
             .write_all((request_json + "\n").as_bytes())
+            .await
             .map_err(|e| MCPError::CommunicationError(format!("Failed to write to stdin: {}", e)))?;
     }
 
@@ -669,21 +716,13 @@ async fn call_mcp_tool_stdio(
         MCPError::CommunicationError("Failed to open stdout".to_string())
     })?;
 
-    let reader = BufReader::new(stdout);
-    let mut lines = reader.lines();
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     // Read first line (should be the JSON response)
-    let response_inner = tokio::time::timeout(
-        MCP_STDIO_TIMEOUT,
-        async { lines.next().transpose() },
-    )
-    .await
-    .map_err(|_| MCPError::CommunicationError("Tool execution timeout".to_string()))?;
-
-    let response_option = response_inner
-        .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?;
-
-    let response_line = response_option
+    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
+        .await
+        .map_err(|_| MCPError::CommunicationError("Tool execution timeout".to_string()))?
+        .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
         .ok_or_else(|| MCPError::CommunicationError("No response from MCP server".to_string()))?;
 
     log::debug!("MCP Response: {}", response_line);
@@ -693,8 +732,8 @@ async fn call_mcp_tool_stdio(
         .map_err(|e| MCPError::JsonError(e))?;
 
     // Ensure the child process is terminated
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 
     if let Some(error) = response.error {
         return Err(MCPError::CommunicationError(format!(
@@ -783,32 +822,48 @@ async fn call_mcp_tool_http(
 pub async fn test_mcp_connection(
     server_type: String,
     command: Option<String>,
+    args: Option<Vec<String>>,
     url: Option<String>,
 ) -> Result<bool, MCPError> {
     match server_type.as_str() {
         "stdio" => {
             if let Some(cmd) = command {
-                // Parse command and arguments to avoid shell injection
-                let parts: Vec<&str> = cmd.split_whitespace().collect();
-                if parts.is_empty() {
+                let executable = cmd.trim();
+                if executable.is_empty() {
                     return Err(MCPError::InvalidConfig("stdio requires a non-empty command".to_string()));
                 }
-
-                let executable = parts[0];
-                let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+                let args = args.unwrap_or_default();
 
                 // Validate against command whitelist and dangerous patterns
                 validate_mcp_command(executable, &args)?;
 
-                // Execute directly without shell to prevent injection
-                let output = Command::new(executable)
-                    .args(&args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .map_err(|e| MCPError::LaunchError(e.to_string()))?;
+                // A stdio MCP server is a long-running process that never exits on
+                // its own, so waiting for it to terminate (as `.output()` does)
+                // would hang forever. Instead, probe it with a real tools/list
+                // JSON-RPC request, the same way `call_mcp_tools_stdio` does.
+                //
+                // `command`/`args` are kept as two separate fields here -- matching
+                // exactly how `call_mcp_tools_stdio` spawns the real saved server
+                // (`Command::new(&server.command).args(&server.args)`, no shell
+                // parsing) -- so a passing test here means the real launch will
+                // behave the same way.
+                let probe_server = MCPServer {
+                    id: String::new(),
+                    name: String::new(),
+                    description: String::new(),
+                    server_type: MCPServerType::Stdio,
+                    command: executable.to_string(),
+                    args,
+                    env: HashMap::new(),
+                    port: None,
+                    url: None,
+                    api_key: None,
+                    enabled: true,
+                    created_at: 0,
+                    updated_at: 0,
+                };
 
-                Ok(output.status.success())
+                Ok(call_mcp_tools_stdio(&probe_server).await.is_ok())
             } else {
                 Err(MCPError::InvalidConfig("stdio requires command".to_string()))
             }

@@ -9,10 +9,9 @@
   - 应用主布局结构 (左侧边栏 + 主内容区)
   - 导航菜单
   - 新建对话按钮
-  - 用户信息展示
-  
+
   组成部分:
-  - 左侧边栏 (n-layout-sider): 包含 logo、导航菜单、用户信息
+  - 左侧边栏 (n-layout-sider): 包含 logo、导航菜单
   - 主内容区 (n-layout): 显示路由视图
 -->
 
@@ -34,7 +33,7 @@ import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
 
 // 导入图标
-import { Chatbubbles, Time, Settings, Library, Cube } from "@vicons/ionicons5";
+import { Chatbubbles, Time, Settings, Library, Cube, HardwareChipOutline, ExtensionPuzzleOutline } from "@vicons/ionicons5";
 
 // 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
@@ -64,6 +63,11 @@ const menuOptions: MenuOption[] = [
     icon: () => h(Chatbubbles),
   },
   {
+    label: "Skill",
+    key: "Skills",
+    icon: () => h(ExtensionPuzzleOutline),
+  },
+  {
     label: "RAG/知识库",
     key: "KnowledgeBase",
     icon: () => h(Library),
@@ -72,6 +76,11 @@ const menuOptions: MenuOption[] = [
     label: "MCP/模型工具",
     key: "MCP",
     icon: () => h(Cube),
+  },
+  {
+    label: "本地部署",
+    key: "LocalDeploy",
+    icon: () => h(HardwareChipOutline),
   },
   {
     label: "History/历史记录",
@@ -155,33 +164,6 @@ const handleNewChat = () => {
             @update:value="handleMenuUpdate"
           />
         </div>
-
-        <!-- Bottom Actions -->
-        <div class="bottom-section">
-          <!-- User Info at bottom -->
-          <div class="user-info">
-            <n-avatar
-              round
-              :size="32"
-              class="user-avatar"
-            >
-              <n-icon :size="18">
-                <Settings />
-              </n-icon>
-            </n-avatar>
-            <div class="user-text">
-              <n-text strong>
-                用户
-              </n-text>
-              <n-text
-                depth="3"
-                class="user-status"
-              >
-                在线
-              </n-text>
-            </div>
-          </div>
-        </div>
       </div>
     </n-layout-sider>
 
@@ -261,43 +243,6 @@ const handleNewChat = () => {
 .menu-section {
   flex: 1;
   overflow: auto;
-}
-
-.bottom-section {
-  margin-top: auto;
-  padding-top: 16px;
-  border-top: 1px solid var(--n-border-color);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: $radius-lg;
-  background: var(--n-color-embed);
-  transition: background 0.2s;
-}
-
-.user-info:hover {
-  background: var(--n-hover-color);
-}
-
-.user-avatar {
-  background: #000000;
-}
-
-.user-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.user-status {
-  font-size: 12px;
 }
 
 .main-layout {

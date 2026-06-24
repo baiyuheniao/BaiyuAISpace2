@@ -19,15 +19,19 @@
 import { ref, computed, onMounted } from "vue";
 
 // 导入 NaiveUI 组件
-import { 
-  NButton, 
-  NIcon, 
-  NSpace, 
-  NText, 
-  NTooltip, 
+import {
+  NButton,
+  NIcon,
+  NSpace,
+  NText,
+  NTooltip,
   NSelect,
   NBadge,
   NTag,
+  NCheckbox,
+  NCheckboxGroup,
+  NSwitch,
+  NDivider,
   useNotification,
 } from "naive-ui";
 
@@ -36,15 +40,17 @@ import { useChatStore } from "@/stores/chat";
 import { useSettingsStore, PRESET_PROVIDERS } from "@/stores/settings";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
 import { useMCPStore } from "@/stores/mcp";
+import { useSkillsStore } from "@/stores/skills";
 
 // 导入图标
-import { 
-  Send, 
-  Library, 
-  Close, 
+import {
+  Send,
+  Library,
+  Close,
   ServerOutline,
   ChevronDown,
   Cube,
+  ExtensionPuzzleOutline,
 } from "@vicons/ionicons5";
 
 // ============ Store 实例 ============
@@ -53,6 +59,7 @@ const chat = useChatStore();
 const settings = useSettingsStore();
 const kbStore = useKnowledgeBaseStore();
 const mcp = useMCPStore();
+const skillsStore = useSkillsStore();
 
 // 通知组件
 const notification = useNotification();
@@ -76,6 +83,9 @@ const showRagSelector = ref(false);
 
 // 是否显示 API 配置选择器
 const showApiSelector = ref(false);
+
+// 是否显示 Skill 选择器
+const showSkillSelector = ref(false);
 
 // ============ 计算属性 ============
 
@@ -127,6 +137,18 @@ const availableMcpToolsCount = computed(() => {
   return mcp.availableTools.length;
 });
 
+// 已启用的 Skill 选项 (用于多选列表)
+const skillCheckboxOptions = computed(() =>
+  skillsStore.enabledSkills.map((s) => ({ label: s.name, value: s.id, description: s.description }))
+);
+
+// 当前手动激活的 Skill 名称列表
+const activeSkillNames = computed(() =>
+  chat.activeSkillIds
+    .map((id) => skillsStore.skills.find((s) => s.id === id)?.name)
+    .filter((name): name is string => Boolean(name))
+);
+
 // 可用的知识库数量
 const availableKbCount = computed(() => {
   return kbStore.knowledgeBases.length;
@@ -138,6 +160,7 @@ const availableKbCount = computed(() => {
 onMounted(() => {
   kbStore.loadKnowledgeBases();
   mcp.loadServers();
+  skillsStore.loadSkills();
 });
 
 // ============ 方法函数 ============
@@ -377,6 +400,32 @@ const getFileDisplayName = (file: File): string => {
       </n-tag>
     </div>
 
+    <!-- Skill Indicator -->
+    <div
+      v-if="activeSkillNames.length > 0 || chat.skillAutonomyEnabled"
+      class="skill-indicator"
+    >
+      <n-tag
+        v-if="activeSkillNames.length > 0"
+        type="info"
+        size="small"
+        closable
+        @close="chat.activeSkillIds = []"
+      >
+        <template #icon>
+          <n-icon><ExtensionPuzzleOutline /></n-icon>
+        </template>
+        Skill: {{ activeSkillNames.join('、') }}
+      </n-tag>
+      <n-tag
+        v-if="chat.skillAutonomyEnabled"
+        type="default"
+        size="small"
+      >
+        模型可自主调用 Skill
+      </n-tag>
+    </div>
+
     <div class="input-container">
       <div class="input-box">
         <textarea
@@ -494,6 +543,35 @@ const getFileDisplayName = (file: File): string => {
             </n-button>
           </template>
           {{ availableKbCount === 0 ? '无可用知识库' : chat.ragEnabled ? '更改知识库' : '启用知识库' }}
+        </n-tooltip>
+
+        <!-- Skill Selector -->
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="large"
+              :type="activeSkillNames.length > 0 || chat.skillAutonomyEnabled ? 'info' : 'default'"
+              :disabled="skillsStore.enabledSkills.length === 0"
+              class="skill-btn"
+              @click="showSkillSelector = !showSkillSelector"
+            >
+              <template #icon>
+                <n-badge
+                  v-if="activeSkillNames.length > 0"
+                  :value="activeSkillNames.length"
+                  color="info"
+                >
+                  <n-icon><ExtensionPuzzleOutline /></n-icon>
+                </n-badge>
+                <n-icon v-else>
+                  <ExtensionPuzzleOutline />
+                </n-icon>
+              </template>
+            </n-button>
+          </template>
+          {{ skillsStore.enabledSkills.length === 0 ? '无可用 Skill' : 'Skill' }}
         </n-tooltip>
 
         <!-- Send/Stop Button -->
@@ -645,6 +723,55 @@ const getFileDisplayName = (file: File): string => {
       </n-text>
     </div>
 
+    <!-- Skill Selector Popover -->
+    <div
+      v-if="showSkillSelector"
+      class="selector-popover skill-selector"
+    >
+      <div class="selector-header">
+        <n-text strong>
+          选择 Skill
+        </n-text>
+        <n-button
+          quaternary
+          circle
+          size="small"
+          @click="showSkillSelector = false"
+        >
+          <template #icon>
+            <n-icon><Close /></n-icon>
+          </template>
+        </n-button>
+      </div>
+
+      <n-checkbox-group v-model:value="chat.activeSkillIds">
+        <n-space vertical :size="8">
+          <n-checkbox
+            v-for="option in skillCheckboxOptions"
+            :key="option.value"
+            :value="option.value"
+            :label="option.label"
+          />
+        </n-space>
+      </n-checkbox-group>
+      <n-text
+        v-if="skillCheckboxOptions.length === 0"
+        depth="3"
+        class="selector-hint"
+      >
+        暂无已启用的 Skill，请前往 Skill 页面创建
+      </n-text>
+
+      <n-divider style="margin: 12px 0;" />
+
+      <n-space align="center" justify="space-between">
+        <n-text depth="3" style="font-size: 13px;">
+          允许模型自主判断调用其它已启用的 Skill
+        </n-text>
+        <n-switch v-model:value="chat.skillAutonomyEnabled" size="small" />
+      </n-space>
+    </div>
+
     <div class="input-footer">
       <n-space
         align="center"
@@ -748,6 +875,21 @@ const getFileDisplayName = (file: File): string => {
   background: rgba(0, 0, 0, 0.05);
 }
 
+.skill-indicator {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.skill-btn {
+  transition: all 0.2s;
+}
+
+.skill-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+}
+
 .input-container {
   display: flex;
   gap: 12px;
@@ -843,6 +985,10 @@ const getFileDisplayName = (file: File): string => {
 }
 
 .rag-selector {
+  z-index: 100;
+}
+
+.skill-selector {
   z-index: 100;
 }
 

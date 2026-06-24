@@ -32,7 +32,10 @@ export interface KnowledgeBase {
   name: string;                    // 知识库名称
   description: string;             // 知识库描述
   embedding_api_config_id: string; // 关联的 Embedding API 配置 ID
-  chunk_size: number;              // 文本分块大小 (token 数)
+  embedding_provider: string;      // Embedding 服务商 (创建时从配置中快照)
+  embedding_model: string;         // Embedding 模型名称 (创建时从配置中快照)
+  embedding_base_url: string;      // Embedding API Base URL (创建时从配置中快照)
+  chunk_size: number;              // 文本分块大小 (字符数)
   chunk_overlap: number;           // 分块重叠大小
   created_at: number;              // 创建时间戳
   updated_at: number;              // 更新时间戳
@@ -106,6 +109,9 @@ export interface CreateKnowledgeBaseRequest {
   name: string;                   // 知识库名称
   description: string;            // 知识库描述
   embedding_api_config_id: string; // Embedding API 配置 ID
+  embedding_provider: string;     // Embedding 服务商 (从选中的配置中取出)
+  embedding_model: string;        // Embedding 模型名称 (从选中的配置中取出)
+  embedding_base_url: string;     // Embedding API Base URL (从选中的配置中取出)
   chunk_size?: number;           // 分块大小 (可选)
   chunk_overlap?: number;        // 分块重叠 (可选)
 }

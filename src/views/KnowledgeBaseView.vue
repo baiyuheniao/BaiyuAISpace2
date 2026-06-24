@@ -54,6 +54,7 @@ import {
   NCard,
   NDescriptions,
   NDescriptionsItem,
+  NAlert,
   useMessage,
 } from "naive-ui";
 import {
@@ -111,15 +112,13 @@ const createForm = ref({
  * 从设置 Store 获取可用的 Embedding 配置列表
  */
 const embeddingApiConfigOptions = computed(() => {
-  return [
-    // 默认空选项
-    { label: "请选择 Embedding API 配置", value: "" },
-    // 映射已有配置为选项格式
-    ...settingsStore.embeddingApiConfigs.map(config => ({
-      label: `${config.name} (${config.model})`,
-      value: config.id,
-    }))
-  ];
+  // 不在此处插入占位选项 —— n-select 自带 placeholder 属性即可显示
+  // 未选择状态；若把占位项塞进 options，由于其 value 为空字符串，会和
+  // 初始空值匹配上，导致下拉列表里出现一个被打勾选中的假选项
+  return settingsStore.embeddingApiConfigs.map(config => ({
+    label: `${config.name} (${config.model})`,
+    value: config.id,
+  }));
 });
 
 /**
@@ -159,13 +158,26 @@ const handleCreate = async () => {
     return;
   }
 
+  // 取出选中的 Embedding API 配置，把服务商/模型/Base URL 快照到知识库上，
+  // 这样导入文档和检索时才会真正使用用户选择的服务商，而不是固定写死成 OpenAI
+  const embeddingConfig = settingsStore.embeddingApiConfigs.find(
+    c => c.id === createForm.value.embeddingApiConfigId
+  );
+  if (!embeddingConfig) {
+    message.error("选中的 Embedding API 配置不存在，请重新选择");
+    return;
+  }
+
   creating.value = true;
-  
+
   // 调用 Store 方法创建知识库
   const result = await kbStore.createKnowledgeBase({
     name: createForm.value.name,
     description: createForm.value.description,
     embedding_api_config_id: createForm.value.embeddingApiConfigId,
+    embedding_provider: embeddingConfig.provider,
+    embedding_model: embeddingConfig.model,
+    embedding_base_url: embeddingConfig.baseUrl,
     chunk_size: createForm.value.chunk_size,
     chunk_overlap: createForm.value.chunk_overlap,
   });
@@ -271,14 +283,6 @@ const handleDeleteDoc = async (doc: Document) => {
   } else {
     message.error("删除失败");
   }
-};
-
-/**
- * 更新检索设置
- * 目前仅提示保存成功 (设置会自动保存到 Store)
- */
-const handleUpdateSettings = () => {
-  message.success("设置已保存");
 };
 
 /**
@@ -657,6 +661,13 @@ const getStatusTag = (status: Document["status"]) => {
           title="检索设置"
           class="settings-card"
         >
+          <n-alert
+            type="info"
+            :show-icon="true"
+            style="margin-bottom: 16px;"
+          >
+            以下检索参数为全局设置，会应用于你检索的每一个知识库，并非仅对当前知识库生效
+          </n-alert>
           <n-form
             label-placement="left"
             label-width="120px"
@@ -686,40 +697,40 @@ const getStatusTag = (status: Document["status"]) => {
 
             <!-- 返回数量 (Top-K) -->
             <n-form-item label="返回数量 (Top-K)">
-              <n-slider
-                v-model:value="kbStore.retrievalSettings.topK"
-                :min="1"
-                :max="20"
-                :step="1"
-                show-tooltip
-              />
-              <n-text depth="3">
-                {{ kbStore.retrievalSettings.topK }} 个结果
-              </n-text>
+              <div class="slider-row">
+                <n-slider
+                  v-model:value="kbStore.retrievalSettings.topK"
+                  :min="1"
+                  :max="20"
+                  :step="1"
+                  show-tooltip
+                />
+                <n-text
+                  depth="3"
+                  class="slider-value"
+                >
+                  {{ kbStore.retrievalSettings.topK }} 个结果
+                </n-text>
+              </div>
             </n-form-item>
 
             <!-- 相似度阈值 -->
             <n-form-item label="相似度阈值">
-              <n-slider
-                v-model:value="kbStore.retrievalSettings.similarityThreshold"
-                :min="0"
-                :max="1"
-                :step="0.05"
-                show-tooltip
-              />
-              <n-text depth="3">
-                {{ kbStore.retrievalSettings.similarityThreshold }}
-              </n-text>
-            </n-form-item>
-
-            <!-- 保存按钮 -->
-            <n-form-item>
-              <n-button
-                type="primary"
-                @click="handleUpdateSettings"
-              >
-                保存设置
-              </n-button>
+              <div class="slider-row">
+                <n-slider
+                  v-model:value="kbStore.retrievalSettings.similarityThreshold"
+                  :min="0"
+                  :max="1"
+                  :step="0.05"
+                  show-tooltip
+                />
+                <n-text
+                  depth="3"
+                  class="slider-value"
+                >
+                  {{ kbStore.retrievalSettings.similarityThreshold }}
+                </n-text>
+              </div>
             </n-form-item>
           </n-form>
         </n-card>
@@ -764,7 +775,17 @@ const getStatusTag = (status: Document["status"]) => {
       v-else
       :native-scrollbar="false"
       class="kb-empty-content"
-    />
+    >
+      <div class="kb-empty-state">
+        <n-empty description="请从左侧选择一个知识库">
+          <template #icon>
+            <n-icon :size="48">
+              <Library />
+            </n-icon>
+          </template>
+        </n-empty>
+      </div>
+    </n-layout-content>
   </n-layout>
 
   <!-- 新建知识库弹窗 -->
@@ -772,12 +793,12 @@ const getStatusTag = (status: Document["status"]) => {
     v-model:show="showCreateModal"
     title="创建知识库"
     preset="card"
-    style="width: 500px"
+    style="width: 540px"
     :mask-closable="false"
   >
     <n-form
       label-placement="left"
-      label-width="100px"
+      label-width="150px"
     >
       <!-- 名称 -->
       <n-form-item
@@ -927,5 +948,117 @@ const getStatusTag = (status: Document["status"]) => {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+
+/* 知识库项元信息标签 —— Embedding 配置名可能很长（用户自定义名称 + 模型名），
+   弹性容器默认不会收缩到比内容更窄，必须显式 min-width: 0 才能让省略号截断
+   生效，否则标签会把侧边栏卡片撑出一条水平滚动条 */
+:deep(.n-list-item .n-thing-main),
+:deep(.n-list-item .n-space),
+:deep(.n-list-item .n-space-item) {
+  min-width: 0;
+}
+
+:deep(.n-list-item .n-tag) {
+  max-width: 100%;
+  min-width: 0;
+}
+
+:deep(.n-list-item .n-tag .n-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* 详情页主内容区 —— 之前没有任何 padding，面包屑/返回按钮直接贴着布局
+   容器的边缘，标签页按钮和下面的内容区之间也没有间距，显得很挤 */
+.kb-detail {
+  height: 100%;
+}
+
+:deep(.kb-detail .n-scrollbar-content) {
+  padding: 24px 32px;
+}
+
+/* 详情页头部：面包屑导航 + 标签页切换按钮，两行之间留出间距 */
+.kb-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+/* 文档标签页 */
+.kb-documents-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.kb-documents-empty {
+  padding: 60px 20px;
+}
+
+/* 检索设置标签页：两张卡片之间留出间距 */
+.kb-settings .settings-card {
+  margin-bottom: 20px;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+/* 检索模式单选项：标签和说明文字分两行展示 */
+.radio-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.radio-label {
+  font-size: 14px;
+}
+
+.radio-desc {
+  font-size: 12px;
+}
+
+/* 未选中知识库时的空状态占位区域
+   n-layout-content 在 native-scrollbar=false 时会把 slot 内容包进自己的
+   滚动容器 div 里，直接在 n-layout-content 根节点上 flex 居中不会影响到
+   被包了一层的子内容，所以改成给 slot 内部自己的 wrapper 设置高度 + 居中 */
+.kb-empty-content :deep(.n-scrollbar-content) {
+  height: 100%;
+}
+
+.kb-empty-state {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 检索设置标签页里 Top-K / 相似度阈值 两个滑块后面跟着一段数值文字。
+   n-form-item-blank 默认就是 flex 布局，n-slider 和 n-text 各自占等分空间，
+   而 n-slider 自身不会收缩，导致数值文字被挤到几乎零宽度的空间里，
+   逐字换行（例如 "5 个结果" 拆成两行）。这里显式让滑块占满剩余空间，
+   数值文字不参与收缩，两者之间留出固定间距 */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.slider-row .n-slider {
+  flex: 1;
+  min-width: 0;
+}
+
+.slider-value {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 </style>

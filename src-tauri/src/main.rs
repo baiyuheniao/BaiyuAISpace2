@@ -176,6 +176,19 @@ fn main() {
             commands::local_model::install_ollama,
             commands::local_model::search_ollama_models,
             commands::local_model::get_ollama_download_mirrors_cmd,
+            // LM Studio commands
+            commands::lmstudio::check_lmstudio_status,
+            commands::lmstudio::list_lmstudio_models,
+            commands::lmstudio::pull_lmstudio_model,
+            commands::lmstudio::load_lmstudio_model,
+            commands::lmstudio::unload_lmstudio_model,
+            // Skill commands
+            commands::skills::save_skill,
+            commands::skills::list_skills,
+            commands::skills::delete_skill,
+            commands::skills::add_skill_resource_file,
+            commands::skills::remove_skill_resource_file,
+            commands::skills::read_skill_resource_file,
             // 日志相关命令
             get_log_path,
             read_log_file,

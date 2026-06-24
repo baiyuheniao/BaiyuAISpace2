@@ -127,7 +127,7 @@ export const useMCPStore = defineStore("mcp", () => {
   const loadServerTools = async (serverId: string) => {
     try {
       const serverTools = await invoke<MCPTool[]>("get_mcp_tools", {
-        server_id: serverId,
+        serverId,
       });
       // Filter and merge with existing tools
       tools.value = tools.value.filter((t) => t.server_id !== serverId);
@@ -198,16 +198,12 @@ export const useMCPStore = defineStore("mcp", () => {
 
   // Delete a MCP server
   const deleteServer = async (serverId: string): Promise<void> => {
-    try {
-      await invoke("delete_mcp_server", { server_id: serverId });
-      servers.value = servers.value.filter((s) => s.id !== serverId);
-      tools.value = tools.value.filter((t) => t.server_id !== serverId);
+    await invoke("delete_mcp_server", { serverId });
+    servers.value = servers.value.filter((s) => s.id !== serverId);
+    tools.value = tools.value.filter((t) => t.server_id !== serverId);
 
-      if (selectedServerId.value === serverId) {
-        selectedServerId.value = null;
-      }
-    } catch (error) {
-      console.error("Failed to delete MCP server:", error);
+    if (selectedServerId.value === serverId) {
+      selectedServerId.value = null;
     }
   };
 
@@ -225,12 +221,14 @@ export const useMCPStore = defineStore("mcp", () => {
     input: Record<string, any>
   ): Promise<MCPToolResult | null> => {
     try {
-      const result = await invoke<MCPToolResult>("call_mcp_tool", {
-        server_id: serverId,
-        tool_name: toolName,
+      // 后端返回的是工具调用的原始结果（serde_json::Value），
+      // 这里包装成 MCPToolResult 形状以符合本函数的返回值约定
+      const result = await invoke<Record<string, any>>("call_mcp_tool", {
+        serverId,
+        toolName,
         input,
       });
-      return result;
+      return { tool_name: toolName, result };
     } catch (error) {
       console.error("Failed to call MCP tool:", error);
     }
@@ -241,12 +239,14 @@ export const useMCPStore = defineStore("mcp", () => {
   const testConnection = async (
     serverType: string,
     command?: string,
+    args?: string[],
     url?: string
   ): Promise<boolean> => {
     try {
       return await invoke<boolean>("test_mcp_connection", {
-        server_type: serverType,
+        serverType,
         command,
+        args,
         url,
       });
     } catch (error) {

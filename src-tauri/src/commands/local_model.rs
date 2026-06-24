@@ -16,6 +16,17 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 use once_cell::sync::Lazy;
 
+/// Prevent the console window that Windows would otherwise briefly flash
+/// when spawning a console subprocess (e.g. `ollama.exe`) from this GUI app.
+pub(crate) fn hide_console_window(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 // ============ Types ============
 
 /// Information about a locally available model from Ollama
@@ -601,11 +612,10 @@ pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
     for path in &search_paths {
         // For PATH-based lookup (just "ollama" or "ollama.exe"), use `which`
         if path.parent().is_none() || path.as_os_str() == "ollama" || path.as_os_str() == "ollama.exe" {
-            if let Ok(output) = tokio::process::Command::new("ollama")
-                .arg("--version")
-                .output()
-                .await
-            {
+            let mut cmd = tokio::process::Command::new("ollama");
+            cmd.arg("--version");
+            hide_console_window(&mut cmd);
+            if let Ok(output) = cmd.output().await {
                 if output.status.success() {
                     let version_str = parse_ollama_version(&String::from_utf8_lossy(&output.stdout));
                     return Ok(OllamaInstallInfo {
@@ -621,8 +631,10 @@ pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
         // For absolute paths, check if file exists
         if path.exists() {
             // Try to get version
-            let version = tokio::process::Command::new(path)
-                .arg("--version")
+            let mut cmd = tokio::process::Command::new(path);
+            cmd.arg("--version");
+            hide_console_window(&mut cmd);
+            let version = cmd
                 .output()
                 .await
                 .ok()
@@ -676,10 +688,12 @@ pub async fn start_ollama_service(
     let ollama_path = install_info.install_path.ok_or("Cannot find Ollama executable")?;
 
     // Start ollama serve in background
-    let child = tokio::process::Command::new(&ollama_path)
-        .arg("serve")
+    let mut cmd = tokio::process::Command::new(&ollama_path);
+    cmd.arg("serve")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start Ollama service: {}", e))?;
 
@@ -728,7 +742,7 @@ pub async fn start_ollama_service(
 /// Stop the Ollama service process managed by our application
 #[tauri::command]
 pub async fn stop_ollama_service() -> Result<(), String> {
-    let mut child = {
+    let child = {
         let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
         proc.take()
     };

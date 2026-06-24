@@ -74,7 +74,7 @@ export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }>
   },
   minimax: {
     name: "MiniMax",
-    baseUrl: "https://api.minimax.chat/v1",
+    baseUrl: "https://api.minimax.io/v1",
   },
   yi: {
     name: "零一万物 (Yi)",

@@ -123,6 +123,12 @@ export const useChatStore = defineStore("chat", () => {
   /** MCP (Model Context Protocol) 是否启用 */
   const mcpEnabled = ref(false);
 
+  /** 手动激活的 Skill ID 列表 */
+  const activeSkillIds = ref<string[]>([]);
+
+  /** 是否允许模型自主判断调用其它已启用的 Skill */
+  const skillAutonomyEnabled = ref(false);
+
   // ============ 会话管理函数 ============
 
   /**
@@ -439,7 +445,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       // 调用后端 MCP 命令执行工具
       const result = await invoke<any>("call_mcp_tool", {
-        tool_name: toolName,
+        toolName,
         input: toolInput,
       });
 
@@ -647,6 +653,8 @@ export const useChatStore = defineStore("chat", () => {
         apiKey: config.apiKey,
         baseUrl: config.baseUrl,
         enableMcp: mcpEnabled.value,
+        activeSkillIds: activeSkillIds.value,
+        enableSkillAutonomy: skillAutonomyEnabled.value,
       } as const;
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
@@ -803,6 +811,18 @@ ${toolDefs}
   };
 
   /**
+   * 切换某个 Skill 的手动激活状态
+   */
+  const toggleSkillActive = (skillId: string) => {
+    const idx = activeSkillIds.value.indexOf(skillId);
+    if (idx === -1) {
+      activeSkillIds.value.push(skillId);
+    } else {
+      activeSkillIds.value.splice(idx, 1);
+    }
+  };
+
+  /**
    * 删除会话
    * 
    * @param sessionId - 要删除的会话 ID
@@ -875,13 +895,16 @@ ${toolDefs}
     selectedKnowledgeBaseId,
     lastRetrievalResult,
     mcpEnabled,
-    
+    activeSkillIds,
+    skillAutonomyEnabled,
+
     // 方法
     createSession,           // 创建新会话
     loadSession,             // 加载会话
     sendMessage,             // 发送消息
     deleteSession,           // 删除会话
     clearSession,            // 清除当前会话
+    toggleSkillActive,       // 切换 Skill 手动激活状态
     loadSessionsFromDb,      // 加载会话列表
     toggleRag,               // 切换 RAG
     selectKnowledgeBaseForRag,  // 选择知识库

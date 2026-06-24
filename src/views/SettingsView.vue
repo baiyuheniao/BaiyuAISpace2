@@ -1726,7 +1726,7 @@ onMounted(async () => {
     >
       <n-form
         label-placement="left"
-        label-width="100px"
+        label-width="140px"
       >
         <n-form-item
           label="配置名称"
@@ -1824,7 +1824,7 @@ onMounted(async () => {
     >
       <n-form
         label-placement="left"
-        label-width="100px"
+        label-width="140px"
       >
         <n-form-item
           label="配置名称"

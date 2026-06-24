@@ -13,6 +13,7 @@
  */
 
 use super::types::*;
+use crate::commands::local_model::hide_console_window;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -101,10 +102,10 @@ async fn parse_pdf(file_path: &str) -> Result<String, KnowledgeBaseError> {
     // Since pdf-extract has dependency issues, we'll use a placeholder
     
     // Try to use external pdftotext if available
-    let output = tokio::process::Command::new("pdftotext")
-        .args(["-layout", file_path, "-"])
-        .output()
-        .await;
+    let mut cmd = tokio::process::Command::new("pdftotext");
+    cmd.args(["-layout", file_path, "-"]);
+    hide_console_window(&mut cmd);
+    let output = cmd.output().await;
     
     match output {
         Ok(result) if result.status.success() => {
@@ -355,20 +356,74 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
     Ok(format!("{:x}", hash))
 }
 
+/// Returns the largest byte index <= `index` that lies on a UTF-8 char
+/// boundary of `s`. Byte offsets computed from `chunk_size`/`chunk_overlap`
+/// (character counts in the UI, but byte counts here) do not generally land
+/// on a char boundary for multi-byte text such as Chinese, so any direct
+/// `s[idx..]` slice using a raw offset must first be snapped with this.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    let mut idx = index.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Hard-split text into chunks without ever cutting a UTF-8 character in
+/// half. Boundaries are derived from `char_indices()` rather than raw byte
+/// arithmetic, since `chunk_size`/`chunk_overlap` are unlikely to be
+/// multiples of a multi-byte character's encoded length.
+fn hard_split_by_chars(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let step = chunk_size.saturating_sub(chunk_overlap).max(1);
+    let mut result = Vec::new();
+    let mut start = 0usize; // index into `chars`
+
+    while start < chars.len() {
+        let start_byte = chars[start].0;
+        let mut end = start;
+        while end < chars.len() && chars[end].0 - start_byte < chunk_size {
+            end += 1;
+        }
+        if end == start {
+            end = start + 1; // always make progress, even if chunk_size is tiny
+        }
+        let end_byte = chars.get(end).map(|&(b, _)| b).unwrap_or(text.len());
+        result.push(text[start_byte..end_byte].to_string());
+
+        if end >= chars.len() {
+            break;
+        }
+
+        // Advance start by `step` bytes' worth of characters
+        let mut next = start;
+        while next < chars.len() && chars[next].0 - start_byte < step {
+            next += 1;
+        }
+        start = next.max(start + 1);
+    }
+
+    result
+}
+
 /// Split text into chunks
 pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
     let mut chunks = Vec::new();
-    
+
     // Try to split at paragraph boundaries first
     let paragraphs: Vec<&str> = text.split("\n\n").collect();
     let mut current_chunk = String::new();
-    
+
     for para in paragraphs {
         if current_chunk.len() + para.len() > chunk_size && !current_chunk.is_empty() {
             chunks.push(current_chunk.clone());
-            // Keep overlap
+            // Keep overlap (snapped to a char boundary -- see floor_char_boundary)
             let overlap_start = if current_chunk.len() > chunk_overlap {
-                current_chunk.len() - chunk_overlap
+                floor_char_boundary(&current_chunk, current_chunk.len() - chunk_overlap)
             } else {
                 0
             };
@@ -411,22 +466,16 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
         }
     }
     
-    // Final fallback: hard split if still too large
+    // Final fallback: hard split if still too large (char-boundary safe)
     let mut result = Vec::new();
     for chunk in final_chunks {
         if chunk.len() > chunk_size * 2 {
-            for i in (0..chunk.len()).step_by(chunk_size - chunk_overlap) {
-                let end = (i + chunk_size).min(chunk.len());
-                result.push(chunk[i..end].to_string());
-                if end == chunk.len() {
-                    break;
-                }
-            }
+            result.extend(hard_split_by_chars(&chunk, chunk_size, chunk_overlap));
         } else {
             result.push(chunk);
         }
     }
-    
+
     result
 }
 

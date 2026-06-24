@@ -13,6 +13,8 @@
  * - /: 聊天页面 (ChatView)
  * - /knowledge-base: 知识库页面 (KnowledgeBaseView)
  * - /mcp: MCP 管理页面 (MCPView)
+ * - /skills: Skill 管理页面 (SkillsView)
+ * - /local-deploy: 本地部署页面 (LocalDeployView)
  * - /history: 历史记录页面 (HistoryView)
  * - /settings: 设置页面 (SettingsView)
  */
@@ -36,6 +38,16 @@ const routes: RouteRecordRaw[] = [
     path: "/mcp",
     name: "MCP",
     component: () => import("@/views/MCPView.vue"),
+  },
+  {
+    path: "/skills",
+    name: "Skills",
+    component: () => import("@/views/SkillsView.vue"),
+  },
+  {
+    path: "/local-deploy",
+    name: "LocalDeploy",
+    component: () => import("@/views/LocalDeployView.vue"),
   },
   {
     path: "/history",
