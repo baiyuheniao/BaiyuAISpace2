@@ -237,6 +237,18 @@ const handleInput = () => {
   }
 };
 
+// 打开/关闭知识库选择器
+// 由于路由用了 <keep-alive>，ChatView 只会在第一次访问时触发 onMounted，
+// 之后 kbStore.knowledgeBases 就不会再自动刷新——如果用户是在知识库页面
+// 导入完文档后切回 Chat，这里看到的文档数会是切页面之前的旧值。每次打开
+// 选择器时主动刷新一次，确保看到的知识库列表/文档数是最新的
+const handleToggleRagSelector = () => {
+  showRagSelector.value = !showRagSelector.value;
+  if (showRagSelector.value) {
+    kbStore.loadKnowledgeBases();
+  }
+};
+
 // 知识库选择变化处理
 const handleKbChange = (value: string) => {
   if (value === "") {
@@ -526,7 +538,7 @@ const getFileDisplayName = (file: File): string => {
               :type="chat.ragEnabled ? 'success' : 'default'"
               :disabled="availableKbCount === 0"
               class="rag-btn"
-              @click="showRagSelector = !showRagSelector"
+              @click="handleToggleRagSelector"
             >
               <template #icon>
                 <n-badge

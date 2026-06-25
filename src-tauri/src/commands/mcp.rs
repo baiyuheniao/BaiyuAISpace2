@@ -379,7 +379,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         .stderr(Stdio::piped())
         .envs(&server.env)
         .spawn()
-        .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
+        .map_err(|e| MCPError::LaunchError(e.to_string()))?;
 
     // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stderr".to_string()))?;
@@ -693,7 +693,7 @@ async fn call_mcp_tool_stdio(
         .stderr(Stdio::piped())
         .envs(&server.env)
         .spawn()
-        .map_err(|e| MCPError::LaunchError(format!("Failed to launch MCP server: {}", e)))?;
+        .map_err(|e| MCPError::LaunchError(e.to_string()))?;
 
     // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| {

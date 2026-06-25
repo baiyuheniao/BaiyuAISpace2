@@ -91,6 +91,137 @@ Agent Team Mode 是 BaiyuAISpace2 的一种工作模式。在该模式下，Baiy
 
 ---
 
+## 核心设计决策
+
+### 1. 会议中 Agent 卡死处理机制
+
+**问题**：单个 Agent 在会议发言环节卡住（Token 流停止），会导致整个会议陷入僵局。
+
+**解决方案**：双层检测 + 智能延期
+
+**实现细节**：
+
+#### 检测层
+- Workspace 监听 Agent 对应模型的 Token 流输出
+- 如果 Token 流**彻底断掉且超过 30 秒无新 Token**，判定该 Agent 异常
+- 不依赖心跳、不强制打断 Agent，完全被动观察
+
+#### 异常处理
+- 该 Agent 在本轮会议中**标记为缺席**
+- 会议继续轮询其他 Agent，不等待该 Agent
+- 该 Agent 恢复后可以从会议记录里读到错过的发言（catch-up 机制）
+- 在之后的轮次正常插入发言序列继续轮询
+
+#### 时间延期（不异常情况）
+- 如果 Token 流还在产生但距离**预估完成时间已经很近**，自动延期
+- 延期时长计算方式：观测最近 5 秒的 Token 生成速率，基于剩余待发言内容估算所需时间，再加 buffer
+- 避免"发言还在生成就被强制截断"的尴尬
+
+#### User 干预
+- Workspace 向 User 发送"某 Agent 在会议中异常"的告警（可选）
+- User 可以选择：
+  - 等待 Agent 恢复（不干预）
+  - 强制踢出该 Agent
+  - 强制散会
+
+**优势**：
+- 完全自动化，Agent 无感知
+- 同时处理长发言（慢模型）和真正的卡死
+- 会议不被单个 Agent 拖累
+
+---
+
+### 2. Workspace MCP 教程的 Token 成本优化
+
+**问题**：不能把所有 Workspace MCP 教程都放在 SysPrompt，这样每个 Agent 启动都要额外消耗数千个 Token，且不支持任意模型（Prompt Caching 只对 Claude API 有效）。
+
+**解决方案**：分层工具 + 按需查询
+
+**架构设计**：
+
+#### 第 1 层：工具 Schema 自解释（无额外成本）
+将所有 Workspace MCP 作为标准工具暴露给 Agent，每个工具都有清晰的 JSON Schema：
+
+```json
+{
+  "name": "workspace_meeting",
+  "description": "发起或加入多 Agent 会议。Agent 轮流发言，可选散会。",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["initiate", "join", "speak", "leave"],
+        "description": "initiate: 发起新会议; join: 加入已有会议; speak: 发言; leave: 离开会议"
+      },
+      "meeting_id": {
+        "type": "string",
+        "description": "会议 ID（join/speak/leave 时必需）"
+      },
+      "content": {
+        "type": "string",
+        "description": "发言内容（speak 时必需）"
+      }
+    }
+  }
+}
+```
+
+Schema 本身就是文档，Agent 可以从工具名称、描述和参数推断出使用方法。
+
+#### 第 2 层：SysPrompt 中的极简引导（~100 token）
+```
+你现在在一个 Workspace 协作环境中工作。
+
+系统为你提供了以下 MCP 工具：
+- workspace_meeting：发起或加入多 Agent 会议，轮流发言
+- workspace_message：向其他 Agent 发送点对点消息
+- workspace_asks：向用户提问
+- workspace_sleep：任务完成后申请休眠
+- workspace_agent_list：查看其他 Agent 的状态
+- workspace_log：写入/读取共享工作日志
+- workspace_help：查询任何工具的完整文档和使用示例
+
+根据每个工具的名称、描述和 JSON Schema，你可以推断出基本用法。
+如果需要详细说明或不确定如何使用，调用 workspace_help("workspace_meeting") 等查询。
+```
+
+#### 第 3 层：按需查询（workspace_help MCP）
+Agent 在不确定时可以调用：
+```json
+{
+  "name": "workspace_help",
+  "description": "查询 Workspace MCP 的完整文档、使用示例和常见问题",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "topic": {
+        "type": "string",
+        "description": "查询主题，如 'workspace_meeting'、'how_to_recover_from_conference'、'catch_up_mechanism' 等"
+      }
+    }
+  }
+}
+```
+
+Workspace 返回该话题的详细文档（包含完整 API 说明、状态机规则、错误处理等）。
+
+**成本分析**：
+- SysPrompt 固定成本：~100 token（vs 原方案的 2000-5000 token）
+- 按需查询成本：仅在 Agent 调用 `workspace_help` 时产生，且单个对话内缓存复用
+- 总体降低 80-95% 的 SysPrompt 成本
+
+**模型兼容性**：
+- 完全模型无关，不依赖任何特定模型的特性
+- Schema 是标准的 OpenAI Function Calling 格式，所有现代 LLM 都支持
+- 本地模型、远程 API、闭源模型都能正常使用
+
+**扩展性**：
+- 新增 Workspace MCP 工具时，只需定义 Schema，无需改 SysPrompt
+- `workspace_help` 的文档库可以热更新，无需重启 Agent
+
+---
+
 ## 待讨论与完善的问题
 
 ### 1. 会议冲突仲裁
@@ -156,5 +287,7 @@ Agent Team Mode 是 BaiyuAISpace2 的一种工作模式。在该模式下，Baiy
 
 ---
 
-*文档版本：v0.1*
-*最后更新：2026-05-23*
+*文档版本：v0.2*
+*最后更新：2026-06-24*
+
+**v0.2 更新**：补充"核心设计决策"章节，包含会议 Agent 卡死处理机制和 Workspace MCP 教程成本优化方案。

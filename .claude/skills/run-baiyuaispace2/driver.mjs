@@ -141,7 +141,7 @@ async function cmdScreenshot(outFile) {
 async function cmdEval(expr) {
   if (!expr) { console.error("usage: driver.mjs eval \"<js expression>\""); process.exit(1); }
   await withPage(async (send) => {
-    const result = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
+    const result = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) {
       console.error("Eval threw:", result.exceptionDetails.text);
       process.exit(1);

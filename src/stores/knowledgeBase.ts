@@ -240,6 +240,11 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
       return true;
     } catch (error) {
       console.error("Failed to import document:", error);
+      // 后端在失败时仍会把文档行写成 status='error' + error_message（方便定位原因，
+      // 比如 embedding 模型的单次输入长度限制），所以这里也要刷新列表，
+      // 否则这条失败记录永远不会出现在 UI 里，用户只能看到一个空泛的"导入失败"提示
+      await loadDocuments(kbId);
+      await loadKnowledgeBases();
       return false;
     }
   };

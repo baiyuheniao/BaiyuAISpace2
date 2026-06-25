@@ -235,7 +235,9 @@ const serverTypeOptions = [
 
 /**
  * 重置表单数据
- * 清空所有输入并恢复默认值
+ * 清空所有输入并恢复默认值，同时清掉上一次的测试结果——
+ * 否则重新打开弹窗时会显示一个对应着空表单的"连接成功/失败"徽章，
+ * 让人误以为当前（空）配置已经测试过
  */
 const resetForm = () => {
   formData.value = {
@@ -249,6 +251,7 @@ const resetForm = () => {
     api_key: "",
     enabled: true,
   };
+  testResult.value = null;
 };
 
 /**

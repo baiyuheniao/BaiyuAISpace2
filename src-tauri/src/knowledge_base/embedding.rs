@@ -149,9 +149,28 @@ async fn generate_embeddings_batch(
         .map_err(|e| KnowledgeBaseError::EmbeddingError(format!("Request failed: {}", e)))?;
     
     if !response.status().is_success() {
+        let status = response.status();
         let error_text = response.text().await
             .map_err(|e| KnowledgeBaseError::EmbeddingError(format!("Failed to read error: {}", e)))?;
-        return Err(KnowledgeBaseError::EmbeddingError(format!("API error: {}", error_text)));
+
+        // 4xx 很常见的两个原因是 API Key/模型名写错，或者单个分块超出了该
+        // Embedding 模型的输入长度上限（比如 BAAI/bge-large-zh-v1.5 实测约
+        // 500 个中文字符就会被拒绝，但接口只返回一个不说明原因的错误码）。
+        // 这里不武断地认定就是哪一种，只是给出可排查的方向。
+        let hint = if status.is_client_error() {
+            let max_chars = texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+            format!(
+                " (本次最长分块约 {} 字符；如果反复出现该错误，可能是 API Key/模型名称有误，\
+                 或该模型对单次输入长度有限制，可尝试在知识库设置中调小分块大小后重新导入)",
+                max_chars
+            )
+        } else {
+            String::new()
+        };
+
+        return Err(KnowledgeBaseError::EmbeddingError(format!(
+            "API error ({}): {}{}", status, error_text, hint
+        )));
     }
     
     let json: serde_json::Value = response.json().await

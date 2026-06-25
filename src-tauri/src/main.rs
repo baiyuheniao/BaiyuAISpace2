@@ -37,10 +37,14 @@ use std::path::PathBuf;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-static LOG_DIR: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
+// 进程实际在写的日志文件路径——只在 init_logging() 里算一次。
+// 不能让 get_log_path/read_log_file/copy_log_file 各自用"现在的日期"重新拼文件名：
+// 应用跨午夜运行时，文件名里的日期永远是启动那一刻的日期，"现在的日期"对不上，
+// 会导致这几个命令在文件明明存在的情况下报"日志文件不存在"
+static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
 
-pub fn get_log_dir() -> Option<&'static PathBuf> {
-    LOG_DIR.get()
+pub fn get_log_file_path() -> Option<&'static PathBuf> {
+    LOG_FILE.get()
 }
 
 fn init_logging() {
@@ -55,15 +59,13 @@ fn init_logging() {
         PathBuf::from("logs")
     };
     
-    // 保存日志目录路径
-    let _ = LOG_DIR.set(log_dir.clone());
-    
     // 创建日志文件名（按日期）
     let log_file = log_dir.join(format!(
         "app_{}.log",
         chrono::Local::now().format("%Y-%m-%d")
     ));
-    
+    let _ = LOG_FILE.set(log_file.clone());
+
     // 配置颜色
     let colors = ColoredLevelConfig::new()
         .error(Color::Red)
@@ -304,12 +306,7 @@ async fn delete_session_cmd(
 
 #[tauri::command]
 fn get_log_path() -> Result<String, String> {
-    if let Some(log_dir) = get_log_dir() {
-        // 获取当天的日志文件
-        let log_file = log_dir.join(format!(
-            "app_{}.log",
-            chrono::Local::now().format("%Y-%m-%d")
-        ));
+    if let Some(log_file) = get_log_file_path() {
         if log_file.exists() {
             return Ok(log_file.to_string_lossy().to_string());
         }
@@ -321,13 +318,9 @@ fn get_log_path() -> Result<String, String> {
 
 #[tauri::command]
 fn read_log_file() -> Result<String, String> {
-    if let Some(log_dir) = get_log_dir() {
-        let log_file = log_dir.join(format!(
-            "app_{}.log",
-            chrono::Local::now().format("%Y-%m-%d")
-        ));
+    if let Some(log_file) = get_log_file_path() {
         if log_file.exists() {
-            return std::fs::read_to_string(&log_file)
+            return std::fs::read_to_string(log_file)
                 .map_err(|e| format!("读取日志文件失败: {}", e));
         }
         Err("日志文件不存在".to_string())
@@ -338,13 +331,9 @@ fn read_log_file() -> Result<String, String> {
 
 #[tauri::command]
 fn copy_log_file(dest_path: String) -> Result<String, String> {
-    if let Some(log_dir) = get_log_dir() {
-        let log_file = log_dir.join(format!(
-            "app_{}.log",
-            chrono::Local::now().format("%Y-%m-%d")
-        ));
+    if let Some(log_file) = get_log_file_path() {
         if log_file.exists() {
-            std::fs::copy(&log_file, &dest_path)
+            std::fs::copy(log_file, &dest_path)
                 .map_err(|e| format!("复制日志文件失败: {}", e))?;
             return Ok(dest_path);
         }
