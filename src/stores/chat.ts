@@ -336,11 +336,12 @@ export const useChatStore = defineStore("chat", () => {
     currentSession.value = session;
     lastRetrievalResult.value = null;
     
-    // 设置流式监听、保存并刷新列表
+    // 设置流式监听
+    // 注意：这里不写库。空会话在发出第一条消息前只存在于内存里，
+    // sendMessage() 里已经会在追加第一条用户消息后调用 saveSessionToDb()，
+    // 否则每次点"新建对话"都会在历史记录里留下一条"新对话/0条消息"的僵尸记录
     await setupStreamListener();
-    await saveSessionToDb();
-    await loadSessionsFromDb();
-    
+
     return session;
   };
 
