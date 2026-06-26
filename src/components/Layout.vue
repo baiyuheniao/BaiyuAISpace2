@@ -33,7 +33,7 @@ import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
 
 // 导入图标
-import { Chatbubbles, Time, Settings, Library, Cube, HardwareChipOutline, ExtensionPuzzleOutline, PeopleOutline } from "@vicons/ionicons5";
+import { Chatbubbles, Time, Settings, Library, Cube, HardwareChipOutline, ExtensionPuzzleOutline, PeopleOutline, AlarmOutline } from "@vicons/ionicons5";
 
 // 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
@@ -86,6 +86,11 @@ const menuOptions: MenuOption[] = [
     label: "Agent Team",
     key: "AgentTeam",
     icon: () => h(PeopleOutline),
+  },
+  {
+    label: "定时任务",
+    key: "Scheduler",
+    icon: () => h(AlarmOutline),
   },
   {
     label: "History/历史记录",

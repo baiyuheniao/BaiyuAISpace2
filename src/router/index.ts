@@ -64,6 +64,11 @@ const routes: RouteRecordRaw[] = [
     name: "AgentTeam",
     component: () => import("@/views/AgentTeamView.vue"),
   },
+  {
+    path: "/scheduler",
+    name: "Scheduler",
+    component: () => import("@/views/SchedulerView.vue"),
+  },
 ];
 
 // 创建路由器实例
