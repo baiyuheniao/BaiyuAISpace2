@@ -640,9 +640,22 @@ onMounted(async () => {
                   <n-thing>
                     <template #header>{{ result.name }}</template>
                     <template #description>
-                      <n-text depth="3" style="font-size: 12px;">
-                        {{ result.description }}
-                      </n-text>
+                      <n-space size="small" style="margin-top: 4px; flex-wrap: wrap;">
+                        <n-text v-if="result.description" depth="3" style="font-size: 12px;">
+                          {{ result.description }}
+                        </n-text>
+                        <n-tag
+                          v-for="tag in result.tags"
+                          :key="tag"
+                          size="small"
+                          style="cursor: pointer;"
+                          :type="downloadingSearchResult === `${result.name}:${tag}` ? 'info' : 'default'"
+                          :disabled="downloadingSearchResult !== null"
+                          @click="!downloadingSearchResult && handleSelectSearchResult(`${result.name}:${tag}`)"
+                        >
+                          {{ tag }}
+                        </n-tag>
+                      </n-space>
                     </template>
                   </n-thing>
                   <template #suffix>

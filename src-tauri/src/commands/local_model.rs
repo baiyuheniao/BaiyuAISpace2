@@ -1161,13 +1161,15 @@ pub async fn search_ollama_models(
         return Ok(vec![]);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = std::sync::Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
+    );
 
-    // Try Ollama library search API
+    // Fetch the Ollama library search page
     let search_url = format!("https://ollama.com/library?q={}", urlencoding::encode(&query));
 
     let response = client.get(&search_url)
@@ -1182,40 +1184,64 @@ pub async fn search_ollama_models(
 
     let html = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
 
-    // Parse the HTML to extract model information
-    // Ollama library page contains model cards with data we can extract
-    let mut results = Vec::new();
+    // Collect unique model series names from library links
+    let mut series_names: Vec<String> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // Look for model card links: /library/{model-name}
-    // Pattern: href="/library/model-name"
     for line in html.lines() {
         if let Some(start) = line.find("href=\"/library/") {
             let rest = &line[start + 15..];
             if let Some(end) = rest.find('"') {
                 let model_name = &rest[..end];
-                // Skip non-model paths
-                if model_name.contains('/') || model_name.contains('?') || model_name.contains('#') || model_name.is_empty() {
+                if model_name.contains('/') || model_name.contains('?')
+                    || model_name.contains('#') || model_name.contains(':')
+                    || model_name.is_empty()
+                {
                     continue;
                 }
                 if seen_names.contains(model_name) {
                     continue;
                 }
                 seen_names.insert(model_name.to_string());
-
-                // Try to extract description from nearby text
-                let description = extract_nearby_text(&html, model_name);
-
-                results.push(ModelSearchResult {
-                    name: model_name.to_string(),
-                    description,
-                    tags: vec![], // Tags would need more detailed parsing
-                    size_info: String::new(),
-                });
-
-                if results.len() >= 20 {
+                series_names.push(model_name.to_string());
+                if series_names.len() >= 10 {
                     break;
                 }
+            }
+        }
+    }
+
+    // For each model series, concurrently fetch its tag list
+    let html_ref = std::sync::Arc::new(html);
+    let tasks: Vec<_> = series_names.into_iter().map(|name| {
+        let client = client.clone();
+        let html_ref = html_ref.clone();
+        tokio::spawn(async move {
+            let description = extract_nearby_text(&html_ref, &name);
+            let tags = fetch_model_tags(&client, &name).await;
+            (name, description, tags)
+        })
+    }).collect();
+
+    let mut results = Vec::new();
+    for task in tasks {
+        if let Ok((name, description, tags)) = task.await {
+            // Include the base model entry
+            results.push(ModelSearchResult {
+                name: name.clone(),
+                description: description.clone(),
+                tags: tags.clone(),
+                size_info: String::new(),
+            });
+            // Also surface each tagged variant as its own entry so users can
+            // pick a specific size directly from the search list
+            for tag in &tags {
+                results.push(ModelSearchResult {
+                    name: format!("{}:{}", name, tag),
+                    description: description.clone(),
+                    tags: vec![],
+                    size_info: String::new(),
+                });
             }
         }
     }
@@ -1223,14 +1249,82 @@ pub async fn search_ollama_models(
     Ok(results)
 }
 
+/// Fetch the available tags for a model from its Ollama library page.
+/// Returns a list of tag names such as ["1b", "3b", "7b", "70b"].
+async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<String> {
+    let url = format!("https://ollama.com/library/{}/tags", model_name);
+    let Ok(response) = client.get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .await else { return vec![]; };
+
+    if !response.status().is_success() {
+        return vec![];
+    }
+
+    let Ok(html) = response.text().await else { return vec![]; };
+
+    // The tags page lists hrefs like /library/{model}:{tag}
+    // We extract only the tag part (after the colon).
+    let prefix = format!("/library/{}:", model_name);
+    let mut tags: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in html.lines() {
+        let mut search_start = 0;
+        while let Some(pos) = line[search_start..].find(&prefix) {
+            let abs_pos = search_start + pos + prefix.len();
+            let rest = &line[abs_pos..];
+            // The tag ends at the next `"` or `/`
+            let end = rest.find(|c: char| c == '"' || c == '/' || c == '?').unwrap_or(rest.len());
+            let tag = rest[..end].trim();
+            if !tag.is_empty() && !seen.contains(tag) {
+                seen.insert(tag.to_string());
+                tags.push(tag.to_string());
+            }
+            search_start = abs_pos + end;
+            if search_start >= line.len() { break; }
+        }
+    }
+
+    // Filter out low-level quantization variants (q2_K, q4_K_M, f16, etc.).
+    // Keep top-level size/type tags that are meaningful for most users.
+    tags.retain(|t| is_top_level_tag(t));
+
+    tags
+}
+
+/// Returns true for tags a typical user wants to see:
+///   - "latest"
+///   - bare size tags: "7b", "72b", "0.5b"
+///   - instruction / base / vision / code / tool variants WITHOUT a quantization suffix
+///     e.g. "7b-instruct", "3b-base", "8b-code-instruct"
+///   Filtered out: anything ending in -q2_K, -q4_0, -q4_K_M, -f16, -fp16, -q8_0, etc.
+fn is_top_level_tag(tag: &str) -> bool {
+    if tag == "latest" {
+        return true;
+    }
+    // Quantization suffix patterns used by Ollama
+    let quant_suffixes = [
+        "-q2_k", "-q3_k_s", "-q3_k_m", "-q3_k_l",
+        "-q4_0", "-q4_1", "-q4_k_s", "-q4_k_m",
+        "-q5_0", "-q5_1", "-q5_k_s", "-q5_k_m",
+        "-q6_k", "-q8_0", "-f16", "-fp16",
+        // also the bare suffixes without leading dash (shouldn't appear but be safe)
+        "q2_k", "q3_k_s", "q3_k_m", "q3_k_l",
+        "q4_0", "q4_1", "q4_k_s", "q4_k_m",
+        "q5_0", "q5_1", "q5_k_s", "q5_k_m",
+        "q6_k", "q8_0",
+    ];
+    let lower = tag.to_lowercase();
+    !quant_suffixes.iter().any(|suffix| lower.ends_with(suffix))
+}
+
 /// Extract description text near a model name in the HTML
 fn extract_nearby_text(html: &str, model_name: &str) -> String {
-    // Find the model name in the HTML and look for description text nearby
     let search_pattern = format!("/library/{}\"", model_name);
     if let Some(pos) = html.find(&search_pattern) {
-        // Look ahead for text content (simplified parsing)
         let nearby = &html[pos..std::cmp::min(pos + 500, html.len())];
-        // Try to find text between > and < tags
         if let Some(start) = nearby.find(">") {
             let after_tag = &nearby[start + 1..];
             if let Some(end) = after_tag.find("<") {
