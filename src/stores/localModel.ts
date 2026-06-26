@@ -187,6 +187,9 @@ export const useLocalModelStore = defineStore(
     /** 是否正在搜索模型 */
     const isSearchingModels = ref(false);
 
+    /** 是否正在启动 Ollama 服务 */
+    const isStartingService = ref(false);
+
     // ============ 计算属性 ============
 
     /** 当前选中的下载源 */
@@ -411,6 +414,9 @@ export const useLocalModelStore = defineStore(
      * 如果已运行则直接返回，否则后台启动并等待就绪
      */
     const startService = async () => {
+      if (isStartingService.value) return;
+
+      isStartingService.value = true;
       try {
         const status = await invoke<OllamaServiceStatus>("start_ollama_service", {
           ollamaBaseUrl: ollamaBaseUrl.value,
@@ -425,6 +431,8 @@ export const useLocalModelStore = defineStore(
       } catch (error) {
         console.error("Failed to start Ollama service:", error);
         throw error;
+      } finally {
+        isStartingService.value = false;
       }
     };
 
@@ -603,6 +611,7 @@ export const useLocalModelStore = defineStore(
       serviceManagedByApp,
       isInstallingOllama,
       ollamaInstallProgress,
+      isStartingService,
       downloadMirrors,
       selectedMirrorId,
       modelSearchResults,

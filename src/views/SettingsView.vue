@@ -554,7 +554,7 @@ const handleDetectInstallation = async () => {
 const handleStartService = async () => {
   try {
     const status = await localModel.startService();
-    if (status.running) {
+    if (status?.running) {
       message.success("Ollama 服务已启动");
     } else {
       message.error("Ollama 服务启动失败");

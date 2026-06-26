@@ -102,8 +102,14 @@ const mirrorOptions = computed(() =>
 /** 模型搜索关键词 */
 const modelSearchQuery = ref("");
 
+/** 是否已经执行过搜索（用于区分"未搜索"和"无结果"） */
+const hasSearched = ref(false);
+
 /** 模型搜索防抖定时器 */
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 当前正在下载的搜索结果模型名称 */
+const downloadingSearchResult = ref<string | null>(null);
 
 // ============ LM Studio 相关状态 ============
 
@@ -187,7 +193,7 @@ const handleDetectInstallation = async () => {
 const handleStartService = async () => {
   try {
     const status = await localModel.startService();
-    if (status.running) {
+    if (status?.running) {
       message.success("Ollama 服务已启动");
     } else {
       message.error("Ollama 服务启动失败");
@@ -223,22 +229,32 @@ const handleModelSearch = (query: string) => {
   if (searchDebounceTimer) {
     clearTimeout(searchDebounceTimer);
   }
-  searchDebounceTimer = setTimeout(() => {
-    localModel.searchModels(query);
-  }, 500);
+  if (query.trim()) {
+    searchDebounceTimer = setTimeout(() => {
+      localModel.searchModels(query);
+      hasSearched.value = true;
+    }, 500);
+  } else {
+    hasSearched.value = false;
+    localModel.modelSearchResults = [];
+  }
 };
 
 /** 选择搜索结果中的模型并下载 */
 const handleSelectSearchResult = async (modelName: string) => {
+  downloadingSearchResult.value = modelName;
   try {
     // Search results are from Ollama library, force use "ollama" source
     await localModel.pullModel(modelName, "ollama");
     message.success(`模型 ${modelName} 下载完成`);
   } catch (error) {
     message.error(`下载失败: ${error}`);
+  } finally {
+    downloadingSearchResult.value = null;
+    modelSearchQuery.value = "";
+    localModel.modelSearchResults = [];
+    hasSearched.value = false;
   }
-  modelSearchQuery.value = "";
-  localModel.modelSearchResults = [];
 };
 
 /** 一键部署 */
@@ -511,12 +527,13 @@ onMounted(async () => {
                     v-if="!localModel.isOnline"
                     type="primary"
                     size="small"
+                    :loading="localModel.isStartingService"
                     @click="handleStartService"
                   >
                     <template #icon>
                       <n-icon><PlayOutline /></n-icon>
                     </template>
-                    启动服务
+                    {{ localModel.isStartingService ? '启动中...' : '启动服务' }}
                   </n-button>
                   <n-button
                     v-else-if="localModel.serviceManagedByApp"
@@ -606,6 +623,11 @@ onMounted(async () => {
               >
                 <n-text depth="3">搜索中...</n-text>
               </div>
+              <n-empty
+                v-else-if="hasSearched && localModel.modelSearchResults.length === 0"
+                description="没有搜索到结果"
+                style="margin-top: 12px; margin-bottom: 12px;"
+              />
               <n-list
                 v-else-if="localModel.modelSearchResults.length > 0"
                 bordered
@@ -627,13 +649,14 @@ onMounted(async () => {
                     <n-button
                       size="small"
                       type="primary"
-                      :loading="localModel.isPulling"
+                      :loading="downloadingSearchResult === result.name"
+                      :disabled="downloadingSearchResult !== null && downloadingSearchResult !== result.name"
                       @click="handleSelectSearchResult(result.name)"
                     >
                       <template #icon>
                         <n-icon><CloudDownloadOutline /></n-icon>
                       </template>
-                      下载
+                      {{ downloadingSearchResult === result.name ? '下载中...' : '下载' }}
                     </n-button>
                   </template>
                 </n-list-item>
