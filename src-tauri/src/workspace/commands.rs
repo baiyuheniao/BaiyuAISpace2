@@ -332,7 +332,7 @@ async fn set_agent_status(app_handle: &AppHandle, agent_id: &str, status: AgentS
     );
 }
 
-async fn insert_workspace_log(
+pub async fn insert_workspace_log(
     app_handle: &AppHandle,
     workspace_id: &str,
     agent_id: Option<String>,
@@ -363,7 +363,7 @@ async fn insert_workspace_log(
 /// acceptable for Phase 1 since handles are looked up by id and a wake on an
 /// unrelated agent is a no-op cost, but should be scoped per-workspace if
 /// `WorkspaceState` ever needs to track workspace membership directly).
-async fn send_workspace_message(
+pub async fn send_workspace_message(
     app_handle: &AppHandle,
     workspace_id: &str,
     from_agent_id: &str,

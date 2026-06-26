@@ -18,9 +18,9 @@ import { ref, reactive, computed, onMounted, watch } from "vue";
 import {
   NButton, NIcon, NSpace, NSelect, NEmpty, NModal, NForm, NFormItem, NInput, NInputNumber,
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
-  NTag, NTimeline, NTimelineItem, NPopconfirm, useMessage,
+  NTag, NTimeline, NTimelineItem, NPopconfirm, NSwitch, NDatePicker, NTimePicker, useMessage,
 } from "naive-ui";
-import { Add, TrashOutline, EnterOutline, PeopleOutline } from "@vicons/ionicons5";
+import { Add, TrashOutline, EnterOutline, PeopleOutline, AlarmOutline } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
 import { useWorkspaceStore, type AgentProposalEvent, type AgentStatus, type CreateAgentRequest, type WorkspaceLogEntry } from "@/stores/workspace";
@@ -28,12 +28,14 @@ import { useSettingsStore } from "@/stores/settings";
 import { useMCPStore } from "@/stores/mcp";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
 import { useSkillsStore } from "@/stores/skills";
+import { useSchedulerStore, type CreateScheduleRequest } from "@/stores/scheduler";
 
 const workspace = useWorkspaceStore();
 const settings = useSettingsStore();
 const mcp = useMCPStore();
 const kb = useKnowledgeBaseStore();
 const skills = useSkillsStore();
+const scheduler = useSchedulerStore();
 const message = useMessage();
 
 // ============ 工作组 ============
@@ -190,6 +192,7 @@ const logKindLabels: Record<string, string> = {
   sleep_request: "申请休眠",
   question: "提问",
   acceptance_review: "验收唤醒",
+  scheduled_trigger: "⏰ 定时触发",
   error: "错误",
 };
 
@@ -197,6 +200,7 @@ const logTimelineType = (kind: string): "default" | "success" | "warning" | "err
   if (kind === "error") return "error";
   if (kind === "agent_created") return "success";
   if (kind === "sleep_request" || kind === "agent_proposal") return "warning";
+  if (kind === "scheduled_trigger") return "info";
   return "info";
 };
 
@@ -224,6 +228,80 @@ const timeline = computed(() => {
 });
 
 const formatTime = (ts: number) => new Date(ts).toLocaleTimeString();
+
+// ============ 定时任务 ============
+
+const showScheduleModal = ref(false);
+const scheduleForm = ref<CreateScheduleRequest>({
+  name: "",
+  workspaceId: null,
+  targetAgentId: null,
+  message: "",
+  kind: "interval",
+  intervalMinutes: 60,
+  atTime: null,
+  weekday: null,
+  onceAt: null,
+});
+
+const scheduleKindOptions = [
+  { label: "单次", value: "once" },
+  { label: "间隔", value: "interval" },
+  { label: "每天", value: "daily" },
+  { label: "每周", value: "weekly" },
+];
+
+const weekdayOptions = [
+  { label: "周一", value: 0 },
+  { label: "周二", value: 1 },
+  { label: "周三", value: 2 },
+  { label: "周四", value: 3 },
+  { label: "周五", value: 4 },
+  { label: "周六", value: 5 },
+  { label: "周日", value: 6 },
+];
+
+const scheduleTargetOptions = computed(() => [
+  { label: "广播给所有 Agent", value: "__all__" },
+  ...workspace.agents.map((a) => ({ label: a.name, value: a.id })),
+]);
+
+const openScheduleModal = async () => {
+  if (workspace.currentWorkspace) {
+    await scheduler.loadSchedules(workspace.currentWorkspace.id);
+  }
+  scheduleForm.value = {
+    name: "",
+    workspaceId: workspace.currentWorkspace?.id ?? null,
+    targetAgentId: null,
+    message: "",
+    kind: "interval",
+    intervalMinutes: 60,
+    atTime: null,
+    weekday: null,
+    onceAt: null,
+  };
+  showScheduleModal.value = true;
+};
+
+const handleCreateSchedule = async () => {
+  if (!scheduleForm.value.name.trim()) { message.error("请填写任务名称"); return; }
+  if (!scheduleForm.value.message.trim()) { message.error("请填写触发消息"); return; }
+  try {
+    const req: CreateScheduleRequest = {
+      ...scheduleForm.value,
+      targetAgentId: scheduleForm.value.targetAgentId === "__all__" ? null : scheduleForm.value.targetAgentId,
+    };
+    await scheduler.createSchedule(req);
+    message.success("定时任务已创建");
+    scheduleForm.value.name = "";
+    scheduleForm.value.message = "";
+  } catch (e) {
+    message.error(`创建失败: ${e}`);
+  }
+};
+
+const formatNextRun = (ts: number) => new Date(ts).toLocaleString();
 
 // ============ 待处理事项：主 Agent 创建子 Agent 提议 ============
 
@@ -393,10 +471,16 @@ onMounted(async () => {
         <n-gi>
           <n-card title="Agent 列表" class="panel-card" :bordered="false">
             <template #header-extra>
-              <n-button size="small" type="primary" @click="openCreateAgentModal">
-                <template #icon><n-icon><Add /></n-icon></template>
-                添加 Agent
-              </n-button>
+              <n-space size="small">
+                <n-button size="small" quaternary @click="openScheduleModal" :disabled="!workspace.currentWorkspace">
+                  <template #icon><n-icon><AlarmOutline /></n-icon></template>
+                  定时任务
+                </n-button>
+                <n-button size="small" type="primary" @click="openCreateAgentModal">
+                  <template #icon><n-icon><Add /></n-icon></template>
+                  添加 Agent
+                </n-button>
+              </n-space>
             </template>
             <n-list hoverable clickable class="agent-list">
               <n-list-item
@@ -529,6 +613,71 @@ onMounted(async () => {
         <n-space justify="end">
           <n-button @click="showCreateAgentModal = false">取消</n-button>
           <n-button type="primary" @click="handleCreateAgent">添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 定时任务弹窗 -->
+    <n-modal v-model:show="showScheduleModal" preset="card" title="⏰ 定时任务" style="width: 560px; max-height: 85vh" :content-style="{ overflowY: 'auto' }">
+      <!-- 现有任务列表 -->
+      <div v-if="scheduler.schedules.length > 0" style="margin-bottom: 16px">
+        <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px">已有定时任务</div>
+        <n-list bordered size="small">
+          <n-list-item v-for="s in scheduler.schedules" :key="s.id">
+            <n-thing>
+              <template #header>{{ s.name }}</template>
+              <template #description>
+                <n-tag size="small" style="margin-right: 6px">{{ { once: "单次", interval: "间隔", daily: "每天", weekly: "每周" }[s.kind] }}</n-tag>
+                下次：{{ s.enabled ? formatNextRun(s.nextRunAt) : "已禁用" }}
+              </template>
+            </n-thing>
+            <template #suffix>
+              <n-space align="center" size="small">
+                <n-switch :value="s.enabled" size="small" @update:value="scheduler.toggleSchedule(s.id)" />
+                <n-button quaternary circle size="tiny" type="error" @click="scheduler.deleteSchedule(s.id)">
+                  <template #icon><n-icon><TrashOutline /></n-icon></template>
+                </n-button>
+              </n-space>
+            </template>
+          </n-list-item>
+        </n-list>
+      </div>
+
+      <!-- 新建表单 -->
+      <div style="font-weight: 600; margin-bottom: 8px; font-size: 13px">新建定时任务</div>
+      <n-form label-placement="left" label-width="80" size="small">
+        <n-form-item label="任务名称">
+          <n-input v-model:value="scheduleForm.name" placeholder="例：每日进展提醒" />
+        </n-form-item>
+        <n-form-item label="目标 Agent">
+          <n-select v-model:value="scheduleForm.targetAgentId" :options="scheduleTargetOptions" placeholder="广播给所有 Agent" clearable />
+        </n-form-item>
+        <n-form-item label="类型">
+          <n-radio-group v-model:value="scheduleForm.kind">
+            <n-radio v-for="opt in scheduleKindOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</n-radio>
+          </n-radio-group>
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.kind === 'interval'" label="间隔（分钟）">
+          <n-input-number v-model:value="scheduleForm.intervalMinutes" :min="1" style="width: 120px" />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.kind === 'daily' || scheduleForm.kind === 'weekly'" label="触发时间">
+          <n-time-picker v-model:formatted-value="scheduleForm.atTime" format="HH:mm" value-format="HH:mm" style="width: 120px" />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.kind === 'weekly'" label="星期">
+          <n-select v-model:value="scheduleForm.weekday" :options="weekdayOptions" style="width: 120px" />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.kind === 'once'" label="触发时间">
+          <n-date-picker v-model:value="scheduleForm.onceAt" type="datetime" />
+        </n-form-item>
+        <n-form-item label="触发消息">
+          <n-input v-model:value="scheduleForm.message" type="textarea" :rows="3" placeholder="触发时发送给 Agent 的消息内容" />
+        </n-form-item>
+      </n-form>
+
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showScheduleModal = false">关闭</n-button>
+          <n-button type="primary" @click="handleCreateSchedule">创建</n-button>
         </n-space>
       </template>
     </n-modal>

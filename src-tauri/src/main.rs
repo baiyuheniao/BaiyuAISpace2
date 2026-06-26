@@ -25,6 +25,7 @@
 mod commands;
 mod db;
 mod knowledge_base;
+mod scheduler;
 mod secure_storage;
 mod workspace;
 mod workspace_smoke_test;
@@ -35,6 +36,7 @@ use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingMeetingTurns, init_workspace_tables};
+use scheduler::init_scheduler_tables;
 use std::sync::Arc;
 use std::path::PathBuf;
 use tauri::Manager;
@@ -207,6 +209,11 @@ fn main() {
             workspace::commands::workspace_resolve_proposal,
             workspace::commands::workspace_resolve_sleep_request,
             workspace::commands::workspace_resolve_question,
+            // 定时任务命令
+            scheduler::commands::schedule_create,
+            scheduler::commands::schedule_list,
+            scheduler::commands::schedule_delete,
+            scheduler::commands::schedule_toggle,
             // 日志相关命令
             get_log_path,
             read_log_file,
@@ -233,6 +240,10 @@ fn main() {
 
             if let Err(e) = init_workspace_tables(&conn) {
                 log::error!("Failed to initialize workspace tables: {}", e);
+            }
+
+            if let Err(e) = init_scheduler_tables(&conn) {
+                log::error!("Failed to initialize scheduler tables: {}", e);
             }
 
             let app_data_dir = match app.handle().path().app_data_dir() {
@@ -275,6 +286,15 @@ fn main() {
             app.manage(PendingQuestions::default());
             app.manage(PendingMeetingTurns::default());
             log::info!("Database and vector store initialized");
+
+            // 启动定时任务调度循环
+            {
+                let scheduler_handle = app.handle().clone();
+                let cancel = tokio_util::sync::CancellationToken::new();
+                tauri::async_runtime::spawn(async move {
+                    scheduler::commands::run_scheduler_loop(scheduler_handle, cancel).await;
+                });
+            }
 
             if std::env::var("BAIYU_WORKSPACE_SMOKE_TEST").is_ok() {
                 let smoke_handle = app.handle().clone();
