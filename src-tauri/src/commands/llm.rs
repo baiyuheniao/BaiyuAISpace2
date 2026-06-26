@@ -164,12 +164,18 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("custom", "", "bearer"),
 ];
 
-fn build_url(provider: &str, base_url: &str, model: &str) -> String {
+fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> String {
     match provider {
         "google" => {
+            // Google picks the endpoint by path, not by a body flag like the
+            // other providers' `"stream"` field -- the non-streaming
+            // follow-up request after a tool call must hit `generateContent`,
+            // not `streamGenerateContent`, or the response won't be a single
+            // parseable JSON object.
+            let method = if streaming { "streamGenerateContent?alt=sse" } else { "generateContent" };
             format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
-                model
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:{}",
+                model, method
             )
         }
         "azure" => {
@@ -231,6 +237,20 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 body["system"] = serde_json::json!(sys);
             }
 
+            if !tools.is_empty() {
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "input_schema": tool.input_schema,
+                        })
+                    })
+                    .collect();
+                body["tools"] = serde_json::json!(tools_json);
+            }
+
             body
         }
         "google" => {
@@ -260,6 +280,23 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 body["systemInstruction"] = serde_json::json!({
                     "parts": [{ "text": sys }]
                 });
+            }
+
+            // Gemini groups every function declaration under a single
+            // `tools[0].functionDeclarations` array, unlike OpenAI/Anthropic
+            // which list one tool object per entry.
+            if !tools.is_empty() {
+                let declarations: Vec<_> = tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        })
+                    })
+                    .collect();
+                body["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
             }
 
             body
@@ -306,7 +343,7 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
 
 /// Build the combined instructions + readable-resource-file text for one or
 /// more activated skills, ready to be merged into a system prompt.
-async fn build_skill_context(skills: &[Skill], app_handle: &AppHandle) -> String {
+pub async fn build_skill_context(skills: &[Skill], app_handle: &AppHandle) -> String {
     let mut parts = Vec::new();
     for skill in skills {
         let mut section = format!("# Skill: {}\n{}", skill.name, skill.instructions);
@@ -323,39 +360,90 @@ async fn build_skill_context(skills: &[Skill], app_handle: &AppHandle) -> String
 /// Append one synthetic tool definition per skill the model may autonomously
 /// invoke. The tool only carries name + description -- invoking it returns
 /// the skill's instructions as the result (see the `skill__` handling in
-/// `stream_message`'s `StreamContent::Done` branch), it never calls out to
-/// anything external by itself.
+/// `finalize_turn`), it never calls out to anything external by itself.
 ///
-/// Only applies to the generic OpenAI-style `tools` shape -- `anthropic` and
-/// `google` use entirely different tool schemas and `build_stream_request_body`
-/// never wires `tools` through for them in the first place, so adding an
-/// OpenAI-shaped `tools` field directly onto their request body here would
-/// just send a field their API doesn't understand.
+/// Each provider has its own tool-schema shape, so the entry is built
+/// differently per branch, but all three are wired through (see
+/// `build_stream_request_body`, which now populates `tools` for every
+/// provider, not just the generic OpenAI-compatible one).
 fn append_skill_tools(body: &mut serde_json::Value, provider: &str, autonomous_skills: &[Skill]) {
-    if autonomous_skills.is_empty() || matches!(provider, "anthropic" | "google") {
+    if autonomous_skills.is_empty() {
         return;
     }
 
-    let skill_tools: Vec<_> = autonomous_skills
-        .iter()
-        .map(|skill| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": format!("skill__{}", skill.id),
-                    "description": format!(
-                        "调用「{}」技能：{}。如果当前任务和这个技能相关，调用它获取具体操作指南。",
-                        skill.name, skill.description
-                    ),
-                    "parameters": { "type": "object", "properties": {} }
-                }
-            })
-        })
-        .collect();
+    let describe = |skill: &Skill| -> String {
+        format!(
+            "调用「{}」技能：{}。如果当前任务和这个技能相关，调用它获取具体操作指南。",
+            skill.name, skill.description
+        )
+    };
 
-    match body.get_mut("tools").and_then(|t| t.as_array_mut()) {
-        Some(existing) => existing.extend(skill_tools),
-        None => body["tools"] = serde_json::json!(skill_tools),
+    match provider {
+        "anthropic" => {
+            let skill_tools: Vec<_> = autonomous_skills
+                .iter()
+                .map(|skill| {
+                    serde_json::json!({
+                        "name": format!("skill__{}", skill.id),
+                        "description": describe(skill),
+                        "input_schema": { "type": "object", "properties": {} }
+                    })
+                })
+                .collect();
+
+            match body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                Some(existing) => existing.extend(skill_tools),
+                None => body["tools"] = serde_json::json!(skill_tools),
+            }
+        }
+        "google" => {
+            let declarations: Vec<_> = autonomous_skills
+                .iter()
+                .map(|skill| {
+                    serde_json::json!({
+                        "name": format!("skill__{}", skill.id),
+                        "description": describe(skill),
+                        "parameters": { "type": "object", "properties": {} }
+                    })
+                })
+                .collect();
+
+            // Gemini keeps every function declaration under a single
+            // `tools[0].functionDeclarations` array rather than one tool
+            // object per entry, so merge into that nested array instead of
+            // pushing new top-level `tools` entries.
+            let merged = body
+                .get_mut("tools")
+                .and_then(|t| t.as_array_mut())
+                .and_then(|arr| arr.first_mut())
+                .and_then(|first| first.get_mut("functionDeclarations"))
+                .and_then(|d| d.as_array_mut());
+
+            match merged {
+                Some(existing) => existing.extend(declarations),
+                None => body["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]),
+            }
+        }
+        _ => {
+            let skill_tools: Vec<_> = autonomous_skills
+                .iter()
+                .map(|skill| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": format!("skill__{}", skill.id),
+                            "description": describe(skill),
+                            "parameters": { "type": "object", "properties": {} }
+                        }
+                    })
+                })
+                .collect();
+
+            match body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                Some(existing) => existing.extend(skill_tools),
+                None => body["tools"] = serde_json::json!(skill_tools),
+            }
+        }
     }
 }
 
@@ -438,24 +526,98 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
 
     match provider {
         "google" => {
-            // Google Gemini format: candidates[0].content.parts[0].text
-            json.get("candidates")
+            // Google Gemini format: candidates[0].content.parts[] -- a part is
+            // either {"text": ...} or {"functionCall": {"name", "args"}}.
+            // Gemini sends a function call's `args` already fully parsed in a
+            // single chunk (no incremental fragments like OpenAI/Anthropic),
+            // and never supplies an id, so one is synthesized here purely for
+            // internal correlation -- it's never sent back to Google.
+            let parts = json
+                .get("candidates")
                 .and_then(|c| c.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|cand| cand.get("content"))
                 .and_then(|content| content.get("parts"))
-                .and_then(|parts| parts.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|part| part.get("text"))
-                .and_then(|t| t.as_str())
-                .map(|s| StreamContent::Text(s.to_string()))
+                .and_then(|p| p.as_array())?;
+
+            let mut tool_deltas = Vec::new();
+            let mut text_acc = String::new();
+            for (i, part) in parts.iter().enumerate() {
+                if let Some(call) = part.get("functionCall") {
+                    let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let args = call.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                    tool_deltas.push(ToolCallDelta {
+                        index: i as u32,
+                        id: Some(format!("google_call_{}", Uuid::new_v4())),
+                        name: Some(name),
+                        arguments_fragment: Some(args.to_string()),
+                    });
+                } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    text_acc.push_str(text);
+                }
+            }
+
+            if !tool_deltas.is_empty() {
+                Some(StreamContent::ToolCallDeltas(tool_deltas))
+            } else if !text_acc.is_empty() {
+                Some(StreamContent::Text(text_acc))
+            } else {
+                None
+            }
         }
         "anthropic" => {
-            // Anthropic format: delta.text
-            json.get("delta")
-                .and_then(|d| d.get("text"))
-                .and_then(|t| t.as_str())
-                .map(|s| StreamContent::Text(s.to_string()))
+            // Anthropic streams text via content_block_delta{delta.type=text_delta},
+            // and a tool call via content_block_start{content_block.type=tool_use}
+            // (carries id+name, empty input) followed by one or more
+            // content_block_delta{delta.type=input_json_delta} events (carry
+            // `partial_json` fragments of the input object, to be concatenated
+            // by `index` same as OpenAI's argument fragments). The turn's real
+            // end-of-stream signal is a `message_stop` event, not a `[DONE]`
+            // sentinel.
+            match json.get("type").and_then(|t| t.as_str()) {
+                Some("content_block_delta") => {
+                    let index = json.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                    let delta = json.get("delta")?;
+                    match delta.get("type").and_then(|t| t.as_str()) {
+                        Some("text_delta") => delta
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| StreamContent::Text(s.to_string())),
+                        Some("input_json_delta") => {
+                            let fragment = delta
+                                .get("partial_json")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some(StreamContent::ToolCallDeltas(vec![ToolCallDelta {
+                                index,
+                                id: None,
+                                name: None,
+                                arguments_fragment: Some(fragment),
+                            }]))
+                        }
+                        _ => None,
+                    }
+                }
+                Some("content_block_start") => {
+                    let index = json.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                    let block = json.get("content_block")?;
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        let id = block.get("id").and_then(|t| t.as_str()).map(|s| s.to_string());
+                        let name = block.get("name").and_then(|t| t.as_str()).map(|s| s.to_string());
+                        Some(StreamContent::ToolCallDeltas(vec![ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_fragment: None,
+                        }]))
+                    } else {
+                        None
+                    }
+                }
+                Some("message_stop") => Some(StreamContent::Done),
+                _ => None,
+            }
         }
         _ => {
             // OpenAI format
@@ -631,7 +793,7 @@ pub async fn stream_message(
         }
     }
 
-    let url = build_url(&request.provider, &request.base_url, &request.model);
+    let url = build_url(&request.provider, &request.base_url, &request.model, true);
     // Log provider/base/model for debugging (do not log API key)
     log::debug!(
         "LLM request details: provider={} base_url='{}' model='{}'",
@@ -752,95 +914,17 @@ pub async fn stream_message(
                                         }
                                     }
                                     StreamContent::Done => {
-                                        // Finalize accumulated tool call fragments (id/name from the
-                                        // first chunk per index, arguments concatenated across all of
-                                        // them) and execute them if any.
-                                        let tool_calls: Vec<ToolCall> = std::mem::take(&mut tool_call_acc)
-                                            .into_values()
-                                            .filter_map(|p| {
-                                                Some(ToolCall {
-                                                    id: p.id?,
-                                                    function: ToolFunction {
-                                                        name: p.name?,
-                                                        arguments: p.arguments,
-                                                    },
-                                                })
-                                            })
-                                            .collect();
-
-                                        if !tool_calls.is_empty() {
-                                            let mut tool_results = Vec::with_capacity(tool_calls.len());
-                                            for tool_call in &tool_calls {
-                                                if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
-                                                    // Autonomously-invoked Skill: the "tool result" is the
-                                                    // skill's own instructions/resources, not an MCP call.
-                                                    if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
-                                                        log::info!("Model invoked skill: {}", skill.name);
-                                                        let content = build_skill_context(std::slice::from_ref(skill), &app_handle).await;
-                                                        tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
-                                                    } else {
-                                                        log::warn!("Skill not found for autonomous call: {}", skill_id);
-                                                        tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
-                                                    }
-                                                } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
-                                                    log::info!("Executing MCP tool: {}", tool.name);
-                                                    let result = match call_mcp_tool(
-                                                        state.clone(),
-                                                        Some(tool.server_id.clone()),
-                                                        tool.name.clone(),
-                                                        serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
-                                                    ).await {
-                                                        Ok(result) => {
-                                                            log::info!("Tool execution result: {:?}", result);
-                                                            result
-                                                        }
-                                                        Err(e) => {
-                                                            log::error!("Tool execution failed: {}", e);
-                                                            serde_json::json!({ "error": e.to_string() })
-                                                        }
-                                                    };
-                                                    tool_results.push(result);
-                                                } else {
-                                                    log::warn!("MCP tool not found: {}", tool_call.function.name);
-                                                    tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
-                                                }
-                                            }
-
-                                            // Continue the conversation with a single follow-up request
-                                            // carrying the proper assistant.tool_calls + tool-role
-                                            // messages, instead of one request per call.
-                                            match continue_after_tool_calls(
-                                                &request.provider,
-                                                &request.model,
-                                                &request.api_key,
-                                                &request.base_url,
-                                                &effective_messages,
-                                                &tool_calls,
-                                                &tool_results,
-                                            )
-                                            .await
-                                            {
-                                                Ok(live_reply) => {
-                                                    let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                                        session_id: request.session_id.clone(),
-                                                        message_id: message_id.clone(),
-                                                        content: live_reply,
-                                                        done: false,
-                                                    });
-                                                }
-                                                Err(err) => {
-                                                    log::error!("Failed to continue reasoning after tool calls: {}", err);
-                                                }
-                                            }
-                                        }
-
-                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                            session_id: request.session_id.clone(),
-                                            message_id: message_id.clone(),
-                                            content: String::new(),
-                                            done: true,
-                                        });
-                                        return Ok(());
+                                        return finalize_turn(
+                                            &app_handle,
+                                            state.clone(),
+                                            &request,
+                                            &message_id,
+                                            &effective_messages,
+                                            &mcp_tools,
+                                            &all_skills,
+                                            std::mem::take(&mut tool_call_acc),
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -850,14 +934,21 @@ pub async fn stream_message(
                         return Err(LLMError::StreamError(e.to_string()));
                     }
                     None => {
-                        // Stream ended naturally
-                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                            session_id: request.session_id.clone(),
-                            message_id: message_id.clone(),
-                            content: String::new(),
-                            done: true,
-                        });
-                        return Ok(());
+                        // Stream ended without an explicit end-of-turn signal
+                        // (Google never sends one) -- finalize whatever tool
+                        // calls accumulated so far the same way an explicit
+                        // `StreamContent::Done` would.
+                        return finalize_turn(
+                            &app_handle,
+                            state.clone(),
+                            &request,
+                            &message_id,
+                            &effective_messages,
+                            &mcp_tools,
+                            &all_skills,
+                            std::mem::take(&mut tool_call_acc),
+                        )
+                        .await;
                     }
                 }
             }
@@ -865,16 +956,118 @@ pub async fn stream_message(
     }
 }
 
-/// Continue a conversation after one or more MCP tool calls have been
-/// executed, sending a single follow-up request with the proper OpenAI
-/// function-calling message shape: the assistant turn that requested the
-/// calls (as a `tool_calls` array, not freeform text), followed by one
-/// `role: "tool"` message per result carrying the matching `tool_call_id`.
+/// Finalize whatever tool-call fragments have accumulated by the end of a
+/// turn (id/name from the first fragment per index, arguments concatenated
+/// across every fragment for that index), execute them if any, ask the model
+/// to continue with the results, and emit the terminal `done: true` chunk.
 ///
-/// This only ever runs for the generic OpenAI-compatible path: `anthropic`
-/// and `google` never populate `tool_calls` in the first place (see
-/// `build_stream_request_body`, which doesn't forward `tools` for them), so
-/// there's no provider-specific branching needed here.
+/// Shared between the explicit end-of-turn signal (OpenAI's `[DONE]`,
+/// Anthropic's `message_stop`) and a stream that simply closes with no such
+/// signal (Google) -- both need identical finalize-and-continue handling.
+async fn finalize_turn(
+    app_handle: &AppHandle,
+    state: tauri::State<'_, DbState>,
+    request: &SendMessageRequest,
+    message_id: &str,
+    effective_messages: &[ChatMessage],
+    mcp_tools: &[MCPTool],
+    all_skills: &[Skill],
+    tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall>,
+) -> Result<(), LLMError> {
+    let tool_calls: Vec<ToolCall> = tool_call_acc
+        .into_values()
+        .filter_map(|p| {
+            Some(ToolCall {
+                id: p.id?,
+                function: ToolFunction {
+                    name: p.name?,
+                    arguments: p.arguments,
+                },
+            })
+        })
+        .collect();
+
+    if !tool_calls.is_empty() {
+        let mut tool_results = Vec::with_capacity(tool_calls.len());
+        for tool_call in &tool_calls {
+            if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
+                // Autonomously-invoked Skill: the "tool result" is the
+                // skill's own instructions/resources, not an MCP call.
+                if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
+                    log::info!("Model invoked skill: {}", skill.name);
+                    let content = build_skill_context(std::slice::from_ref(skill), app_handle).await;
+                    tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
+                } else {
+                    log::warn!("Skill not found for autonomous call: {}", skill_id);
+                    tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
+                }
+            } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
+                log::info!("Executing MCP tool: {}", tool.name);
+                let result = match call_mcp_tool(
+                    state.clone(),
+                    Some(tool.server_id.clone()),
+                    tool.name.clone(),
+                    serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
+                ).await {
+                    Ok(result) => {
+                        log::info!("Tool execution result: {:?}", result);
+                        result
+                    }
+                    Err(e) => {
+                        log::error!("Tool execution failed: {}", e);
+                        serde_json::json!({ "error": e.to_string() })
+                    }
+                };
+                tool_results.push(result);
+            } else {
+                log::warn!("MCP tool not found: {}", tool_call.function.name);
+                tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
+            }
+        }
+
+        // Continue the conversation with a single follow-up request carrying
+        // the provider-appropriate "here's what I called and what it
+        // returned" shape, instead of one request per call.
+        match continue_after_tool_calls(
+            &request.provider,
+            &request.model,
+            &request.api_key,
+            &request.base_url,
+            effective_messages,
+            &tool_calls,
+            &tool_results,
+        )
+        .await
+        {
+            Ok(live_reply) => {
+                let _ = app_handle.emit("stream-chunk", StreamChunk {
+                    session_id: request.session_id.clone(),
+                    message_id: message_id.to_string(),
+                    content: live_reply,
+                    done: false,
+                });
+            }
+            Err(err) => {
+                log::error!("Failed to continue reasoning after tool calls: {}", err);
+            }
+        }
+    }
+
+    let _ = app_handle.emit("stream-chunk", StreamChunk {
+        session_id: request.session_id.clone(),
+        message_id: message_id.to_string(),
+        content: String::new(),
+        done: true,
+    });
+    Ok(())
+}
+
+/// Continue a conversation after one or more tool calls have been executed,
+/// sending a single non-streaming follow-up request that tells the model
+/// what was called and what it returned, then returns its plain-text reply.
+/// Each provider has its own shape for "here's what I called" /
+/// "here's the result", so the request body and the response parsing both
+/// branch by provider.
 async fn continue_after_tool_calls(
     provider: &str,
     model: &str,
@@ -884,53 +1077,167 @@ async fn continue_after_tool_calls(
     tool_calls: &[ToolCall],
     tool_results: &[serde_json::Value],
 ) -> Result<String, LLMError> {
-    let url = build_url(provider, base_url, model);
+    let url = build_url(provider, base_url, model, false);
     let client = create_http_client()?;
 
-    let mut msgs: Vec<serde_json::Value> = original_messages
-        .iter()
-        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-        .collect();
+    let body = match provider {
+        "anthropic" => {
+            let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
+            let mut msgs: Vec<serde_json::Value> = original_messages
+                .iter()
+                .filter(|m| m.role != "system")
+                .map(|m| {
+                    serde_json::json!({
+                        "role": if m.role == "assistant" { "assistant" } else { "user" },
+                        "content": m.content
+                    })
+                })
+                .collect();
 
-    let tool_calls_json: Vec<_> = tool_calls
-        .iter()
-        .map(|tc| {
+            // Anthropic requires the tool_use/tool_result blocks to be batched
+            // into exactly one assistant message and one user message (it
+            // enforces strict user/assistant alternation), unlike OpenAI's
+            // one-tool-message-per-result shape below.
+            let tool_use_blocks: Vec<_> = tool_calls
+                .iter()
+                .map(|tc| {
+                    serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    })
+                })
+                .collect();
+            msgs.push(serde_json::json!({ "role": "assistant", "content": tool_use_blocks }));
+
+            let tool_result_blocks: Vec<_> = tool_calls
+                .iter()
+                .zip(tool_results.iter())
+                .map(|(tc, result)| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                    })
+                })
+                .collect();
+            msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
+
+            let mut b = serde_json::json!({
+                "model": model,
+                "messages": msgs,
+                "max_tokens": 4096,
+                "stream": false,
+            });
+            if let Some(sys) = system_msg {
+                b["system"] = serde_json::json!(sys);
+            }
+            b
+        }
+        "google" => {
+            let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
+            let mut contents: Vec<serde_json::Value> = original_messages
+                .iter()
+                .filter(|m| m.role != "system")
+                .map(|m| {
+                    serde_json::json!({
+                        "role": if m.role == "assistant" { "model" } else { "user" },
+                        "parts": [{ "text": m.content }]
+                    })
+                })
+                .collect();
+
+            let call_parts: Vec<_> = tool_calls
+                .iter()
+                .map(|tc| {
+                    serde_json::json!({
+                        "functionCall": {
+                            "name": tc.function.name,
+                            "args": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        }
+                    })
+                })
+                .collect();
+            contents.push(serde_json::json!({ "role": "model", "parts": call_parts }));
+
+            let response_parts: Vec<_> = tool_calls
+                .iter()
+                .zip(tool_results.iter())
+                .map(|(tc, result)| {
+                    serde_json::json!({
+                        "functionResponse": {
+                            "name": tc.function.name,
+                            "response": result,
+                        }
+                    })
+                })
+                .collect();
+            contents.push(serde_json::json!({ "role": "function", "parts": response_parts }));
+
+            let mut b = serde_json::json!({
+                "contents": contents,
+                "generationConfig": { "maxOutputTokens": 4096 },
+            });
+            if let Some(sys) = system_msg {
+                b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
+            }
+            b
+        }
+        _ => {
+            let mut msgs: Vec<serde_json::Value> = original_messages
+                .iter()
+                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                .collect();
+
+            let tool_calls_json: Vec<_> = tool_calls
+                .iter()
+                .map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
+                    })
+                })
+                .collect();
+
+            msgs.push(serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": tool_calls_json,
+            }));
+
+            for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                }));
+            }
+
             serde_json::json!({
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                }
+                "model": model,
+                "messages": msgs,
+                "stream": false,
             })
-        })
-        .collect();
-
-    msgs.push(serde_json::json!({
-        "role": "assistant",
-        "content": serde_json::Value::Null,
-        "tool_calls": tool_calls_json,
-    }));
-
-    for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
-        msgs.push(serde_json::json!({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
-        }));
-    }
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": msgs,
-        "stream": false,
-    });
+        }
+    };
 
     let headers = build_headers(provider, api_key);
 
     log::debug!("Constructed URL for provider {} (tool-call continuation): {}", provider, url);
 
     let masked_auth = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
+        match h.to_str() {
+            Ok(s) => mask_auth_header_value(s),
+            Err(_) => "<non-utf8>".to_string(),
+        }
+    } else if let Some(h) = headers.get("x-api-key") {
         match h.to_str() {
             Ok(s) => mask_auth_header_value(s),
             Err(_) => "<non-utf8>".to_string(),
@@ -964,18 +1271,350 @@ async fn continue_after_tool_calls(
         .await
         .map_err(LLMError::RequestError)?;
 
-    if let Some(choices) = json["choices"].as_array() {
-        if let Some(first_choice) = choices.first() {
-            if let Some(text) = first_choice["message"]["content"].as_str() {
-                return Ok(text.to_string());
+    match provider {
+        "anthropic" => json
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")))
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string())),
+        "google" => json
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|cand| cand.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(|parts| parts.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|part| part.get("text"))
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string())),
+        _ => {
+            if let Some(choices) = json["choices"].as_array() {
+                if let Some(first_choice) = choices.first() {
+                    if let Some(text) = first_choice["message"]["content"].as_str() {
+                        return Ok(text.to_string());
+                    }
+                    if let Some(text) = first_choice["text"].as_str() {
+                        return Ok(text.to_string());
+                    }
+                }
             }
-            if let Some(text) = first_choice["text"].as_str() {
-                return Ok(text.to_string());
+            Err(LLMError::ApiError("LLM did not return content".to_string()))
+        }
+    }
+}
+
+/// A tool call the model wants executed, fully parsed and ready to dispatch.
+/// Distinct from the private streaming-only `ToolCall`/`ToolFunction` above:
+/// this is the multi-round, non-streaming counterpart used by `run_turn`
+/// (Workspace Agent loop), where `arguments` is already a parsed JSON value
+/// rather than a string fragment that still needs concatenating.
+#[derive(Debug, Clone)]
+pub struct PendingToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Result of one `run_turn` round-trip.
+#[derive(Debug)]
+pub enum TurnOutcome {
+    Text(String),
+    ToolCalls(Vec<PendingToolCall>),
+}
+
+/// Build the provider-native "conversation so far" as a JSON array from a
+/// flat `ChatMessage` history. This is the multi-round-capable counterpart to
+/// `build_stream_request_body`'s inline message mapping: a flat `ChatMessage`
+/// list can't represent a tool_use/tool_result round (Anthropic/Google encode
+/// those as structured content blocks, not plain text), so callers needing
+/// more than one round of tool calling -- the Workspace Agent loop -- build
+/// the native array once here, then grow it in place with `append_tool_round`
+/// / `append_text_reply` across rounds instead of re-deriving it each time.
+pub fn build_native_messages(provider: &str, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    match provider {
+        "anthropic" => messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| {
+                serde_json::json!({
+                    "role": if m.role == "assistant" { "assistant" } else { "user" },
+                    "content": m.content
+                })
+            })
+            .collect(),
+        "google" => messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| {
+                serde_json::json!({
+                    "role": if m.role == "assistant" { "model" } else { "user" },
+                    "parts": [{ "text": m.content }]
+                })
+            })
+            .collect(),
+        _ => messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect(),
+    }
+}
+
+/// Append one tool-call round (the model's calls + their executed results)
+/// onto a native message array, in the shape each provider expects to see it
+/// echoed back as history on the next round. Mirrors the per-provider shapes
+/// already established in `continue_after_tool_calls`.
+pub fn append_tool_round(
+    provider: &str,
+    native_messages: &mut Vec<serde_json::Value>,
+    calls: &[PendingToolCall],
+    results: &[serde_json::Value],
+) {
+    match provider {
+        "anthropic" => {
+            let tool_use_blocks: Vec<_> = calls
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments,
+                    })
+                })
+                .collect();
+            native_messages.push(serde_json::json!({ "role": "assistant", "content": tool_use_blocks }));
+
+            let tool_result_blocks: Vec<_> = calls
+                .iter()
+                .zip(results.iter())
+                .map(|(c, r)| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": c.id,
+                        "content": serde_json::to_string(r).unwrap_or_else(|_| "null".to_string()),
+                    })
+                })
+                .collect();
+            native_messages.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
+        }
+        "google" => {
+            let call_parts: Vec<_> = calls
+                .iter()
+                .map(|c| serde_json::json!({ "functionCall": { "name": c.name, "args": c.arguments } }))
+                .collect();
+            native_messages.push(serde_json::json!({ "role": "model", "parts": call_parts }));
+
+            let response_parts: Vec<_> = calls
+                .iter()
+                .zip(results.iter())
+                .map(|(c, r)| serde_json::json!({ "functionResponse": { "name": c.name, "response": r } }))
+                .collect();
+            native_messages.push(serde_json::json!({ "role": "function", "parts": response_parts }));
+        }
+        _ => {
+            let tool_calls_json: Vec<_> = calls
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            "arguments": serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".to_string()),
+                        }
+                    })
+                })
+                .collect();
+            native_messages.push(serde_json::json!({
+                "role": "assistant", "content": serde_json::Value::Null, "tool_calls": tool_calls_json,
+            }));
+            for (c, r) in calls.iter().zip(results.iter()) {
+                native_messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": c.id,
+                    "content": serde_json::to_string(r).unwrap_or_else(|_| "null".to_string()),
+                }));
             }
         }
     }
+}
 
-    Err(LLMError::ApiError("LLM did not return content".to_string()))
+/// Append the model's own final plain-text reply onto the native message
+/// array, so the next outer call to `run_turn` (e.g. once a new Workspace
+/// message arrives) sees it as prior assistant history.
+pub fn append_text_reply(provider: &str, native_messages: &mut Vec<serde_json::Value>, text: &str) {
+    match provider {
+        "google" => native_messages.push(serde_json::json!({ "role": "model", "parts": [{ "text": text }] })),
+        _ => native_messages.push(serde_json::json!({ "role": "assistant", "content": text })),
+    }
+}
+
+/// One non-streaming round-trip: send the conversation-so-far + available
+/// tools, return either the model's final text reply or the tool calls it
+/// wants executed. Unlike `continue_after_tool_calls` (which sends exactly
+/// one follow-up, never re-offers `tools`, and only ever returns text), this
+/// always re-offers `tools` and can return `ToolCalls` again -- it's what
+/// lets the Workspace Agent loop keep calling tools across multiple rounds
+/// instead of just one.
+pub async fn run_turn(
+    provider: &str,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    system_prompt: Option<&str>,
+    native_messages: &[serde_json::Value],
+    tools: &[MCPTool],
+) -> Result<TurnOutcome, LLMError> {
+    let url = build_url(provider, base_url, model, false);
+    let client = create_http_client()?;
+
+    let body = match provider {
+        "anthropic" => {
+            let mut b = serde_json::json!({
+                "model": model, "messages": native_messages, "max_tokens": 4096, "stream": false,
+            });
+            if let Some(sys) = system_prompt {
+                b["system"] = serde_json::json!(sys);
+            }
+            if !tools.is_empty() {
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
+                    .collect();
+                b["tools"] = serde_json::json!(tools_json);
+            }
+            b
+        }
+        "google" => {
+            let mut b = serde_json::json!({
+                "contents": native_messages, "generationConfig": { "maxOutputTokens": 4096 },
+            });
+            if let Some(sys) = system_prompt {
+                b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
+            }
+            if !tools.is_empty() {
+                let declarations: Vec<_> = tools
+                    .iter()
+                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "parameters": t.input_schema }))
+                    .collect();
+                b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
+            }
+            b
+        }
+        _ => {
+            let mut all_messages = Vec::with_capacity(native_messages.len() + 1);
+            if let Some(sys) = system_prompt {
+                all_messages.push(serde_json::json!({ "role": "system", "content": sys }));
+            }
+            all_messages.extend_from_slice(native_messages);
+            let mut b = serde_json::json!({ "model": model, "messages": all_messages, "stream": false });
+            if !tools.is_empty() {
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
+                        })
+                    })
+                    .collect();
+                b["tools"] = serde_json::json!(tools_json);
+            }
+            b
+        }
+    };
+
+    let headers = build_headers(provider, api_key);
+    let response = client.post(&url).headers(headers).json(&body).send().await?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+        return Err(LLMError::ApiError(error_text));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(LLMError::RequestError)?;
+
+    match provider {
+        "anthropic" => {
+            let blocks = json.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let calls: Vec<PendingToolCall> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                .map(|b| PendingToolCall {
+                    id: b.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    name: b.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    arguments: b.get("input").cloned().unwrap_or_else(|| serde_json::json!({})),
+                })
+                .collect();
+            if !calls.is_empty() {
+                return Ok(TurnOutcome::ToolCalls(calls));
+            }
+            let text = blocks
+                .iter()
+                .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .and_then(|b| b.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(TurnOutcome::Text(text))
+        }
+        "google" => {
+            let parts = json
+                .get("candidates")
+                .and_then(|c| c.as_array())
+                .and_then(|a| a.first())
+                .and_then(|cand| cand.get("content"))
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let calls: Vec<PendingToolCall> = parts
+                .iter()
+                .filter_map(|p| p.get("functionCall"))
+                .map(|call| PendingToolCall {
+                    id: format!("google_call_{}", Uuid::new_v4()),
+                    name: call.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    arguments: call.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
+                })
+                .collect();
+            if !calls.is_empty() {
+                return Ok(TurnOutcome::ToolCalls(calls));
+            }
+            let text: String = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
+            Ok(TurnOutcome::Text(text))
+        }
+        _ => {
+            let message = json
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|a| a.first())
+                .and_then(|c| c.get("message"))
+                .cloned()
+                .unwrap_or_default();
+            let calls: Vec<PendingToolCall> = message
+                .get("tool_calls")
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tc| {
+                            let id = tc.get("id").and_then(|v| v.as_str())?.to_string();
+                            let name = tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str())?.to_string();
+                            let args_str = tc.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap_or("{}");
+                            let arguments = serde_json::from_str(args_str).unwrap_or_else(|_| serde_json::json!({}));
+                            Some(PendingToolCall { id, name, arguments })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !calls.is_empty() {
+                return Ok(TurnOutcome::ToolCalls(calls));
+            }
+            let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(TurnOutcome::Text(text))
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1015,4 +1654,215 @@ pub async fn cancel_stream(session_id: String) -> Result<(), String> {
         log::info!("No active stream found for session: {} (already finished?)", session_id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod provider_tool_calling_tests {
+    use super::*;
+
+    fn sample_tool() -> MCPTool {
+        MCPTool {
+            server_id: "srv1".to_string(),
+            server_name: "srv".to_string(),
+            name: "get_weather".to_string(),
+            description: "Get current weather".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"]
+            }),
+        }
+    }
+
+    #[test]
+    fn anthropic_request_body_carries_tools_in_anthropic_shape() {
+        let messages = vec![ChatMessage {
+            id: "1".into(), role: "user".into(), content: "hi".into(),
+            timestamp: 0, error: None,
+        }];
+        let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()]);
+        let tools = body["tools"].as_array().expect("tools should be an array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "get_weather");
+        assert!(tools[0].get("input_schema").is_some(), "anthropic tools use `input_schema`, not `parameters`");
+        assert!(tools[0].get("function").is_none(), "anthropic tools must not be nested under `function` like OpenAI");
+    }
+
+    #[test]
+    fn google_request_body_groups_tools_under_function_declarations() {
+        let messages = vec![ChatMessage {
+            id: "1".into(), role: "user".into(), content: "hi".into(),
+            timestamp: 0, error: None,
+        }];
+        let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()]);
+        let tools = body["tools"].as_array().expect("tools should be an array");
+        assert_eq!(tools.len(), 1, "Gemini nests every declaration under a single tools[0] entry");
+        let declarations = tools[0]["functionDeclarations"].as_array().expect("functionDeclarations array");
+        assert_eq!(declarations[0]["name"], "get_weather");
+        assert!(declarations[0].get("parameters").is_some());
+    }
+
+    #[test]
+    fn anthropic_tool_use_block_then_input_json_delta_accumulates_into_tool_call_deltas() {
+        let start = parse_sse_line(
+            "anthropic",
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{}}}"#,
+        ).expect("should parse content_block_start");
+        match start {
+            StreamContent::ToolCallDeltas(deltas) => {
+                assert_eq!(deltas.len(), 1);
+                assert_eq!(deltas[0].index, 1);
+                assert_eq!(deltas[0].id.as_deref(), Some("toolu_01"));
+                assert_eq!(deltas[0].name.as_deref(), Some("get_weather"));
+            }
+            other => panic!("expected ToolCallDeltas, got {:?}", other),
+        }
+
+        let delta = parse_sse_line(
+            "anthropic",
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \"SF\"}"}}"#,
+        ).expect("should parse content_block_delta");
+        match delta {
+            StreamContent::ToolCallDeltas(deltas) => {
+                assert_eq!(deltas[0].index, 1);
+                assert_eq!(deltas[0].arguments_fragment.as_deref(), Some("{\"city\": \"SF\"}"));
+            }
+            other => panic!("expected ToolCallDeltas, got {:?}", other),
+        }
+
+        let stop = parse_sse_line("anthropic", r#"data: {"type":"message_stop"}"#);
+        assert!(matches!(stop, Some(StreamContent::Done)));
+    }
+
+    #[test]
+    fn anthropic_text_delta_still_parses_as_text() {
+        let text = parse_sse_line(
+            "anthropic",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+        );
+        assert!(matches!(text, Some(StreamContent::Text(ref s)) if s == "Hello"));
+    }
+
+    #[test]
+    fn google_function_call_part_parses_as_tool_call_delta_with_full_args() {
+        let parsed = parse_sse_line(
+            "google",
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]}}]}"#,
+        ).expect("should parse functionCall chunk");
+        match parsed {
+            StreamContent::ToolCallDeltas(deltas) => {
+                assert_eq!(deltas.len(), 1);
+                assert!(deltas[0].id.is_some(), "google has no native call id, one must be synthesized");
+                assert_eq!(deltas[0].name.as_deref(), Some("get_weather"));
+                let args: serde_json::Value = serde_json::from_str(deltas[0].arguments_fragment.as_deref().unwrap()).unwrap();
+                assert_eq!(args["city"], "SF");
+            }
+            other => panic!("expected ToolCallDeltas, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn google_text_part_still_parses_as_text() {
+        let parsed = parse_sse_line(
+            "google",
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}"#,
+        );
+        assert!(matches!(parsed, Some(StreamContent::Text(ref s)) if s == "Hello"));
+    }
+
+    #[test]
+    fn openai_shape_unaffected_by_provider_branching() {
+        let messages = vec![ChatMessage {
+            id: "1".into(), role: "user".into(), content: "hi".into(),
+            timestamp: 0, error: None,
+        }];
+        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()]);
+        let tools = body["tools"].as_array().expect("tools should be an array");
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+    }
+
+    fn sample_call() -> PendingToolCall {
+        PendingToolCall {
+            id: "call_1".to_string(),
+            name: "get_weather".to_string(),
+            arguments: serde_json::json!({ "city": "SF" }),
+        }
+    }
+
+    #[test]
+    fn append_tool_round_anthropic_batches_tool_use_and_tool_result_into_one_pair_of_messages() {
+        let mut native = vec![serde_json::json!({ "role": "user", "content": "what's the weather in SF?" })];
+        let calls = vec![sample_call()];
+        let results = vec![serde_json::json!({ "temp": 70 })];
+        append_tool_round("anthropic", &mut native, &calls, &results);
+
+        assert_eq!(native.len(), 3, "original message + 1 assistant tool_use msg + 1 user tool_result msg");
+        assert_eq!(native[1]["role"], "assistant");
+        assert_eq!(native[1]["content"][0]["type"], "tool_use");
+        assert_eq!(native[1]["content"][0]["id"], "call_1");
+        assert_eq!(native[2]["role"], "user");
+        assert_eq!(native[2]["content"][0]["type"], "tool_result");
+        assert_eq!(native[2]["content"][0]["tool_use_id"], "call_1");
+    }
+
+    #[test]
+    fn append_tool_round_google_appends_model_function_call_then_function_response() {
+        let mut native = vec![serde_json::json!({ "role": "user", "parts": [{ "text": "what's the weather in SF?" }] })];
+        let calls = vec![sample_call()];
+        let results = vec![serde_json::json!({ "temp": 70 })];
+        append_tool_round("google", &mut native, &calls, &results);
+
+        assert_eq!(native[1]["role"], "model");
+        assert_eq!(native[1]["parts"][0]["functionCall"]["name"], "get_weather");
+        assert_eq!(native[2]["role"], "function");
+        assert_eq!(native[2]["parts"][0]["functionResponse"]["name"], "get_weather");
+    }
+
+    #[test]
+    fn append_tool_round_openai_appends_assistant_tool_calls_then_one_tool_message_per_result() {
+        let mut native = vec![serde_json::json!({ "role": "user", "content": "what's the weather in SF?" })];
+        let calls = vec![sample_call()];
+        let results = vec![serde_json::json!({ "temp": 70 })];
+        append_tool_round("openai", &mut native, &calls, &results);
+
+        assert_eq!(native[1]["role"], "assistant");
+        assert_eq!(native[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(native[2]["role"], "tool");
+        assert_eq!(native[2]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn build_native_messages_matches_provider_shapes() {
+        let messages = vec![
+            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None },
+            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None },
+            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None },
+        ];
+
+        let anthropic = build_native_messages("anthropic", &messages);
+        assert_eq!(anthropic.len(), 2, "system message excluded, carried separately");
+        assert_eq!(anthropic[1]["role"], "assistant");
+        assert_eq!(anthropic[1]["content"], "hello");
+
+        let google = build_native_messages("google", &messages);
+        assert_eq!(google[1]["role"], "model");
+        assert_eq!(google[1]["parts"][0]["text"], "hello");
+
+        let openai = build_native_messages("openai", &messages);
+        assert_eq!(openai.len(), 3, "openai keeps the system message inline");
+    }
+
+    #[test]
+    fn append_text_reply_uses_model_role_for_google_and_assistant_for_others() {
+        let mut native = vec![];
+        append_text_reply("google", &mut native, "done");
+        assert_eq!(native[0]["role"], "model");
+        assert_eq!(native[0]["parts"][0]["text"], "done");
+
+        let mut native = vec![];
+        append_text_reply("anthropic", &mut native, "done");
+        assert_eq!(native[0]["role"], "assistant");
+        assert_eq!(native[0]["content"], "done");
+    }
 }

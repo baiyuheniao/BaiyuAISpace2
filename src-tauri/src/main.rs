@@ -26,12 +26,15 @@ mod commands;
 mod db;
 mod knowledge_base;
 mod secure_storage;
+mod workspace;
+mod workspace_smoke_test;
 
 // 引入类型和函数
 use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
+use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingMeetingTurns, init_workspace_tables};
 use std::sync::Arc;
 use std::path::PathBuf;
 use tauri::Manager;
@@ -191,6 +194,19 @@ fn main() {
             commands::skills::add_skill_resource_file,
             commands::skills::remove_skill_resource_file,
             commands::skills::read_skill_resource_file,
+            // Agent Team Mode (Workspace) 相关命令
+            workspace::commands::workspace_create,
+            workspace::commands::workspace_list,
+            workspace::commands::workspace_delete,
+            workspace::commands::workspace_create_agent_manual,
+            workspace::commands::workspace_list_agents,
+            workspace::commands::workspace_delete_agent,
+            workspace::commands::workspace_send_user_message,
+            workspace::commands::workspace_list_messages,
+            workspace::commands::workspace_list_logs,
+            workspace::commands::workspace_resolve_proposal,
+            workspace::commands::workspace_resolve_sleep_request,
+            workspace::commands::workspace_resolve_question,
             // 日志相关命令
             get_log_path,
             read_log_file,
@@ -214,7 +230,11 @@ fn main() {
             if let Err(e) = init_knowledge_base(&conn) {
                 log::error!("Failed to initialize knowledge base tables: {}", e);
             }
-            
+
+            if let Err(e) = init_workspace_tables(&conn) {
+                log::error!("Failed to initialize workspace tables: {}", e);
+            }
+
             let app_data_dir = match app.handle().path().app_data_dir() {
                 Ok(dir) => dir,
                 Err(e) => {
@@ -245,11 +265,25 @@ fn main() {
             
             // 注册全局状态
             app.manage(DbState(Arc::new(Mutex::new(db))));
-            app.manage(KbState { 
+            app.manage(KbState {
                 vector_store: Arc::new(vector_store),
                 db_path,
             });
+            app.manage(WorkspaceState::default());
+            app.manage(PendingProposals::default());
+            app.manage(PendingSleepRequests::default());
+            app.manage(PendingQuestions::default());
+            app.manage(PendingMeetingTurns::default());
             log::info!("Database and vector store initialized");
+
+            if std::env::var("BAIYU_WORKSPACE_SMOKE_TEST").is_ok() {
+                let smoke_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    workspace_smoke_test::run(smoke_handle).await;
+                    log::info!("[smoke_test] 进程即将退出");
+                    std::process::exit(0);
+                });
+            }
             
             // 确保主窗口显示并聚焦（解决窗口启动后被遮挡的问题）
             if let Some(window) = app.get_webview_window("main") {
