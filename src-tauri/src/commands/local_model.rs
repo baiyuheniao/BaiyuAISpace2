@@ -1226,23 +1226,12 @@ pub async fn search_ollama_models(
     let mut results = Vec::new();
     for task in tasks {
         if let Ok((name, description, tags)) = task.await {
-            // Include the base model entry
             results.push(ModelSearchResult {
-                name: name.clone(),
-                description: description.clone(),
-                tags: tags.clone(),
+                name,
+                description,
+                tags,
                 size_info: String::new(),
             });
-            // Also surface each tagged variant as its own entry so users can
-            // pick a specific size directly from the search list
-            for tag in &tags {
-                results.push(ModelSearchResult {
-                    name: format!("{}:{}", name, tag),
-                    description: description.clone(),
-                    tags: vec![],
-                    size_info: String::new(),
-                });
-            }
         }
     }
 
@@ -1295,15 +1284,20 @@ async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<Str
 }
 
 /// Returns true for tags a typical user wants to see:
-///   - "latest"
 ///   - bare size tags: "7b", "72b", "0.5b"
 ///   - instruction / base / vision / code / tool variants WITHOUT a quantization suffix
 ///     e.g. "7b-instruct", "3b-base", "8b-code-instruct"
-///   Filtered out: anything ending in -q2_K, -q4_0, -q4_K_M, -f16, -fp16, -q8_0, etc.
+///   Filtered out:
+///     - "latest" (alias, not a real version)
+///     - quantization variants: -q2_K, -q4_0, -q4_K_M, -f16, -fp16, -q8_0, etc.
 fn is_top_level_tag(tag: &str) -> bool {
-    if tag == "latest" {
-        return true;
+    let lower = tag.to_lowercase();
+
+    // Filter out "latest" — it's just an alias, not a real version
+    if lower == "latest" {
+        return false;
     }
+
     // Quantization suffix patterns used by Ollama
     let quant_suffixes = [
         "-q2_k", "-q3_k_s", "-q3_k_m", "-q3_k_l",
@@ -1316,7 +1310,6 @@ fn is_top_level_tag(tag: &str) -> bool {
         "q5_0", "q5_1", "q5_k_s", "q5_k_m",
         "q6_k", "q8_0",
     ];
-    let lower = tag.to_lowercase();
     !quant_suffixes.iter().any(|suffix| lower.ends_with(suffix))
 }
 

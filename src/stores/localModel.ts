@@ -557,8 +557,14 @@ export const useLocalModelStore = defineStore(
     /**
      * 一键本地部署：启动服务 → 下载模型 → 创建 API 配置
      * @param modelName 模型名称
+     * @param configName 配置名称，默认为 local-{modelName}
+     * @param customBaseUrl 自定义服务地址，默认使用当前 ollamaBaseUrl
      */
-    const oneClickDeploy = async (modelName: string) => {
+    const oneClickDeploy = async (
+      modelName: string,
+      configName?: string,
+      customBaseUrl?: string,
+    ) => {
       // Ensure service is running
       if (!isOnline.value) {
         await startService();
@@ -567,23 +573,22 @@ export const useLocalModelStore = defineStore(
         }
       }
 
-      // Pull model
+      // Pull model (no-op if already downloaded)
       await pullModel(modelName, "ollama");
 
-      // Auto-create API config for this model if not exists
+      // Create API config if not exists
       const settings = useSettingsStore();
       const existingConfig = settings.apiConfigs.find(
         (c) => c.provider === "local" && c.model === modelName
       );
 
       if (!existingConfig) {
-        const configName = `local-${modelName}`;
         settings.createApiConfig(
-          configName,
+          configName || `local-${modelName}`,
           "local",
           modelName,
           "", // Local Ollama doesn't need API key
-          ollamaBaseUrl.value.replace(/\/$/, "")
+          (customBaseUrl || ollamaBaseUrl.value).replace(/\/$/, "")
         );
       }
 

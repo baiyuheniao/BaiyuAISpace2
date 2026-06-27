@@ -14,6 +14,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { storeToRefs } from "pinia";
 import {
   NLayout,
   NLayoutContent,
@@ -35,14 +36,19 @@ import {
   NTooltip,
   NTabs,
   NTabPane,
+  NModal,
+  NForm,
+  NFormItem,
   useMessage,
 } from "naive-ui";
+import { useRouter } from "vue-router";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import {
   useLocalModelStore,
   type ModelSource,
 } from "@/stores/localModel";
 import { useLMStudioStore } from "@/stores/lmStudio";
+import { useSettingsStore } from "@/stores/settings";
 import {
   HardwareChipOutline,
   RefreshOutline,
@@ -56,6 +62,7 @@ import {
   CloudDownloadOutline,
   TrashOutline,
   OpenOutline,
+  ChatbubblesOutline,
 } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
@@ -65,6 +72,13 @@ const localModel = useLocalModelStore();
 
 // LM Studio Store
 const lmStudio = useLMStudioStore();
+
+// Settings Store（用于读取/管理 API 配置）
+const settings = useSettingsStore();
+const { apiConfigs } = storeToRefs(settings);
+
+// 路由（用于跳转到 Chat）
+const router = useRouter();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
@@ -257,13 +271,76 @@ const handleSelectSearchResult = async (modelName: string) => {
   }
 };
 
-/** 一键部署 */
-const handleOneClickDeploy = async (modelName: string) => {
+// ============ 部署弹窗状态 ============
+
+/** 是否显示部署参数弹窗 */
+const showDeployModal = ref(false);
+
+/** 当前要部署的模型名 */
+const deployTargetModel = ref("");
+
+/** 部署表单数据 */
+const deployForm = ref({ configName: "", baseUrl: "" });
+
+/** 是否正在执行部署 */
+const isDeploying = ref(false);
+
+/** 本地已部署模型的 Map: model.name → ApiConfig */
+const localDeployedConfigMap = computed(() =>
+  Object.fromEntries(
+    apiConfigs.value
+      .filter((c) => c.provider === "local")
+      .map((c) => [c.model, c])
+  )
+);
+
+/** 获取模型对应的已部署 API 配置（无则返回 null） */
+const getDeployedConfig = (modelName: string) =>
+  localDeployedConfigMap.value[modelName] ?? null;
+
+/** 打开部署参数弹窗 */
+const handleOpenDeployModal = (modelName: string) => {
+  deployTargetModel.value = modelName;
+  deployForm.value = {
+    configName: `local-${modelName}`,
+    baseUrl: localModel.ollamaBaseUrl,
+  };
+  showDeployModal.value = true;
+};
+
+/** 确认部署 */
+const handleConfirmDeploy = async () => {
+  isDeploying.value = true;
   try {
-    await localModel.oneClickDeploy(modelName);
-    message.success(`模型 ${modelName} 部署完成`);
+    await localModel.oneClickDeploy(
+      deployTargetModel.value,
+      deployForm.value.configName.trim() || undefined,
+      deployForm.value.baseUrl.trim() || undefined,
+    );
+    showDeployModal.value = false;
+    message.success(`模型 ${deployTargetModel.value} 部署完成，可在对话中使用`);
   } catch (error) {
     message.error(`部署失败: ${error}`);
+  } finally {
+    isDeploying.value = false;
+  }
+};
+
+/** 取消部署（删除对应 API 配置） */
+const handleUndeploy = (modelName: string) => {
+  const config = getDeployedConfig(modelName);
+  if (config) {
+    settings.deleteApiConfig(config.id);
+    message.success(`已取消部署: ${modelName}`);
+  }
+};
+
+/** 切换到该模型并跳转对话 */
+const handleGoToChat = (modelName: string) => {
+  const config = getDeployedConfig(modelName);
+  if (config) {
+    settings.setActiveConfig(config.id);
+    router.push("/");
   }
 };
 
@@ -632,47 +709,56 @@ onMounted(async () => {
                 v-else-if="localModel.modelSearchResults.length > 0"
                 bordered
                 size="small"
+                class="search-result-list"
               >
-                <n-list-item
+                <template
                   v-for="result in localModel.modelSearchResults"
                   :key="result.name"
                 >
-                  <n-thing>
-                    <template #header>{{ result.name }}</template>
-                    <template #description>
-                      <n-space size="small" style="margin-top: 4px; flex-wrap: wrap;">
-                        <n-text v-if="result.description" depth="3" style="font-size: 12px;">
-                          {{ result.description }}
-                        </n-text>
-                        <n-tag
-                          v-for="tag in result.tags"
-                          :key="tag"
-                          size="small"
-                          style="cursor: pointer;"
-                          :type="downloadingSearchResult === `${result.name}:${tag}` ? 'info' : 'default'"
-                          :disabled="downloadingSearchResult !== null"
-                          @click="!downloadingSearchResult && handleSelectSearchResult(`${result.name}:${tag}`)"
-                        >
-                          {{ tag }}
-                        </n-tag>
-                      </n-space>
-                    </template>
-                  </n-thing>
-                  <template #suffix>
-                    <n-button
-                      size="small"
-                      type="primary"
-                      :loading="downloadingSearchResult === result.name"
-                      :disabled="downloadingSearchResult !== null && downloadingSearchResult !== result.name"
-                      @click="handleSelectSearchResult(result.name)"
-                    >
-                      <template #icon>
-                        <n-icon><CloudDownloadOutline /></n-icon>
+                  <!-- 模型系列行 -->
+                  <n-list-item class="search-result-series">
+                    <n-thing>
+                      <template #header>
+                        <n-text strong>{{ result.name }}</n-text>
                       </template>
-                      {{ downloadingSearchResult === result.name ? '下载中...' : '下载' }}
-                    </n-button>
-                  </template>
-                </n-list-item>
+                      <template v-if="result.description" #description>
+                        <n-text depth="3" style="font-size: 12px;">{{ result.description }}</n-text>
+                      </template>
+                    </n-thing>
+                    <template #suffix>
+                      <n-button
+                        size="small"
+                        type="primary"
+                        :loading="downloadingSearchResult === result.name"
+                        :disabled="downloadingSearchResult !== null && downloadingSearchResult !== result.name"
+                        @click="handleSelectSearchResult(result.name)"
+                      >
+                        <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                        {{ downloadingSearchResult === result.name ? '下载中...' : '下载' }}
+                      </n-button>
+                    </template>
+                  </n-list-item>
+
+                  <!-- 各尺寸版本子行 -->
+                  <n-list-item
+                    v-for="tag in result.tags"
+                    :key="`${result.name}:${tag}`"
+                    class="search-result-tag-row"
+                  >
+                    <n-text style="font-size: 13px;">{{ result.name }}:{{ tag }}</n-text>
+                    <template #suffix>
+                      <n-button
+                        size="small"
+                        :loading="downloadingSearchResult === `${result.name}:${tag}`"
+                        :disabled="downloadingSearchResult !== null && downloadingSearchResult !== `${result.name}:${tag}`"
+                        @click="handleSelectSearchResult(`${result.name}:${tag}`)"
+                      >
+                        <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                        {{ downloadingSearchResult === `${result.name}:${tag}` ? '下载中...' : '下载' }}
+                      </n-button>
+                    </template>
+                  </n-list-item>
+                </template>
               </n-list>
 
               <!-- 手动输入模型名下载 -->
@@ -806,22 +892,49 @@ onMounted(async () => {
                   </template>
                 </n-thing>
                 <template #suffix>
-                  <n-space :size="4">
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button
-                          size="small"
-                          type="primary"
-                          @click="handleOneClickDeploy(model.name)"
-                        >
-                          <template #icon>
-                            <n-icon><RocketOutline /></n-icon>
-                          </template>
-                          部署
-                        </n-button>
-                      </template>
-                      一键部署并创建聊天配置
-                    </n-tooltip>
+                  <n-space :size="4" align="center">
+                    <!-- 已部署状态 -->
+                    <template v-if="getDeployedConfig(model.name)">
+                      <n-tag type="success" size="small">已部署</n-tag>
+                      <n-button
+                        size="small"
+                        type="primary"
+                        @click="handleGoToChat(model.name)"
+                      >
+                        <template #icon>
+                          <n-icon><ChatbubblesOutline /></n-icon>
+                        </template>
+                        去对话
+                      </n-button>
+                      <n-popconfirm @positive-click="handleUndeploy(model.name)">
+                        <template #trigger>
+                          <n-button size="small" secondary>
+                            取消部署
+                          </n-button>
+                        </template>
+                        取消部署将删除对应的 API 配置，确定继续？
+                      </n-popconfirm>
+                    </template>
+
+                    <!-- 未部署状态 -->
+                    <template v-else>
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            size="small"
+                            type="primary"
+                            @click="handleOpenDeployModal(model.name)"
+                          >
+                            <template #icon>
+                              <n-icon><RocketOutline /></n-icon>
+                            </template>
+                            部署
+                          </n-button>
+                        </template>
+                        创建聊天配置以在对话中使用此模型
+                      </n-tooltip>
+                    </template>
+
                     <n-popconfirm @positive-click="handleDeleteModel(model.name)">
                       <template #trigger>
                         <n-button
@@ -1190,6 +1303,43 @@ onMounted(async () => {
       </div>
     </n-layout-content>
   </n-layout>
+
+  <!-- 部署参数配置弹窗 -->
+  <n-modal
+    v-model:show="showDeployModal"
+    preset="card"
+    title="部署配置"
+    style="width: 420px;"
+    :mask-closable="!isDeploying"
+    :closable="!isDeploying"
+  >
+    <n-form label-placement="left" label-width="80">
+      <n-form-item label="配置名称">
+        <n-input
+          v-model:value="deployForm.configName"
+          placeholder="自定义配置名称"
+        />
+      </n-form-item>
+      <n-form-item label="服务地址">
+        <n-input
+          v-model:value="deployForm.baseUrl"
+          placeholder="http://localhost:11434"
+        />
+      </n-form-item>
+    </n-form>
+    <n-text depth="3" style="font-size: 12px;">
+      部署后将在"设置"中创建对应 API 配置，可直接在对话中切换使用。
+    </n-text>
+    <template #footer>
+      <n-space justify="end">
+        <n-button :disabled="isDeploying" @click="showDeployModal = false">取消</n-button>
+        <n-button type="primary" :loading="isDeploying" @click="handleConfirmDeploy">
+          <template #icon><n-icon><RocketOutline /></n-icon></template>
+          确认部署
+        </n-button>
+      </n-space>
+    </template>
+  </n-modal>
 </template>
 
 <style scoped lang="scss">
@@ -1244,6 +1394,22 @@ onMounted(async () => {
     margin-bottom: 8px;
     padding-bottom: 4px;
     border-bottom: 1px dashed var(--n-border-color);
+  }
+}
+
+/* 搜索结果列表 */
+.search-result-list {
+  .search-result-series {
+    background: var(--n-color-modal);
+  }
+
+  .search-result-tag-row {
+    padding-left: 28px !important;
+
+    :deep(.n-list-item__main) {
+      display: flex;
+      align-items: center;
+    }
   }
 }
 </style>
