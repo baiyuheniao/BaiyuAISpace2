@@ -96,13 +96,19 @@ impl VectorStore {
         .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
     }
 
-    /// Hard cap on vectors loaded per search to prevent OOM on large knowledge bases.
-    /// Full cosine-similarity scan is O(N); this bounds worst-case memory usage.
-    const VECTOR_SCAN_LIMIT: i64 = 50_000;
+    /// Above this many vectors in a single knowledge base, log an informational
+    /// note that an exact full scan is being performed. This NEVER excludes any
+    /// data — it only hints that an ANN index might be worthwhile if query
+    /// latency ever becomes user-visible at this scale.
+    const LARGE_KB_SCAN_HINT: u64 = 200_000;
 
-    /// Vector search using cosine similarity.
+    /// Vector search using exact cosine similarity over ALL vectors in the
+    /// knowledge base (no document is ever excluded from candidacy).
+    ///
     /// Wrapped in `spawn_blocking` so blocking SQLite I/O doesn't stall the
-    /// async executor, and capped at `VECTOR_SCAN_LIMIT` rows to bound memory.
+    /// async executor. Memory is bounded to O(top_k) by streaming rows through
+    /// a fixed-size min-heap instead of materializing every scored row into a
+    /// Vec — peak memory no longer scales with the size of the knowledge base.
     pub async fn search(
         &self,
         kb_id: &str,
@@ -113,6 +119,12 @@ impl VectorStore {
         let kb_id = kb_id.to_string();
 
         tokio::task::spawn_blocking(move || {
+            // A non-positive top_k means "no results requested".
+            if top_k <= 0 {
+                return Ok(Vec::new());
+            }
+            let top_k = top_k as usize;
+
             let main_db_path = std::path::Path::new(&db_path)
                 .parent()
                 .map(|p| p.join("app.db"))
@@ -128,40 +140,66 @@ impl VectorStore {
                     FROM vectors v
                     JOIN chunks c ON v.chunk_id = c.id
                     WHERE v.kb_id = ?1
-                    LIMIT ?2
                     "#,
                 )
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
+            // `query_map` is a lazy cursor — rows arrive one at a time and are
+            // NOT all materialized in memory. We compute each score and keep
+            // only the running top_k in a min-heap, so peak memory stays O(top_k).
             let rows = stmt
-                .query_map(rusqlite::params![kb_id, Self::VECTOR_SCAN_LIMIT], |row| {
+                .query_map([&kb_id], |row| {
                     let chunk_id: String = row.get(0)?;
                     let document_id: String = row.get(1)?;
                     let content: String = row.get(2)?;
                     let vector_bytes: Vec<u8> = row.get(3)?;
-                    let vector = bytes_to_vector(&vector_bytes);
-                    Ok((chunk_id, document_id, content, vector))
+                    Ok((chunk_id, document_id, content, vector_bytes))
                 })
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-            let mut scored_results: Vec<(String, String, String, f32)> = Vec::new();
+            // Min-heap of the best top_k so far. `Reverse` makes BinaryHeap (a
+            // max-heap) behave as a min-heap, so the smallest score sits on top
+            // and is the one evicted once we exceed top_k.
+            let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>> =
+                std::collections::BinaryHeap::with_capacity(top_k + 1);
+
+            let mut scanned: u64 = 0;
             for row in rows {
-                let (chunk_id, document_id, content, vector) =
+                let (chunk_id, document_id, content, vector_bytes) =
                     row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-                let similarity = cosine_similarity(&query_vector, &vector);
-                scored_results.push((chunk_id, document_id, content, similarity));
+                scanned += 1;
+
+                let vector = bytes_to_vector(&vector_bytes);
+                let score = cosine_similarity(&query_vector, &vector);
+                // `vector` (the largest per-row allocation) is dropped here.
+
+                push_capped(
+                    &mut heap,
+                    ScoredChunk { score, chunk_id, document_id, content },
+                    top_k,
+                );
             }
 
-            // unwrap_or(Equal) guards against NaN scores from malformed embeddings
-            scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
-            scored_results.truncate(top_k as usize);
+            if scanned > Self::LARGE_KB_SCAN_HINT {
+                log::info!(
+                    "[KB] Exact full scan over {} vectors in '{}' (complete, no exclusion). \
+                     Consider an ANN index if query latency becomes noticeable at this scale.",
+                    scanned, kb_id
+                );
+            }
+
+            let results: Vec<(String, String, String, f32)> = drain_sorted_desc(heap)
+                .into_iter()
+                .map(|s| (s.chunk_id, s.document_id, s.content, s.score))
+                .collect();
 
             log::info!(
-                "Vector search for {} returned {} results",
+                "Vector search for {} scanned {} vectors, returned {} results",
                 kb_id,
-                scored_results.len()
+                scanned,
+                results.len()
             );
-            Ok(scored_results)
+            Ok(results)
         })
         .await
         .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
@@ -200,6 +238,66 @@ impl VectorStore {
         rusqlite::Connection::open(&main_db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))
     }
+}
+
+/// One scored candidate held in the top-k min-heap during a vector search.
+/// Ordered solely by `score`; NaN scores (from malformed embeddings) sort as
+/// the smallest so they are evicted first and never crowd out real results.
+struct ScoredChunk {
+    score: f32,
+    chunk_id: String,
+    document_id: String,
+    content: String,
+}
+
+impl PartialEq for ScoredChunk {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for ScoredChunk {}
+impl PartialOrd for ScoredChunk {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ScoredChunk {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Treat NaN as strictly the smallest value so a NaN candidate is always
+        // evicted before any real-scored one and never displaces a real result.
+        match self.score.partial_cmp(&other.score) {
+            Some(ord) => ord,
+            None => match (self.score.is_nan(), other.score.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => Ordering::Equal, // unreachable for finite f32
+            },
+        }
+    }
+}
+
+/// Push a candidate into a bounded top-k min-heap, evicting the current lowest
+/// score once the heap exceeds `top_k`. Keeps peak memory at O(top_k).
+fn push_capped(
+    heap: &mut std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>>,
+    item: ScoredChunk,
+    top_k: usize,
+) {
+    heap.push(std::cmp::Reverse(item));
+    if heap.len() > top_k {
+        heap.pop();
+    }
+}
+
+/// Drain a top-k min-heap into a Vec sorted by score descending (best first).
+fn drain_sorted_desc(
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>>,
+) -> Vec<ScoredChunk> {
+    let mut scored: Vec<ScoredChunk> = heap.into_iter().map(|r| r.0).collect();
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored
 }
 
 /// Convert vector (f32 array) to bytes
@@ -420,4 +518,72 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
 
     log::info!("Knowledge base SQLite tables initialized");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run the real bounded-heap selection (push_capped + drain_sorted_desc)
+    /// over a set of scores and return the resulting chunk_ids in order.
+    fn heap_top_k(scores: &[f32], top_k: usize) -> Vec<String> {
+        let mut heap = std::collections::BinaryHeap::new();
+        for (i, &score) in scores.iter().enumerate() {
+            push_capped(
+                &mut heap,
+                ScoredChunk {
+                    score,
+                    chunk_id: i.to_string(),
+                    document_id: "d".to_string(),
+                    content: String::new(),
+                },
+                top_k,
+            );
+        }
+        drain_sorted_desc(heap).into_iter().map(|s| s.chunk_id).collect()
+    }
+
+    /// Naive reference: score every item, sort descending, take top_k.
+    fn naive_top_k(scores: &[f32], top_k: usize) -> Vec<String> {
+        let mut idx: Vec<usize> = (0..scores.len()).collect();
+        idx.sort_by(|&a, &b| {
+            scores[b].partial_cmp(&scores[a]).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        idx.into_iter().take(top_k).map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn heap_matches_naive_full_sort() {
+        // Deterministic pseudo-random scores; distinct so ordering is unambiguous.
+        let n = 1000usize;
+        let scores: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = ((i as u64).wrapping_mul(2654435761) % 1_000_003) as f32;
+                x / 1_000_003.0
+            })
+            .collect();
+
+        for &top_k in &[1usize, 5, 20, 100] {
+            let heap_ids = heap_top_k(&scores, top_k);
+            let naive_ids = naive_top_k(&scores, top_k);
+            assert_eq!(heap_ids, naive_ids, "mismatch at top_k={}", top_k);
+        }
+    }
+
+    #[test]
+    fn nan_scores_are_evicted_before_real_results() {
+        // Three real results and several NaN candidates; with top_k=3 the NaNs
+        // must all be evicted and only the real scores survive, in order.
+        let scores = vec![f32::NAN, 0.9, f32::NAN, 0.1, 0.5, f32::NAN];
+        let ids = heap_top_k(&scores, 3);
+        assert_eq!(ids, vec!["1".to_string(), "4".to_string(), "3".to_string()]);
+        // indices: 1 -> 0.9, 4 -> 0.5, 3 -> 0.1
+    }
+
+    #[test]
+    fn top_k_larger_than_input_returns_all_sorted() {
+        let scores = vec![0.2f32, 0.8, 0.5];
+        let ids = heap_top_k(&scores, 10);
+        assert_eq!(ids, vec!["1".to_string(), "2".to_string(), "0".to_string()]);
+    }
 }
