@@ -15,6 +15,12 @@ import { useSettingsStore } from "./settings";
 import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
 import { useMCPStore, type MCPTool } from "./mcp";
 
+/** 图片附件（base64 编码，不含 data URL 前缀） */
+export interface ImageAttachment {
+  data: string;       // 原始 base64 字符串
+  mediaType: string;  // MIME 类型，如 "image/jpeg"
+}
+
 /**
  * 前端消息类型
  * 用于在 UI 层表示聊天消息
@@ -30,6 +36,7 @@ export interface Message {
     name: string;                 // 文件名
     size: number;                 // 文件大小 (字节)
   }>;
+  images?: ImageAttachment[];     // 图片附件（已转 base64）
 }
 
 /**
@@ -128,6 +135,9 @@ export const useChatStore = defineStore("chat", () => {
 
   /** 是否允许模型自主判断调用其它已启用的 Skill */
   const skillAutonomyEnabled = ref(false);
+
+  /** 是否启用思考模式 (Extended Thinking) */
+  const thinkingEnabled = ref(false);
 
   // ============ 会话管理函数 ============
 
@@ -518,12 +528,13 @@ export const useChatStore = defineStore("chat", () => {
   /**
    * 发送消息 (核心函数)
    * 处理用户消息发送、LLM 调用、流式响应等完整流程
-   * 
+   *
    * @param content - 消息内容
-   * @param attachedFiles - 附件文件列表 (可选)
+   * @param attachedFiles - 附件文件列表 (可选, 仅元数据)
+   * @param images - 图片附件 (可选, 含 base64 数据)
    * @returns void
    */
-  const sendMessage = async (content: string, attachedFiles?: Array<{ name: string; size: number }>) => {
+  const sendMessage = async (content: string, attachedFiles?: Array<{ name: string; size: number }>, images?: ImageAttachment[]) => {
     // 检查是否有当前会话
     if (!currentSession.value) return;
 
@@ -576,6 +587,7 @@ export const useChatStore = defineStore("chat", () => {
       content,
       timestamp: Date.now(),
       files: attachedFiles && attachedFiles.length > 0 ? attachedFiles : undefined,
+      images: images && images.length > 0 ? images : undefined,
     };
 
     // 添加到当前会话
@@ -612,6 +624,7 @@ export const useChatStore = defineStore("chat", () => {
               content: enhancedContent,  // 使用增强后的内容
               timestamp: m.timestamp,
               error: m.error,
+              images: m.images ?? [],
             };
           }
           return {
@@ -620,6 +633,7 @@ export const useChatStore = defineStore("chat", () => {
             content: m.content,
             timestamp: m.timestamp,
             error: m.error,
+            images: m.images ?? [],
           };
         });
 
@@ -641,6 +655,7 @@ export const useChatStore = defineStore("chat", () => {
             content: mcpSystemPrompt,
             timestamp: Date.now(),
             error: undefined,
+            images: [],
           });
         }
       }
@@ -656,6 +671,7 @@ export const useChatStore = defineStore("chat", () => {
         enableMcp: mcpEnabled.value,
         activeSkillIds: activeSkillIds.value,
         enableSkillAutonomy: skillAutonomyEnabled.value,
+        enableThinking: thinkingEnabled.value,
       } as const;
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
@@ -898,6 +914,7 @@ ${toolDefs}
     mcpEnabled,
     activeSkillIds,
     skillAutonomyEnabled,
+    thinkingEnabled,
 
     // 方法
     createSession,           // 创建新会话

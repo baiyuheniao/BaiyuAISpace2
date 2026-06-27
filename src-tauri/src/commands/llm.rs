@@ -30,6 +30,16 @@ use uuid::Uuid;
 
 // ============ 类型定义 ============
 
+/// 图片附件 (base64 编码, 不含 data URL 前缀)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    /// 原始 base64 数据 (不含 "data:...;base64," 前缀)
+    pub data: String,
+    /// MIME 类型, 如 "image/jpeg"
+    pub media_type: String,
+}
+
 /// 聊天消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -43,6 +53,9 @@ pub struct ChatMessage {
     pub timestamp: i64,
     /// 错误信息 (如果有)
     pub error: Option<String>,
+    /// 图片附件 (仅 user 消息有效)
+    #[serde(default)]
+    pub images: Vec<ImageAttachment>,
 }
 
 /// 聊天会话结构
@@ -90,6 +103,9 @@ pub struct SendMessageRequest {
     /// 是否允许模型自主判断调用其它已启用的 Skill
     #[serde(default)]
     pub enable_skill_autonomy: bool,
+    /// 是否启用思考模式 (Extended Thinking)
+    #[serde(default)]
+    pub enable_thinking: bool,
 }
 
 /// 流式响应事件结构
@@ -210,28 +226,44 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
     }
 }
 
-fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool]) -> serde_json::Value {
+fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool], enable_thinking: bool) -> serde_json::Value {
     match provider {
         "anthropic" => {
             let system_msg = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
-            
+
             let msgs: Vec<_> = messages
                 .iter()
                 .filter(|m| m.role != "system")
                 .map(|m| {
-                    serde_json::json!({
-                        "role": if m.role == "assistant" { "assistant" } else { "user" },
-                        "content": m.content
-                    })
+                    let role = if m.role == "assistant" { "assistant" } else { "user" };
+                    if role == "user" && !m.images.is_empty() {
+                        // Anthropic image format: separate source.media_type + source.data (NOT data URL)
+                        let mut blocks: Vec<serde_json::Value> = m.images.iter().map(|img| serde_json::json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
+                        })).collect();
+                        if !m.content.is_empty() {
+                            blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+                        }
+                        serde_json::json!({"role": "user", "content": blocks})
+                    } else {
+                        serde_json::json!({"role": role, "content": m.content})
+                    }
                 })
                 .collect();
 
+            // Thinking requires higher token budget
+            let max_tokens = if enable_thinking { 16000 } else { 4096 };
             let mut body = serde_json::json!({
                 "model": model,
                 "messages": msgs,
-                "max_tokens": 4096,
+                "max_tokens": max_tokens,
                 "stream": true,
             });
+
+            if enable_thinking {
+                body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 8000});
+            }
 
             if let Some(sys) = system_msg {
                 body["system"] = serde_json::json!(sys);
@@ -260,18 +292,36 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 .iter()
                 .filter(|m| m.role != "system")
                 .map(|m| {
-                    serde_json::json!({
-                        "role": if m.role == "assistant" { "model" } else { "user" },
-                        "parts": [{ "text": m.content }]
-                    })
+                    let role = if m.role == "assistant" { "model" } else { "user" };
+                    if role == "user" && !m.images.is_empty() {
+                        // Gemini image format: inline_data with mime_type + raw base64 (NOT data URL)
+                        let mut parts: Vec<serde_json::Value> = vec![];
+                        if !m.content.is_empty() {
+                            parts.push(serde_json::json!({"text": m.content}));
+                        }
+                        for img in &m.images {
+                            parts.push(serde_json::json!({
+                                "inline_data": {"mime_type": img.media_type, "data": img.data}
+                            }));
+                        }
+                        serde_json::json!({"role": "user", "parts": parts})
+                    } else {
+                        serde_json::json!({"role": role, "parts": [{"text": m.content}]})
+                    }
                 })
                 .collect();
 
+            let mut generation_config = serde_json::json!({
+                "maxOutputTokens": 4096,
+            });
+            if enable_thinking {
+                // Gemini 2.5 series: thinkingBudget; 3.x series uses thinkingLevel
+                generation_config["thinkingConfig"] = serde_json::json!({"thinkingBudget": 8000});
+            }
+
             let mut body = serde_json::json!({
                 "contents": contents,
-                "generationConfig": {
-                    "maxOutputTokens": 4096,
-                }
+                "generationConfig": generation_config,
             });
 
             // Gemini ignores a system-role entry inside `contents` -- the system
@@ -305,10 +355,22 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             let msgs: Vec<_> = messages
                 .iter()
                 .map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content
-                    })
+                    if m.role == "user" && !m.images.is_empty() {
+                        // OpenAI-compatible image format: image_url with data URL
+                        let mut content: Vec<serde_json::Value> = vec![];
+                        if !m.content.is_empty() {
+                            content.push(serde_json::json!({"type": "text", "text": m.content}));
+                        }
+                        for img in &m.images {
+                            content.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {"url": format!("data:{};base64,{}", img.media_type, img.data)}
+                            }));
+                        }
+                        serde_json::json!({"role": m.role, "content": content})
+                    } else {
+                        serde_json::json!({"role": m.role, "content": m.content})
+                    }
                 })
                 .collect();
 
@@ -317,6 +379,12 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 "messages": msgs,
                 "stream": true,
             });
+
+            // SiliconFlow thinking: enable_thinking + thinking_budget (Qwen3 series)
+            if enable_thinking && provider == "siliconflow" {
+                body["enable_thinking"] = serde_json::json!(true);
+                body["thinking_budget"] = serde_json::json!(8000);
+            }
 
             // Add tools if available
             if !tools.is_empty() {
@@ -699,8 +767,11 @@ pub async fn stream_message(
     state: tauri::State<'_, DbState>,
     app_handle: AppHandle,
 ) -> Result<(), LLMError> {
-    log::info!("[stream_message] Called - session_id: {}, message_count: {}, enable_mcp: {}", 
-        request.session_id, request.messages.len(), request.enable_mcp);
+    log::info!(
+        "[LLM] stream_message: session={} provider={} model={} messages={} mcp={}",
+        request.session_id, request.provider, request.model,
+        request.messages.len(), request.enable_mcp
+    );
     
     let api_key = get_api_key(&request)?;
     let message_id = Uuid::new_v4().to_string();
@@ -788,6 +859,7 @@ pub async fn stream_message(
                     content: skill_context,
                     timestamp: chrono::Utc::now().timestamp_millis(),
                     error: None,
+                    images: vec![],
                 });
             }
         }
@@ -813,7 +885,7 @@ pub async fn stream_message(
     }
 
     let client = create_http_client()?;
-    let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools);
+    let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking);
     append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);
 
@@ -1053,6 +1125,7 @@ async fn finalize_turn(
         }
     }
 
+    log::info!("[LLM] stream_message 完成: session={}", request.session_id);
     let _ = app_handle.emit("stream-chunk", StreamChunk {
         session_id: request.session_id.clone(),
         message_id: message_id.to_string(),
@@ -1678,9 +1751,9 @@ mod provider_tool_calling_tests {
     fn anthropic_request_body_carries_tools_in_anthropic_shape() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None,
+            timestamp: 0, error: None, images: vec![],
         }];
-        let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()]);
+        let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "get_weather");
@@ -1692,9 +1765,9 @@ mod provider_tool_calling_tests {
     fn google_request_body_groups_tools_under_function_declarations() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None,
+            timestamp: 0, error: None, images: vec![],
         }];
-        let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()]);
+        let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools.len(), 1, "Gemini nests every declaration under a single tools[0] entry");
         let declarations = tools[0]["functionDeclarations"].as_array().expect("functionDeclarations array");
@@ -1774,9 +1847,9 @@ mod provider_tool_calling_tests {
     fn openai_shape_unaffected_by_provider_branching() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None,
+            timestamp: 0, error: None, images: vec![],
         }];
-        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()]);
+        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "get_weather");
@@ -1835,9 +1908,9 @@ mod provider_tool_calling_tests {
     #[test]
     fn build_native_messages_matches_provider_shapes() {
         let messages = vec![
-            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None },
-            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None },
-            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None },
+            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![] },
+            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![] },
+            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![] },
         ];
 
         let anthropic = build_native_messages("anthropic", &messages);

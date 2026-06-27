@@ -363,6 +363,7 @@ impl Database {
                 content: row.get(2)?,
                 timestamp: row.get(3)?,
                 error: if error.as_deref() == Some("") { None } else { error },
+                images: vec![],
             })
         })?;
 

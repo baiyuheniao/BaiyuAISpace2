@@ -370,6 +370,12 @@ pub async fn send_workspace_message(
     to_agent_id: &str,
     content: &str,
 ) {
+    log::info!(
+        "[workspace] 消息路由: {} → {} | {}...",
+        from_agent_id,
+        to_agent_id,
+        content.chars().take(80).collect::<String>()
+    );
     let msg = WorkspaceMessage {
         id: Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
@@ -592,6 +598,11 @@ async fn process_agent_wake(
         .await?
         .ok_or_else(|| WorkspaceError::NotFound(workspace_id.to_string()))?;
 
+    log::info!(
+        "[workspace] 唤醒 Agent「{}」({}) - workspace: {} model: {}/{}",
+        agent.name, agent_id, workspace.name, agent.provider, agent.model
+    );
+
     // Keep Meeting status visible while the agent speaks during a round-robin;
     // only promote to Running when starting a normal (non-meeting) wake.
     if agent.status != AgentStatus::Meeting {
@@ -600,6 +611,7 @@ async fn process_agent_wake(
 
     let chat_history = build_chat_history(app_handle, workspace_id, &agent).await;
     if chat_history.is_empty() {
+        log::debug!("[workspace] Agent「{}」历史消息为空，跳过本次唤醒", agent.name);
         set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
         return Ok(());
     }
@@ -633,12 +645,17 @@ async fn process_agent_wake(
         }
     }
 
+    log::debug!(
+        "[workspace] Agent「{}」开始推理 - 历史 {} 条消息，可用工具 {} 个",
+        agent.name, chat_history.len(), tools.len()
+    );
     let mut produced_final_text = false;
-    for _ in 0..MAX_ROUNDS_PER_WAKE {
+    for round in 0..MAX_ROUNDS_PER_WAKE {
         if cancel.is_cancelled() {
             return Ok(());
         }
 
+        log::debug!("[workspace] Agent「{}」第 {} 轮推理", agent.name, round + 1);
         let outcome = run_turn(
             &agent.provider,
             &agent.model,
@@ -653,6 +670,10 @@ async fn process_agent_wake(
 
         match outcome {
             TurnOutcome::Text(text) => {
+                log::info!(
+                    "[workspace] Agent「{}」产出最终回复 ({} 字符)",
+                    agent.name, text.len()
+                );
                 append_text_reply(&agent.provider, &mut native_messages, &text);
                 if !text.trim().is_empty() {
                     send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
@@ -667,6 +688,11 @@ async fn process_agent_wake(
                 break;
             }
             TurnOutcome::ToolCalls(calls) => {
+                log::info!(
+                    "[workspace] Agent「{}」调用 {} 个工具: {}",
+                    agent.name, calls.len(),
+                    calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                );
                 let mut results = Vec::with_capacity(calls.len());
                 for call in &calls {
                     insert_workspace_log(
@@ -678,6 +704,11 @@ async fn process_agent_wake(
                     )
                     .await;
                     let result = dispatch_tool_call(app_handle, &workspace, &agent, call).await;
+                    log::debug!(
+                        "[workspace] 工具 {} 返回: {}",
+                        call.name,
+                        result.to_string().chars().take(200).collect::<String>()
+                    );
                     results.push(result);
                 }
                 append_tool_round(&agent.provider, &mut native_messages, &calls, &results);
@@ -746,6 +777,7 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
                 content,
                 timestamp: m.created_at,
                 error: None,
+                images: vec![],
             }
         })
         .collect()

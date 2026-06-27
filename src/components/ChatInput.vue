@@ -51,6 +51,7 @@ import {
   ChevronDown,
   Cube,
   ExtensionPuzzleOutline,
+  BulbOutline,
 } from "@vicons/ionicons5";
 
 // ============ Store 实例 ============
@@ -165,6 +166,24 @@ onMounted(() => {
 
 // ============ 方法函数 ============
 
+// 将 File 对象转换为 base64 ImageAttachment
+const readFileAsBase64 = (file: File): Promise<{ data: string; mediaType: string }> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      const commaIdx = dataUrl.indexOf(',');
+      if (commaIdx === -1) { reject(new Error("Invalid data URL")); return; }
+      const header = dataUrl.slice(0, commaIdx);
+      const data = dataUrl.slice(commaIdx + 1);
+      const mediaType = header.split(':')[1]?.split(';')[0] ?? file.type;
+      resolve({ data, mediaType });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};
+
 // 发送消息
 const handleSend = async () => {
   const content = inputValue.value.trim();
@@ -183,19 +202,23 @@ const handleSend = async () => {
     await chat.createSession(settings.activeConfig.id);
   }
 
-  // Prepare file info
-  const fileInfo = attachedFiles.value.map(f => ({
-    name: f.name,
-    size: f.size,
-  }));
+  // 只保留 image/* 的文件用于发送给 LLM，视频暂时以文本提及方式处理
+  const imageFiles = attachedFiles.value.filter(f => f.type.startsWith('image/'));
+  const nonImageFiles = attachedFiles.value.filter(f => !f.type.startsWith('image/'));
 
-  // Build message content with file mention
+  // 读取图片文件为 base64
+  const images = imageFiles.length > 0
+    ? await Promise.all(imageFiles.map(readFileAsBase64))
+    : undefined;
+
+  // 文件元数据 (用于 UI 显示)
+  const fileInfo = attachedFiles.value.map(f => ({ name: f.name, size: f.size }));
+
+  // 非图片文件以文本提及方式加入内容
   let messageContent = content;
-  if (attachedFiles.value.length > 0) {
-    const fileMention = attachedFiles.value
-      .map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`)
-      .join(' ');
-    messageContent = messageContent ? `${messageContent}\n${fileMention}` : fileMention;
+  const mentions = nonImageFiles.map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`);
+  if (mentions.length > 0) {
+    messageContent = messageContent ? `${messageContent}\n${mentions.join(' ')}` : mentions.join(' ');
   }
 
   inputValue.value = "";
@@ -205,7 +228,7 @@ const handleSend = async () => {
   }
 
   try {
-    await chat.sendMessage(messageContent, fileInfo.length > 0 ? fileInfo : undefined);
+    await chat.sendMessage(messageContent, fileInfo.length > 0 ? fileInfo : undefined, images);
   } catch (error) {
     const errorInfo = chat.classifyError(error);
     notification.error({
@@ -584,6 +607,25 @@ const getFileDisplayName = (file: File): string => {
             </n-button>
           </template>
           {{ skillsStore.enabledSkills.length === 0 ? '无可用 Skill' : 'Skill' }}
+        </n-tooltip>
+
+        <!-- Thinking Mode Toggle -->
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="large"
+              :type="chat.thinkingEnabled ? 'warning' : 'default'"
+              class="thinking-btn"
+              @click="chat.thinkingEnabled = !chat.thinkingEnabled"
+            >
+              <template #icon>
+                <n-icon><BulbOutline /></n-icon>
+              </template>
+            </n-button>
+          </template>
+          {{ chat.thinkingEnabled ? '关闭思考模式' : '开启思考模式' }}
         </n-tooltip>
 
         <!-- Send/Stop Button -->
