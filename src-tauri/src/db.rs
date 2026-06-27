@@ -18,9 +18,7 @@
  * - mcp_servers: MCP 服务器配置表
  */
 
-use crate::commands::llm::{ChatMessage, ChatSession};
-use crate::commands::mcp::{MCPServer, MCPServerType};
-use crate::commands::skills::Skill;
+use crate::types::{ChatMessage, ChatSession, MCPServer, MCPServerType, Skill};
 use keyring::Entry;
 use std::sync::Arc;
 use tauri::Manager;

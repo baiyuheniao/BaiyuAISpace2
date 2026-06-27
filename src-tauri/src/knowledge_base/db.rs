@@ -57,87 +57,114 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Insert vectors
+    /// Insert vectors — wrapped in `spawn_blocking` so batch SQLite writes
+    /// don't stall the async executor during document import.
     pub async fn insert_vectors(
         &self,
         kb_id: &str,
         vectors: Vec<(String, String, String, Vec<f32>)>, // (chunk_id, document_id, content, vector)
     ) -> Result<(), KnowledgeBaseError> {
-        let conn = self.get_conn()?;
+        let db_path = self.db_path.clone();
+        let kb_id = kb_id.to_string();
 
-        let count = vectors.len();
-        for (chunk_id, document_id, _content, vector) in vectors {
-            // Serialize vector to bytes (f32 array)
-            let vector_bytes = vector_to_bytes(&vector);
+        tokio::task::spawn_blocking(move || {
+            let main_db_path = std::path::Path::new(&db_path)
+                .parent()
+                .map(|p| p.join("app.db"))
+                .ok_or_else(|| KnowledgeBaseError::DatabaseError("Invalid db path".to_string()))?;
 
-            conn.execute(
-                r#"
-                INSERT OR REPLACE INTO vectors (chunk_id, document_id, kb_id, vector)
-                VALUES (?1, ?2, ?3, ?4)
-                "#,
-                rusqlite::params![chunk_id, document_id, kb_id, vector_bytes],
-            )
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-        }
+            let conn = rusqlite::Connection::open(&main_db_path)
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        log::info!("Inserted {} vectors for knowledge base: {}", count, kb_id);
-        Ok(())
+            let count = vectors.len();
+            for (chunk_id, document_id, _content, vector) in vectors {
+                let vector_bytes = vector_to_bytes(&vector);
+                conn.execute(
+                    r#"
+                    INSERT OR REPLACE INTO vectors (chunk_id, document_id, kb_id, vector)
+                    VALUES (?1, ?2, ?3, ?4)
+                    "#,
+                    rusqlite::params![chunk_id, document_id, kb_id, vector_bytes],
+                )
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+            }
+
+            log::info!("Inserted {} vectors for knowledge base: {}", count, kb_id);
+            Ok(())
+        })
+        .await
+        .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
     }
 
-    /// Vector search using cosine similarity
+    /// Hard cap on vectors loaded per search to prevent OOM on large knowledge bases.
+    /// Full cosine-similarity scan is O(N); this bounds worst-case memory usage.
+    const VECTOR_SCAN_LIMIT: i64 = 50_000;
+
+    /// Vector search using cosine similarity.
+    /// Wrapped in `spawn_blocking` so blocking SQLite I/O doesn't stall the
+    /// async executor, and capped at `VECTOR_SCAN_LIMIT` rows to bound memory.
     pub async fn search(
         &self,
         kb_id: &str,
         query_vector: Vec<f32>,
         top_k: i32,
     ) -> Result<Vec<(String, String, String, f32)>, KnowledgeBaseError> {
-        let conn = self.get_conn()?;
+        let db_path = self.db_path.clone();
+        let kb_id = kb_id.to_string();
 
-        // Query all vectors for this knowledge base
-        // For better performance with large datasets, consider using approximate methods
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT v.chunk_id, v.document_id, c.content, v.vector
-                FROM vectors v
-                JOIN chunks c ON v.chunk_id = c.id
-                WHERE v.kb_id = ?1
-                "#,
-            )
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+        tokio::task::spawn_blocking(move || {
+            let main_db_path = std::path::Path::new(&db_path)
+                .parent()
+                .map(|p| p.join("app.db"))
+                .ok_or_else(|| KnowledgeBaseError::DatabaseError("Invalid db path".to_string()))?;
 
-        let rows = stmt
-            .query_map([kb_id], |row| {
-                let chunk_id: String = row.get(0)?;
-                let document_id: String = row.get(1)?;
-                let content: String = row.get(2)?;
-                let vector_bytes: Vec<u8> = row.get(3)?;
-                let vector = bytes_to_vector(&vector_bytes);
-                Ok((chunk_id, document_id, content, vector))
-            })
-            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+            let conn = rusqlite::Connection::open(&main_db_path)
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Calculate cosine similarity for all vectors
-        let mut scored_results: Vec<(String, String, String, f32)> = Vec::new();
-        for row in rows {
-            let (chunk_id, document_id, content, vector) =
-                row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-            let similarity = cosine_similarity(&query_vector, &vector);
-            scored_results.push((chunk_id, document_id, content, similarity));
-        }
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT v.chunk_id, v.document_id, c.content, v.vector
+                    FROM vectors v
+                    JOIN chunks c ON v.chunk_id = c.id
+                    WHERE v.kb_id = ?1
+                    LIMIT ?2
+                    "#,
+                )
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Sort by similarity (descending) and take top_k
-        // unwrap_or(Equal) guards against a NaN similarity score (e.g. from a
-        // malformed embedding) ever panicking the sort
-        scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
-        scored_results.truncate(top_k as usize);
+            let rows = stmt
+                .query_map(rusqlite::params![kb_id, Self::VECTOR_SCAN_LIMIT], |row| {
+                    let chunk_id: String = row.get(0)?;
+                    let document_id: String = row.get(1)?;
+                    let content: String = row.get(2)?;
+                    let vector_bytes: Vec<u8> = row.get(3)?;
+                    let vector = bytes_to_vector(&vector_bytes);
+                    Ok((chunk_id, document_id, content, vector))
+                })
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        log::info!(
-            "Vector search for {} returned {} results",
-            kb_id,
-            scored_results.len()
-        );
-        Ok(scored_results)
+            let mut scored_results: Vec<(String, String, String, f32)> = Vec::new();
+            for row in rows {
+                let (chunk_id, document_id, content, vector) =
+                    row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+                let similarity = cosine_similarity(&query_vector, &vector);
+                scored_results.push((chunk_id, document_id, content, similarity));
+            }
+
+            // unwrap_or(Equal) guards against NaN scores from malformed embeddings
+            scored_results.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+            scored_results.truncate(top_k as usize);
+
+            log::info!(
+                "Vector search for {} returned {} results",
+                kb_id,
+                scored_results.len()
+            );
+            Ok(scored_results)
+        })
+        .await
+        .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
     }
 
     /// Delete vectors by document_id
@@ -147,13 +174,11 @@ impl VectorStore {
         document_id: &str,
     ) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
-
         conn.execute(
             "DELETE FROM vectors WHERE kb_id = ?1 AND document_id = ?2",
             [kb_id, document_id],
         )
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-
         log::info!("Deleted vectors for document: {} in {}", document_id, kb_id);
         Ok(())
     }
@@ -161,27 +186,17 @@ impl VectorStore {
     /// Drop knowledge base table
     pub async fn drop_kb_table(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
-
-        conn.execute(
-            "DELETE FROM vectors WHERE kb_id = ?1",
-            [kb_id],
-        )
-        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-
+        conn.execute("DELETE FROM vectors WHERE kb_id = ?1", [kb_id])
+            .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
         log::info!("Dropped vectors for knowledge base: {}", kb_id);
         Ok(())
     }
 
-    /// Get SQLite connection
     fn get_conn(&self) -> Result<rusqlite::Connection, KnowledgeBaseError> {
-        // The vectors are stored in the main SQLite database
-        // We need to get the main db path from the app
-        // For now, we'll derive it from the vector db path
         let main_db_path = std::path::Path::new(&self.db_path)
             .parent()
             .map(|p| p.join("app.db"))
             .ok_or_else(|| KnowledgeBaseError::DatabaseError("Invalid db path".to_string()))?;
-
         rusqlite::Connection::open(&main_db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))
     }

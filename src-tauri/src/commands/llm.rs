@@ -16,6 +16,7 @@ use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
+use keyring::Entry as KeyringEntry;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -1708,10 +1709,25 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
     if request.provider == "local" {
         return Ok(String::new());
     }
-    if request.api_key.is_empty() {
-        return Err(LLMError::MissingApiKey);
+    if !request.api_key.is_empty() {
+        return Ok(request.api_key.clone());
     }
-    Ok(request.api_key.clone())
+    // api_key not provided — fall back to system keyring keyed by provider.
+    // The frontend calls save_api_key(provider, key), so the keyring label is
+    // "api_keys_{provider}".  This lets callers gradually stop embedding
+    // plaintext keys in IPC requests once the key is already in the keyring.
+    if !request.provider.is_empty() {
+        let label = format!("api_keys_{}", request.provider);
+        if let Ok(entry) = KeyringEntry::new("BaiyuAISpace", &label) {
+            if let Ok(key) = entry.get_password() {
+                if !key.is_empty() {
+                    log::info!("[LLM] api_key resolved from keyring ({})", label);
+                    return Ok(key);
+                }
+            }
+        }
+    }
+    Err(LLMError::MissingApiKey)
 }
 
 /// Cancel an active stream for a session

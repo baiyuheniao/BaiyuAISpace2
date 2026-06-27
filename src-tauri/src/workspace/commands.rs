@@ -810,7 +810,6 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
     }
 
     if !agent.knowledge_base_ids.is_empty() && !latest_query.is_empty() {
-        let db_state = app_handle.state::<DbState>();
         let kb_state = app_handle.state::<KbState>();
         for kb_id in &agent.knowledge_base_ids {
             let request = RetrievalRequest {
@@ -820,7 +819,7 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
                 retrieval_mode: RetrievalMode::Hybrid,
                 similarity_threshold: 0.0,
             };
-            match search_knowledge_base(request, db_state.clone(), kb_state.clone()).await {
+            match search_knowledge_base(request, kb_state.clone()).await {
                 Ok(result) if !result.chunks.is_empty() => {
                     sections.push(build_rag_context(&result.chunks, &result.query));
                 }

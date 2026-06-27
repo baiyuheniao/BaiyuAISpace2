@@ -48,7 +48,7 @@ fn get_embedding_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> 
 #[tauri::command]
 pub async fn create_knowledge_base(
     request: CreateKnowledgeBaseRequest,
-    db_state: State<'_, crate::db::DbState>,
+    kb_state: State<'_, KbState>,
 ) -> Result<KnowledgeBase, KnowledgeBaseError> {
     log::info!("[KB] Creating knowledge base: {:?}", request);
 
@@ -67,8 +67,7 @@ pub async fn create_knowledge_base(
         ));
     }
 
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
     let id = Uuid::new_v4().to_string();
@@ -129,10 +128,9 @@ pub async fn create_knowledge_base(
 /// List all knowledge bases
 #[tauri::command]
 pub async fn list_knowledge_bases(
-    db_state: State<'_, crate::db::DbState>,
+    kb_state: State<'_, KbState>,
 ) -> Result<Vec<KnowledgeBase>, KnowledgeBaseError> {
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
     let mut stmt = conn.prepare(
@@ -171,11 +169,9 @@ pub async fn list_knowledge_bases(
 #[tauri::command]
 pub async fn delete_knowledge_base(
     kb_id: String,
-    db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<(), KnowledgeBaseError> {
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
     // Check if knowledge base exists
@@ -481,10 +477,9 @@ pub async fn import_document(
 #[tauri::command]
 pub async fn list_documents(
     kb_id: String,
-    db_state: State<'_, crate::db::DbState>,
+    kb_state: State<'_, KbState>,
 ) -> Result<Vec<Document>, KnowledgeBaseError> {
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
     let mut stmt = conn.prepare(
@@ -534,11 +529,9 @@ pub async fn list_documents(
 pub async fn delete_document(
     doc_id: String,
     kb_id: String,
-    db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<(), KnowledgeBaseError> {
-    let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path)
+    let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
     // Verify document exists and belongs to the specified knowledge base
@@ -589,13 +582,11 @@ pub async fn delete_document(
 #[tauri::command]
 pub async fn search_knowledge_base(
     request: RetrievalRequest,
-    db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
     // Get embedding API config from the knowledge base
     let (embedding_api_config_id, embedding_provider, embedding_model, embedding_base_url) = {
-        let db = db_state.0.lock().await;
-        let conn = rusqlite::Connection::open(&db.path)
+        let conn = rusqlite::Connection::open(&kb_state.db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
         let (config_id, provider, model, base_url): (String, String, String, String) = conn.query_row(

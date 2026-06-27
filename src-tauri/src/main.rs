@@ -27,6 +27,7 @@ mod db;
 mod knowledge_base;
 mod scheduler;
 mod secure_storage;
+mod types;
 mod workspace;
 mod workspace_smoke_test;
 
