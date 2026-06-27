@@ -2,16 +2,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-/**
- * 文档处理模块
- * 
- * 功能说明:
- * - 支持多种文档格式解析 (PDF, DOCX, XLSX, MD, HTML, TXT)
- * - 文件哈希计算
- * - 文本分块
- * - Token 数量估算
- */
-
 use super::types::*;
 use crate::commands::local_model::hide_console_window;
 use sha2::{Digest, Sha256};
@@ -20,17 +10,12 @@ use std::path::Path;
 /// 支持的文档格式枚举
 #[derive(Debug, Clone, Copy)]
 pub enum DocumentFormat {
-    /// PDF 文档
     Pdf,
-    /// Word 文档 (docx)
     Word,
-    /// Excel 文档 (xlsx)
+    Pptx,
     Excel,
-    /// Markdown 文档
     Markdown,
-    /// HTML 文档
     Html,
-    /// 纯文本
     Txt,
 }
 
@@ -40,20 +25,23 @@ impl DocumentFormat {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {
             "pdf" => Some(DocumentFormat::Pdf),
-            "docx" | "doc" => Some(DocumentFormat::Word),
+            "docx" => Some(DocumentFormat::Word),
+            "pptx" => Some(DocumentFormat::Pptx),
             "xlsx" | "xls" | "csv" => Some(DocumentFormat::Excel),
             "md" | "markdown" => Some(DocumentFormat::Markdown),
             "html" | "htm" => Some(DocumentFormat::Html),
-            "txt" | "text" | "rs" | "js" | "ts" | "py" | "java" | "c" | "cpp" | "h" | "go" => Some(DocumentFormat::Txt),
+            "txt" | "text" | "rs" | "js" | "ts" | "py" | "java" | "c" | "cpp" | "h" | "go" => {
+                Some(DocumentFormat::Txt)
+            }
             _ => None,
         }
     }
 
-    /// 获取格式对应的文件扩展名
     pub fn as_str(&self) -> &'static str {
         match self {
             DocumentFormat::Pdf => "pdf",
             DocumentFormat::Word => "docx",
+            DocumentFormat::Pptx => "pptx",
             DocumentFormat::Excel => "xlsx",
             DocumentFormat::Markdown => "md",
             DocumentFormat::Html => "html",
@@ -63,24 +51,27 @@ impl DocumentFormat {
 }
 
 /// 解析文档内容为纯文本
-/// 
-/// # 参数
-/// - file_path: 文件路径
-/// 
-/// # 返回
-/// 提取的文本内容
 pub async fn parse_document(file_path: &str) -> Result<String, KnowledgeBaseError> {
     let path = Path::new(file_path);
-    let ext = path.extension()
+    let ext = path
+        .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("");
-    
-    let format = DocumentFormat::from_extension(ext)
-        .ok_or_else(|| KnowledgeBaseError::DocumentParseError(format!("Unsupported format: {}", ext)))?;
-    
+        .unwrap_or("")
+        .to_lowercase();
+
+    let format = DocumentFormat::from_extension(&ext).ok_or_else(|| {
+        let hint = match ext.as_str() {
+            "doc" => "不支持旧版 .doc 格式，请在 Word 中另存为 .docx 后重新导入".to_string(),
+            "ppt" => "不支持旧版 .ppt 格式，请在 PowerPoint 中另存为 .pptx 后重新导入".to_string(),
+            other => format!("不支持的格式: .{}", other),
+        };
+        KnowledgeBaseError::DocumentParseError(hint)
+    })?;
+
     let content = match format {
         DocumentFormat::Pdf => parse_pdf(file_path).await?,
         DocumentFormat::Word => parse_word(file_path).await?,
+        DocumentFormat::Pptx => parse_pptx(file_path).await?,
         DocumentFormat::Excel => parse_excel(file_path).await?,
         DocumentFormat::Markdown | DocumentFormat::Html | DocumentFormat::Txt => {
             tokio::fs::read_to_string(file_path)
@@ -88,259 +79,197 @@ pub async fn parse_document(file_path: &str) -> Result<String, KnowledgeBaseErro
                 .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
         }
     };
-    
-    // Clean up content
-    let cleaned = clean_text(&content);
-    
-    Ok(cleaned)
+
+    Ok(clean_text(&content))
 }
 
-/// Parse PDF file
-async fn parse_pdf(file_path: &str) -> Result<String, KnowledgeBaseError> {
-    // For now, use basic text extraction
-    // In production, use pdf-extract or pdfium
-    // Since pdf-extract has dependency issues, we'll use a placeholder
-    
-    // Try to use external pdftotext if available
+// ============ PDF ============
+
+/// 尝试通过外部 pdftotext（poppler-utils）提取文本
+async fn try_pdftotext(file_path: &str) -> Result<String, ()> {
     let mut cmd = tokio::process::Command::new("pdftotext");
     cmd.args(["-layout", file_path, "-"]);
     hide_console_window(&mut cmd);
-    let output = cmd.output().await;
-    
-    match output {
+    match cmd.output().await {
         Ok(result) if result.status.success() => {
-            Ok(String::from_utf8_lossy(&result.stdout).to_string())
+            let text = String::from_utf8_lossy(&result.stdout).to_string();
+            if !text.trim().is_empty() {
+                Ok(text)
+            } else {
+                Err(())
+            }
         }
-        _ => {
-            // Fallback: try to read as binary and extract strings (very basic)
-            let bytes = tokio::fs::read(file_path)
-                .await
-                .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("Failed to read PDF: {}", e)))?;
-            
-            // Basic PDF text extraction - look for text between parentheses
-            let text = extract_text_from_pdf_bytes(&bytes)?;
-            Ok(text)
-        }
+        _ => Err(()),
     }
 }
 
-/// Basic PDF text extraction (fallback)
-fn extract_text_from_pdf_bytes(bytes: &[u8]) -> Result<String, KnowledgeBaseError> {
-    let content = String::from_utf8_lossy(bytes);
-    let mut result = String::new();
-    
-    // Improved PDF text extraction strategy:
-    // 1. Look for BT...ET blocks (PDF text objects) with Tf (font) and Tj/TJ (text) operators
-    let mut in_text_block = false;
-    let mut current_text = String::new();
-    
-    for line in content.lines() {
-        let trimmed = line.trim();
-        
-        // Track text block boundaries
-        if trimmed == "BT" {
-            in_text_block = true;
-            current_text.clear();
-            continue;
-        }
-        if trimmed == "ET" {
-            in_text_block = false;
-            if !current_text.is_empty() {
-                result.push_str(&current_text);
-                result.push(' ');
-            }
-            current_text.clear();
-            continue;
-        }
-        
-        if in_text_block {
-            // Extract text from Tj operator: (text) Tj
-            if let Some(pos) = trimmed.find(")Tj") {
-                let before = &trimmed[..pos];
-                if let Some(start) = before.rfind('(') {
-                    let text = &before[start + 1..];
-                    // Decode PDF string escapes
-                    let decoded = decode_pdf_string(text);
-                    current_text.push_str(&decoded);
-                }
-            }
-            
-            // Extract text from TJ array operator: [(text1) (text2)] TJ
-            if trimmed.contains("TJ") {
-                for part in trimmed.split(')') {
-                    let part = part.trim();
-                    if let Some(start) = part.rfind('(') {
-                        let text = &part[start + 1..];
-                        let decoded = decode_pdf_string(text);
-                        current_text.push_str(&decoded);
-                    }
-                }
-            }
-        }
-        
-        // Also try the simple parenthesis extraction as a secondary method
-        if !in_text_block && line.contains("(") && line.contains(")") {
-            let mut in_paren = false;
-            let mut text = String::new();
-            for ch in line.chars() {
-                match ch {
-                    '(' => in_paren = true,
-                    ')' => {
-                        in_paren = false;
-                        if !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace()) {
-                            result.push_str(&text);
-                            result.push(' ');
-                        }
-                        text.clear();
-                    }
-                    _ if in_paren => text.push(ch),
-                    _ => {}
-                }
-            }
-        }
+/// 解析 PDF 文件
+/// 优先用外部 pdftotext（精度最高）；不可用时回退到 pdf-extract（纯 Rust）
+async fn parse_pdf(file_path: &str) -> Result<String, KnowledgeBaseError> {
+    if let Ok(text) = try_pdftotext(file_path).await {
+        return Ok(text);
     }
-    
-    // Clean up the result
-    let cleaned: String = result
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace() || *c == '\n')
-        .collect();
-    
-    if cleaned.trim().is_empty() {
-        return Err(KnowledgeBaseError::DocumentParseError(
-            "PDF parsing not available. Please install pdftotext (poppler-utils) or use text files.".to_string()
-        ));
-    }
-    
-    Ok(cleaned)
+    let path_owned = file_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        pdf_extract::extract_text(&path_owned)
+            .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("PDF 解析失败: {e}")))
+    })
+    .await
+    .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
 }
 
-/// Decode PDF string escape sequences
-fn decode_pdf_string(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.peek() {
-                Some('n') => { result.push('\n'); chars.next(); }
-                Some('r') => { result.push('\r'); chars.next(); }
-                Some('t') => { result.push('\t'); chars.next(); }
-                Some('b') => { result.push('\u{08}'); chars.next(); }
-                Some('f') => { result.push('\u{0c}'); chars.next(); }
-                Some('(') => { result.push('('); chars.next(); }
-                Some(')') => { result.push(')'); chars.next(); }
-                Some('\\') => { result.push('\\'); chars.next(); }
-                Some('0'..='7') => {
-                    // Octal escape
-                    let mut octal = String::new();
-                    for _ in 0..3 {
-                        if let Some(&digit @ '0'..='7') = chars.peek() {
-                            octal.push(digit);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(byte) = u8::from_str_radix(&octal, 8) {
-                        result.push(byte as char);
-                    }
-                }
-                _ => {} // Unknown escape, skip backslash
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    
-    result
-}
+// ============ Word / DOCX ============
 
-/// Parse Word document
+/// 解析 Word 文档（.docx）
 async fn parse_word(file_path: &str) -> Result<String, KnowledgeBaseError> {
-    // For now, read as zip and extract document.xml text
-    // Real implementation should use docx crate
     let bytes = tokio::fs::read(file_path)
         .await
-        .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("Failed to read DOCX: {}", e)))?;
-    
-    // Try to unzip and read word/document.xml
+        .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("读取 DOCX 失败: {}", e)))?;
+
     use std::io::Read;
-    
     let cursor = std::io::Cursor::new(&bytes);
-    let mut archive = match zip::ZipArchive::new(cursor) {
-        Ok(a) => a,
-        Err(_) => return Err(KnowledgeBaseError::DocumentParseError(
-            "Failed to parse DOCX. Install docx support or use text files.".to_string()
-        )),
-    };
-    
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|_| {
+        KnowledgeBaseError::DocumentParseError("无法解析 DOCX 文件（格式损坏或不是有效 ZIP）".into())
+    })?;
+
     let mut xml_content = String::new();
     if let Ok(mut file) = archive.by_name("word/document.xml") {
         file.read_to_string(&mut xml_content)
             .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
     }
-    
-    // Extract text from XML
-    let text = extract_text_from_docx_xml(&xml_content);
-    Ok(text)
+
+    Ok(extract_text_from_docx_xml(&xml_content))
 }
 
-/// Extract text from DOCX XML
+/// 从 DOCX XML 中提取纯文本（保留段落换行）
+///
+/// `</w:p>` 出现在 `</w:t>` 之后，直接替换为 `\n` 时 `\n` 落在文本提取范围外。
+/// 改用哨兵字符串标记段落边界，并在遍历 chunk 时检测哨兵来插入换行。
 fn extract_text_from_docx_xml(xml: &str) -> String {
+    const PARA_END: &str = "\x02PARA\x02";
+    let xml = xml.replace("</w:p>", PARA_END);
     let mut result = String::new();
-    
-    // Simple XML text extraction
     for chunk in xml.split("<w:t") {
         if let Some(end) = chunk.find("</w:t>") {
             if let Some(start) = chunk.find('>') {
-                let text = &chunk[start+1..end];
-                if !text.is_empty() {
-                    result.push_str(text);
-                }
+                result.push_str(&chunk[start + 1..end]);
+            }
+            // 若该文本元素之后紧跟段落结束哨兵，插入换行
+            if chunk[end..].contains(PARA_END) {
+                result.push('\n');
             }
         }
     }
-    
-    // Also handle <w:tab/> and <w:br/>
-    result = result.replace("<w:tab/>", "\t");
-    result = result.replace("<w:br/>", "\n");
-    
     result
 }
 
-/// Parse Excel file
+// ============ PowerPoint / PPTX ============
+
+/// 解析 PowerPoint 文档（.pptx）
+async fn parse_pptx(file_path: &str) -> Result<String, KnowledgeBaseError> {
+    let bytes = tokio::fs::read(file_path)
+        .await
+        .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|_| {
+            KnowledgeBaseError::DocumentParseError("无法解析 PPTX 文件".into())
+        })?;
+
+        // 收集幻灯片文件名并按页码排序
+        let mut slide_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+            .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+            .collect();
+        slide_names.sort();
+
+        let mut result = String::new();
+        for (idx, name) in slide_names.iter().enumerate() {
+            let mut xml = String::new();
+            archive
+                .by_name(name)
+                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
+                .read_to_string(&mut xml)
+                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+            result.push_str(&format!("--- 第 {} 页 ---\n", idx + 1));
+            result.push_str(&extract_text_from_pptx_xml(&xml));
+            result.push('\n');
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
+}
+
+/// 从 PPTX 幻灯片 XML（DrawingML）中提取纯文本（保留段落换行）
+fn extract_text_from_pptx_xml(xml: &str) -> String {
+    const PARA_END: &str = "\x02PARA\x02";
+    let xml = xml.replace("</a:p>", PARA_END);
+    let mut result = String::new();
+    for chunk in xml.split("<a:t") {
+        if let Some(end) = chunk.find("</a:t>") {
+            if let Some(start) = chunk.find('>') {
+                result.push_str(&chunk[start + 1..end]);
+            }
+            if chunk[end..].contains(PARA_END) {
+                result.push('\n');
+            }
+        }
+    }
+    result
+}
+
+// ============ Excel / XLSX / XLS / CSV ============
+
+/// 解析 Excel 文件（.xlsx、.xls 用 calamine；.csv 直接读文本）
 async fn parse_excel(file_path: &str) -> Result<String, KnowledgeBaseError> {
-    // For now, use csv-like parsing for CSV files
-    // XLSX would need calamine or similar
-    let path = Path::new(file_path);
-    let ext = path.extension()
+    let ext = Path::new(file_path)
+        .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    
+
     if ext.eq_ignore_ascii_case("csv") {
-        let content = tokio::fs::read_to_string(file_path)
+        return tokio::fs::read_to_string(file_path)
             .await
-            .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
-        Ok(content)
-    } else {
-        // For xlsx, we'd need a proper library
-        Err(KnowledgeBaseError::DocumentParseError(
-            "Excel (.xlsx) parsing requires additional dependencies. Use CSV format.".to_string()
-        ))
+            .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()));
     }
+
+    let path_owned = file_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        use calamine::{open_workbook_auto, Reader};
+        let mut workbook = open_workbook_auto(&path_owned).map_err(|e| {
+            KnowledgeBaseError::DocumentParseError(format!("Excel 解析失败: {e}"))
+        })?;
+        let sheet_names = workbook.sheet_names().to_vec();
+        let mut result = String::new();
+        for sheet_name in sheet_names {
+            result.push_str(&format!("=== {} ===\n", sheet_name));
+            if let Ok(range) = workbook.worksheet_range(&sheet_name) {
+                for row in range.rows() {
+                    let cells: Vec<String> = row.iter().map(|c| c.to_string()).collect();
+                    result.push_str(&cells.join("\t"));
+                    result.push('\n');
+                }
+            }
+            result.push('\n');
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
 }
+
+// ============ 通用工具 ============
 
 /// Clean and normalize text
 fn clean_text(text: &str) -> String {
-    text
-        // Normalize whitespace
-        .lines()
+    text.lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
-        // Remove excessive blank lines
         .split("\n\n\n")
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -351,7 +280,7 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
     let bytes = tokio::fs::read(file_path)
         .await
         .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
-    
+
     let hash = Sha256::digest(&bytes);
     Ok(format!("{:x}", hash))
 }
@@ -391,7 +320,6 @@ fn tail_chars(s: &str, n: usize) -> &str {
 }
 
 /// 在 `text` 中按 `sep` 切分，并把分隔符保留在前一段末尾
-/// （例如 "你好。世界。" 切成 ["你好。", "世界。"]，不丢标点）
 fn split_keep_separator<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
     let mut result = Vec::new();
     let mut last = 0usize;
@@ -406,13 +334,7 @@ fn split_keep_separator<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
     result
 }
 
-/// 递归分割：依次尝试用从粗到细的分隔符切分文本。任何切出来的片段如果仍
-/// 超过 `chunk_size`（字符数），就用下一级更细的分隔符继续递归切分它；
-/// 分隔符全部用完后退化为硬字符切分。
-///
-/// 相比之前"只有 > chunk_size*2 时才按英文句号切"的实现，这里没有任意的
-/// 倍数阈值——任何超过 chunk_size 的片段都会被继续细分，块大小更可控；
-/// 分隔符同时覆盖中英文标点，中文文本也能在句子边界切分而不是直接硬切。
+/// 递归分割：依次尝试用从粗到细的分隔符切分文本。
 fn recursive_split(text: &str, chunk_size: usize, sep_index: usize) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
@@ -435,7 +357,6 @@ fn recursive_split(text: &str, chunk_size: usize, sep_index: usize) -> Vec<Strin
 
     for part in parts {
         if char_count(part) > chunk_size {
-            // 这一段本身就超长，先把已攒的内容收尾，再用更细的分隔符递归切它
             if !current.is_empty() {
                 result.push(std::mem::take(&mut current));
             }
@@ -454,9 +375,7 @@ fn recursive_split(text: &str, chunk_size: usize, sep_index: usize) -> Vec<Strin
     result
 }
 
-/// 硬字符切分（最后一道兜底）：当文本里连一个可用分隔符都没有时
-/// （例如一长串没有空格的字符或代码），按字符数（不是字节数）切分，
-/// 保证永远不会切断一个 UTF-8 字符。
+/// 硬字符切分（最后一道兜底）
 fn hard_split_by_chars(text: &str, chunk_size: usize) -> Vec<String> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     if chars.is_empty() {
@@ -464,7 +383,7 @@ fn hard_split_by_chars(text: &str, chunk_size: usize) -> Vec<String> {
     }
 
     let mut result = Vec::new();
-    let mut start = 0usize; // 字符下标（不是字节下标）
+    let mut start = 0usize;
 
     while start < chars.len() {
         let end = (start + chunk_size).min(chars.len());
@@ -477,8 +396,7 @@ fn hard_split_by_chars(text: &str, chunk_size: usize) -> Vec<String> {
     result
 }
 
-/// 在切好的块之间补上重叠：每一块（除第一块）前面接上前一块末尾
-/// `chunk_overlap` 个字符，用于在块边界保留上下文连续性。
+/// 在切好的块之间补上重叠
 fn apply_overlap(chunks: Vec<String>, chunk_overlap: usize) -> Vec<String> {
     if chunk_overlap == 0 || chunks.len() <= 1 {
         return chunks;
@@ -496,12 +414,7 @@ fn apply_overlap(chunks: Vec<String>, chunk_overlap: usize) -> Vec<String> {
     result
 }
 
-/// 文本分块：按"粗到细"的分隔符递归切分（段落 → 换行 → 中英文句末标点 →
-/// 逗号 → 空格 → 硬字符切分），再在块之间补上 `chunk_overlap` 个字符的重叠。
-///
-/// `chunk_size`/`chunk_overlap` 的单位是字符数，与设置界面"分块大小
-/// （字符数）"保持一致——这里全程用 `chars().count()` 而不是 `str::len()`
-/// 比较长度，避免中文等多字节字符被按字节数误判成更小的块。
+/// 文本分块
 pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -525,7 +438,6 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
 
 /// Estimate token count (rough approximation)
 pub fn estimate_tokens(text: &str) -> i32 {
-    // Rough estimate: 1 token ≈ 4 characters for English, 2-3 for Chinese
     let char_count = text.chars().count();
     (char_count / 3) as i32
 }

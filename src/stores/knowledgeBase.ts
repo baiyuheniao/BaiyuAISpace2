@@ -265,6 +265,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
               "xlsx",
               "xls",
               "csv",
+              "pptx",
               "md",
               "markdown",
               "html",
