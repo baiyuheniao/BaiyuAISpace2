@@ -326,8 +326,8 @@ onMounted(async () => {
   <div class="agent-team-view">
     <div class="page-header">
       <div class="header-left">
-        <n-icon :size="26"><PeopleOutline /></n-icon>
-        <span class="page-title">Agent Team</span>
+        <n-icon :size="24"><PeopleOutline /></n-icon>
+        <h1 class="page-title">Agent Team</h1>
       </div>
       <n-space>
         <n-select
@@ -570,7 +570,7 @@ onMounted(async () => {
 .header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .page-title {

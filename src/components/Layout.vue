@@ -63,7 +63,7 @@ const menuOptions: MenuOption[] = [
     icon: () => h(Chatbubbles),
   },
   {
-    label: "Skill",
+    label: "Skill/技能",
     key: "Skills",
     icon: () => h(ExtensionPuzzleOutline),
   },
@@ -83,7 +83,7 @@ const menuOptions: MenuOption[] = [
     icon: () => h(HardwareChipOutline),
   },
   {
-    label: "Agent Team",
+    label: "Agent Team/协作团队",
     key: "AgentTeam",
     icon: () => h(PeopleOutline),
   },

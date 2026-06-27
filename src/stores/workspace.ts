@@ -128,24 +128,33 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   const initListeners = async () => {
     if (unlistenFns.length > 0) return;
+    console.log("[Workspace] 初始化事件监听器");
     unlistenFns = await Promise.all([
       listen<WorkspaceMessage>("workspace://message", (e) => {
+        console.log(`[Workspace] 消息: ${e.payload.fromAgentId} → ${e.payload.toAgentId} | ${e.payload.content.slice(0, 60)}`);
         if (e.payload.workspaceId === currentWorkspaceId.value) messages.value.push(e.payload);
       }),
       listen<WorkspaceLogEntry>("workspace://log", (e) => {
+        console.debug(`[Workspace] 日志 [${e.payload.kind}]: ${e.payload.content.slice(0, 80)}`);
         if (e.payload.workspaceId === currentWorkspaceId.value) logs.value.push(e.payload);
       }),
       listen<AgentStatusEvent>("workspace://agent-status", (e) => {
         const agent = agents.value.find((a) => a.id === e.payload.agentId);
-        if (agent) agent.status = e.payload.status;
+        if (agent) {
+          console.log(`[Workspace] Agent「${agent.name}」状态: ${agent.status} → ${e.payload.status}`);
+          agent.status = e.payload.status;
+        }
       }),
       listen<AgentProposalEvent>("workspace://agent-proposal", (e) => {
+        console.log(`[Workspace] Agent 提议创建子 Agent: proposalId=${e.payload.proposalId} by ${e.payload.proposedByAgentName}`);
         proposals.value.push(e.payload);
       }),
       listen<SleepRequestEvent>("workspace://sleep-request", (e) => {
+        console.log(`[Workspace] 休眠申请: requestId=${e.payload.requestId} agent=${e.payload.agentName} reason=${e.payload.reason}`);
         sleepRequests.value.push(e.payload);
       }),
       listen<QuestionEvent>("workspace://question", (e) => {
+        console.log(`[Workspace] Agent 提问: questionId=${e.payload.questionId} agent=${e.payload.agentName} | ${e.payload.question.slice(0, 60)}`);
         questions.value.push(e.payload);
       }),
     ]);
@@ -161,7 +170,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   };
 
   const createWorkspace = async (name: string, description: string, maxAgents: number): Promise<Workspace> => {
+    console.log(`[Workspace] 创建工作组: name=${name} maxAgents=${maxAgents}`);
     const ws = await invoke<Workspace>("workspace_create", { request: { name, description, maxAgents } });
+    console.log(`[Workspace] 工作组已创建: id=${ws.id}`);
     workspaces.value.unshift(ws);
     return ws;
   };
@@ -198,7 +209,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   };
 
   const createAgent = async (request: CreateAgentRequest): Promise<WorkspaceAgent> => {
+    console.log(`[Workspace] 创建 Agent: name=${request.name} role=${request.role} model=${request.provider}/${request.model}`);
     const agent = await invoke<WorkspaceAgent>("workspace_create_agent_manual", { request });
+    console.log(`[Workspace] Agent 已创建: id=${agent.id}`);
     agents.value.push(agent);
     return agent;
   };
@@ -214,16 +227,19 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   };
 
   const resolveProposal = async (proposalId: string, approved: boolean, request?: CreateAgentRequest) => {
+    console.log(`[Workspace] 处理 Agent 提议: proposalId=${proposalId} approved=${approved}`);
     await invoke("workspace_resolve_proposal", { proposalId, approved, request });
     proposals.value = proposals.value.filter((p) => p.proposalId !== proposalId);
   };
 
   const resolveSleepRequest = async (requestId: string, approved: boolean) => {
+    console.log(`[Workspace] 处理休眠申请: requestId=${requestId} approved=${approved}`);
     await invoke("workspace_resolve_sleep_request", { requestId, approved });
     sleepRequests.value = sleepRequests.value.filter((r) => r.requestId !== requestId);
   };
 
   const resolveQuestion = async (questionId: string, answer: string) => {
+    console.log(`[Workspace] 回答 Agent 提问: questionId=${questionId} answer=${answer.slice(0, 40)}`);
     await invoke("workspace_resolve_question", { questionId, answer });
     questions.value = questions.value.filter((q) => q.questionId !== questionId);
   };

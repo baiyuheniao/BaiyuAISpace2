@@ -298,7 +298,7 @@ const handleDelete = async (id: string) => {
 
 .page-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 600;
 }
 
