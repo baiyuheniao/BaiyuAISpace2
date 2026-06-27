@@ -372,13 +372,14 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
 
     validate_mcp_command(&server.command, &server.args)?;
 
-    let mut child = Command::new(resolve_windows_command(&server.command))
-        .args(&server.args)
+    let mut cmd = Command::new(resolve_windows_command(&server.command));
+    cmd.args(&server.args)
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(&server.env)
-        .spawn()
+        .envs(&server.env);
+    crate::commands::local_model::hide_console_window(&mut cmd);
+    let mut child = cmd.spawn()
         .map_err(|e| MCPError::LaunchError(e.to_string()))?;
 
     // Read stderr in a background task to prevent pipe blocking
@@ -686,13 +687,14 @@ async fn call_mcp_tool_stdio(
     validate_mcp_command(&server.command, &server.args)?;
 
     // Execute the server process
-    let mut child = Command::new(resolve_windows_command(&server.command))
-        .args(&server.args)
+    let mut cmd = Command::new(resolve_windows_command(&server.command));
+    cmd.args(&server.args)
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(&server.env)
-        .spawn()
+        .envs(&server.env);
+    crate::commands::local_model::hide_console_window(&mut cmd);
+    let mut child = cmd.spawn()
         .map_err(|e| MCPError::LaunchError(e.to_string()))?;
 
     // Read stderr in a background task to prevent pipe blocking

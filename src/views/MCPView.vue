@@ -145,6 +145,32 @@ const MCP_PRESETS: MCPPreset[] = [
     args: ["mcp-server-git", "--repository", "/path/to/git/repo"],
     needsConfig: "请将仓库路径改为你本地的 Git 仓库路径",
   },
+  {
+    id: "office-word",
+    name: "Word 文档编辑",
+    description: "创建、读取、编辑 .docx 文件：添加段落/标题/表格/图片，设置字体格式，合并文档，导出 PDF（基于 python-docx，2.1k Stars）",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["--from", "office-word-mcp-server", "word_mcp_server"],
+    needsConfig: "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-word-mcp-server",
+  },
+  {
+    id: "office-powerpoint",
+    name: "PowerPoint 演示编辑",
+    description: "创建、编辑 .pptx 文件：增删幻灯片、插入文字/图片/表格/图表，应用主题，提取文本（32 个工具，基于 python-pptx，1.8k Stars）",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"],
+    needsConfig: "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-powerpoint-mcp-server",
+  },
+  {
+    id: "office-excel",
+    name: "Excel 表格编辑",
+    description: "读写 .xlsx 文件：读取/写入单元格、创建表格、复制 Sheet、设置格式（字体/填充/边框），基于 negokaz/excel-mcp-server（Go 实现，活跃维护）",
+    serverType: "stdio",
+    command: "npx",
+    args: ["--yes", "@negokaz/excel-mcp-server"],
+  },
 ];
 
 // ============ 生命周期 ============
