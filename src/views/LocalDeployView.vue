@@ -48,6 +48,7 @@ import {
   type ModelSource,
 } from "@/stores/localModel";
 import { useLMStudioStore } from "@/stores/lmStudio";
+import { useDockerStore } from "@/stores/docker";
 import { useSettingsStore } from "@/stores/settings";
 import {
   HardwareChipOutline,
@@ -63,6 +64,9 @@ import {
   TrashOutline,
   OpenOutline,
   ChatbubblesOutline,
+  ServerOutline,
+  CubeOutline,
+  LayersOutline,
 } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
@@ -72,6 +76,9 @@ const localModel = useLocalModelStore();
 
 // LM Studio Store
 const lmStudio = useLMStudioStore();
+
+// Docker Store
+const docker = useDockerStore();
 
 // Settings Store（用于读取/管理 API 配置）
 const settings = useSettingsStore();
@@ -419,6 +426,88 @@ const handleLMStudioOneClickDeploy = async (modelId: string) => {
   }
 };
 
+// ============ Docker 方法 ============
+
+/** 检测 Docker 状态，成功则刷新容器和镜像列表 */
+const handleCheckDocker = async () => {
+  await docker.checkStatus();
+  if (docker.isAvailable) {
+    await Promise.all([docker.loadContainers(), docker.loadImages()]);
+    message.success("已连接到 Docker");
+  } else if (docker.dockerStatus.installed) {
+    message.warning("Docker 已安装，但守护进程未运行，请先启动 Docker Desktop");
+  } else {
+    message.error("未检测到 Docker 安装");
+  }
+};
+
+/** 刷新容器和镜像列表 */
+const handleRefreshDocker = async () => {
+  try {
+    await Promise.all([docker.loadContainers(), docker.loadImages()]);
+    message.success("已刷新");
+  } catch (error) {
+    message.error(`刷新失败: ${error}`);
+  }
+};
+
+/** 拉取指定方案的 Docker 镜像 */
+const handlePullDockerImage = async (profileId: string) => {
+  const profile = docker.profiles.find((p) => p.id === profileId);
+  if (!profile) return;
+  try {
+    await docker.pullImage(profile.image);
+    message.success(`镜像 ${profile.image} 拉取完成`);
+  } catch (error) {
+    message.error(`拉取失败: ${error}`);
+  }
+};
+
+/** 启动容器 */
+const handleStartDockerContainer = async (profileId: string) => {
+  try {
+    await docker.startContainer(profileId);
+    message.success("容器已启动");
+  } catch (error) {
+    message.error(`启动失败: ${error}`);
+  }
+};
+
+/** 停止容器 */
+const handleStopDockerContainer = async (containerId: string) => {
+  try {
+    await docker.stopContainer(containerId);
+    message.success("容器已停止");
+  } catch (error) {
+    message.error(`停止失败: ${error}`);
+  }
+};
+
+/** 删除容器 */
+const handleRemoveDockerContainer = async (containerId: string) => {
+  try {
+    await docker.removeContainer(containerId);
+    message.success("容器已删除");
+  } catch (error) {
+    message.error(`删除失败: ${error}`);
+  }
+};
+
+/** 一键部署：拉取镜像（如需）→ 启动容器 → 创建 API 配置 */
+const handleDockerOneClickDeploy = async (profileId: string) => {
+  try {
+    const apiUrl = await docker.oneClickDeploy(profileId);
+    message.success(`部署完成，API 地址: ${apiUrl}`);
+  } catch (error) {
+    message.error(`部署失败: ${error}`);
+  }
+};
+
+/** 打开 Docker 官网 */
+const handleOpenDockerWebsite = () => {
+  openExternalUrl("https://www.docker.com/products/docker-desktop/");
+};
+
 // ============ 初始化 ============
 
 onMounted(async () => {
@@ -442,6 +531,13 @@ onMounted(async () => {
   await lmStudio.checkStatus();
   if (lmStudio.isOnline) {
     await lmStudio.loadModels();
+  }
+
+  // Docker: check installation/daemon status and load profiles
+  await docker.loadProfiles();
+  await docker.checkStatus();
+  if (docker.isAvailable) {
+    await Promise.all([docker.loadContainers(), docker.loadImages()]);
   }
 });
 </script>
@@ -1299,6 +1395,293 @@ onMounted(async () => {
             </div>
           </n-card>
         </n-tab-pane>
+
+        <!-- ===== Docker Tab ===== -->
+        <n-tab-pane name="docker" tab="Docker">
+          <n-card
+            class="settings-card"
+            :bordered="false"
+          >
+            <template #header>
+              <div class="card-header">
+                <n-icon :size="20" depth="3"><CubeOutline /></n-icon>
+                <span>Docker 镜像部署</span>
+              </div>
+            </template>
+
+            <template #header-extra>
+              <n-space align="center">
+                <n-button size="small" @click="handleOpenDockerWebsite">
+                  <template #icon><n-icon><OpenOutline /></n-icon></template>
+                  Docker Desktop
+                </n-button>
+                <n-button
+                  size="small"
+                  @click="handleRefreshDocker"
+                  :loading="docker.isLoadingContainers"
+                  :disabled="!docker.isAvailable"
+                >
+                  <template #icon><n-icon><RefreshOutline /></n-icon></template>
+                  刷新
+                </n-button>
+              </n-space>
+            </template>
+
+            <!-- Step 1: Docker 环境 -->
+            <div class="deploy-section">
+              <div class="section-title">
+                <n-text strong>1. Docker 环境</n-text>
+              </div>
+
+              <n-space align="center" justify="space-between" style="padding: 8px 0;">
+                <n-space align="center">
+                  <n-icon
+                    size="20"
+                    :color="docker.isAvailable ? '#18a058' : docker.dockerStatus.installed ? '#f0a020' : '#d03050'"
+                  >
+                    <CubeOutline />
+                  </n-icon>
+                  <n-text v-if="docker.isAvailable">
+                    Docker 在线
+                    <n-tag v-if="docker.dockerStatus.version" size="small" type="success" style="margin-left: 8px;">
+                      v{{ docker.dockerStatus.version }}
+                    </n-tag>
+                  </n-text>
+                  <n-text v-else-if="docker.dockerStatus.installed" type="warning">
+                    Docker 已安装但守护进程未运行
+                  </n-text>
+                  <n-text v-else type="error">未检测到 Docker</n-text>
+                </n-space>
+                <n-button size="small" @click="handleCheckDocker">
+                  <template #icon><n-icon><RefreshOutline /></n-icon></template>
+                  检测 Docker
+                </n-button>
+              </n-space>
+
+              <n-alert v-if="!docker.dockerStatus.installed" type="info" style="margin-top: 8px;">
+                需要先安装 Docker Desktop，安装并启动后点击"检测 Docker"。
+                Docker Desktop 内置了 GPU 支持（需要 NVIDIA GPU 驱动）。
+              </n-alert>
+              <n-alert v-else-if="!docker.dockerStatus.running" type="warning" style="margin-top: 8px;">
+                请启动 Docker Desktop，等待其完全就绪（托盘图标变为稳定状态）后再点击"检测 Docker"。
+              </n-alert>
+            </div>
+
+            <!-- Step 2: 预设部署方案 -->
+            <div v-if="docker.isAvailable" class="deploy-section" style="margin-top: 16px;">
+              <div class="section-title">
+                <n-text strong>2. 部署方案</n-text>
+                <n-text depth="3" style="font-size: 12px; margin-left: 8px;">
+                  选择一个方案，拉取镜像后启动容器
+                </n-text>
+              </div>
+
+              <n-list bordered size="small" style="margin-top: 8px;">
+                <n-list-item v-for="profile in docker.profiles" :key="profile.id">
+                  <n-thing>
+                    <template #header>
+                      <n-space align="center" :size="6">
+                        <n-icon><ServerOutline /></n-icon>
+                        {{ profile.name }}
+                        <n-tag v-if="profile.gpu" size="small" type="warning">GPU</n-tag>
+                        <n-tag
+                          v-if="docker.getProfileContainer(profile.id)"
+                          size="small"
+                          :type="docker.getProfileContainer(profile.id)?.state === 'running' ? 'success' : 'default'"
+                        >
+                          {{ docker.getProfileContainer(profile.id)?.state === 'running' ? '运行中' : '已停止' }}
+                        </n-tag>
+                        <n-tag v-if="docker.isImagePulled(profile.image)" size="small" type="info">
+                          镜像已就绪
+                        </n-tag>
+                      </n-space>
+                    </template>
+                    <template #description>
+                      <div style="margin-top: 4px;">
+                        <n-text depth="3" style="font-size: 12px;">{{ profile.description }}</n-text>
+                        <n-space size="small" style="margin-top: 4px;">
+                          <n-tag size="small">{{ profile.image }}</n-tag>
+                          <n-tag v-for="port in profile.ports" :key="port" size="small" type="info">
+                            :{{ port.split(':')[0] }}
+                          </n-tag>
+                        </n-space>
+                      </div>
+                    </template>
+                  </n-thing>
+                  <template #suffix>
+                    <n-space :size="4" align="center">
+                      <!-- 一键部署（拉取+启动+创建配置） -->
+                      <n-tooltip trigger="hover">
+                        <template #trigger>
+                          <n-button
+                            size="small"
+                            type="primary"
+                            :loading="docker.isPulling && docker.pullingImage === profile.image || docker.isStartingContainer"
+                            @click="handleDockerOneClickDeploy(profile.id)"
+                          >
+                            <template #icon><n-icon><RocketOutline /></n-icon></template>
+                            一键部署
+                          </n-button>
+                        </template>
+                        {{ docker.isImagePulled(profile.image) ? '启动容器并创建 API 配置' : '拉取镜像 → 启动容器 → 创建 API 配置' }}
+                      </n-tooltip>
+
+                      <!-- 仅拉取镜像 -->
+                      <n-button
+                        v-if="!docker.isImagePulled(profile.image)"
+                        size="small"
+                        :loading="docker.isPulling && docker.pullingImage === profile.image"
+                        @click="handlePullDockerImage(profile.id)"
+                      >
+                        <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                        拉取镜像
+                      </n-button>
+
+                      <!-- 启动/停止容器 -->
+                      <n-button
+                        v-if="docker.getProfileContainer(profile.id) && docker.getProfileContainer(profile.id)!.state !== 'running'"
+                        size="small"
+                        type="success"
+                        :loading="docker.isStartingContainer"
+                        @click="handleStartDockerContainer(profile.id)"
+                      >
+                        <template #icon><n-icon><PlayOutline /></n-icon></template>
+                        启动
+                      </n-button>
+                      <n-button
+                        v-else-if="docker.getProfileContainer(profile.id)?.state === 'running'"
+                        size="small"
+                        @click="handleStopDockerContainer(docker.getProfileContainer(profile.id)!.id)"
+                      >
+                        <template #icon><n-icon><StopOutline /></n-icon></template>
+                        停止
+                      </n-button>
+                    </n-space>
+                  </template>
+                </n-list-item>
+              </n-list>
+
+              <!-- 拉取进度日志 -->
+              <n-alert
+                v-if="docker.isPulling"
+                type="info"
+                style="margin-top: 12px;"
+              >
+                <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                <div>
+                  正在拉取镜像: {{ docker.pullingImage }}
+                  <div
+                    style="margin-top: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.05); border-radius: 4px; padding: 6px;"
+                  >
+                    <div
+                      v-for="(line, idx) in docker.pullLogs.slice(-20)"
+                      :key="idx"
+                      style="line-height: 1.4;"
+                    >
+                      {{ line }}
+                    </div>
+                  </div>
+                </div>
+              </n-alert>
+            </div>
+
+            <!-- Step 3: 容器管理 -->
+            <div v-if="docker.isAvailable" class="deploy-section" style="margin-top: 16px;">
+              <div class="section-title">
+                <n-text strong>3. 容器管理</n-text>
+                <n-text depth="3" style="font-size: 12px; margin-left: 8px;">
+                  {{ docker.appContainers.length }} 个容器
+                </n-text>
+              </div>
+
+              <div v-if="docker.isLoadingContainers" style="text-align: center; padding: 20px;">
+                <n-text depth="3">加载容器列表中...</n-text>
+              </div>
+
+              <n-empty
+                v-else-if="docker.appContainers.length === 0"
+                description="暂无容器，请先通过上方方案启动"
+                style="margin-top: 12px;"
+              />
+
+              <n-list v-else bordered size="small" style="margin-top: 8px;">
+                <n-list-item v-for="container in docker.appContainers" :key="container.id">
+                  <n-thing>
+                    <template #header>
+                      <n-space align="center" :size="6">
+                        <n-icon><LayersOutline /></n-icon>
+                        {{ container.name.replace(/^\//, '') }}
+                        <n-tag
+                          size="small"
+                          :type="container.state === 'running' ? 'success' : 'default'"
+                        >
+                          {{ container.state === 'running' ? '运行中' : container.state }}
+                        </n-tag>
+                      </n-space>
+                    </template>
+                    <template #description>
+                      <n-space size="small" style="margin-top: 4px;">
+                        <n-tag size="small">{{ container.image }}</n-tag>
+                        <n-tag v-if="container.ports" size="small" type="info">
+                          {{ container.ports.split(',')[0] }}
+                        </n-tag>
+                      </n-space>
+                    </template>
+                  </n-thing>
+                  <template #suffix>
+                    <n-space :size="4" align="center">
+                      <n-button
+                        v-if="container.state === 'running'"
+                        size="small"
+                        @click="handleStopDockerContainer(container.id)"
+                      >
+                        <template #icon><n-icon><StopOutline /></n-icon></template>
+                        停止
+                      </n-button>
+                      <n-popconfirm @positive-click="handleRemoveDockerContainer(container.id)">
+                        <template #trigger>
+                          <n-button size="small" type="error" quaternary>
+                            <template #icon><n-icon><TrashOutline /></n-icon></template>
+                          </n-button>
+                        </template>
+                        确定删除容器 {{ container.name.replace(/^\//, '') }}？此操作不可恢复。
+                      </n-popconfirm>
+                    </n-space>
+                  </template>
+                </n-list-item>
+              </n-list>
+            </div>
+
+            <!-- 已有镜像列表 -->
+            <div v-if="docker.isAvailable && docker.images.length > 0" class="deploy-section" style="margin-top: 16px;">
+              <div class="section-title">
+                <n-text strong>本地镜像</n-text>
+                <n-text depth="3" style="font-size: 12px; margin-left: 8px;">
+                  {{ docker.images.length }} 个
+                </n-text>
+              </div>
+              <n-list bordered size="small" style="margin-top: 8px;">
+                <n-list-item v-for="img in docker.images" :key="img.id">
+                  <n-thing>
+                    <template #header>
+                      <n-space align="center" :size="6">
+                        <n-icon><LayersOutline /></n-icon>
+                        {{ img.repository }}:{{ img.tag }}
+                      </n-space>
+                    </template>
+                    <template #description>
+                      <n-space size="small" style="margin-top: 4px;">
+                        <n-tag size="small">{{ img.size }}</n-tag>
+                        <n-tag size="small" type="default">{{ img.created.split(' ')[0] }}</n-tag>
+                      </n-space>
+                    </template>
+                  </n-thing>
+                </n-list-item>
+              </n-list>
+            </div>
+          </n-card>
+        </n-tab-pane>
+
         </n-tabs>
       </div>
     </n-layout-content>

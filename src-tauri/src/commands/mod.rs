@@ -17,6 +17,7 @@
 
 pub mod auth;
 pub mod constants;
+pub mod docker;
 pub mod llm;
 pub mod lmstudio;
 pub mod local_model;

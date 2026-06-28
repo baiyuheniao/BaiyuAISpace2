@@ -170,3 +170,9 @@ visual-code/
 
 # Trae Settings
 .trae/rules
+
+# Claude Code local config
+.claude/
+
+# DingTalk MCP server (contains webhook secrets)
+DingTalk.py

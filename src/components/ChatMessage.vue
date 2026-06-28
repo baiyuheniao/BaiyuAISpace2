@@ -30,7 +30,6 @@ import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 
 // 导入 Markdown 解析库
 import { marked } from "marked";
-import { markedHighlight } from "marked-highlight";
 
 // 导入代码高亮库
 import hljs from "highlight.js";
@@ -48,23 +47,77 @@ const props = defineProps<{
   message: Message;
 }>();
 
+// ============ HTML 预览块生成 ============
+
+/**
+ * 为 HTML 代码块生成"源码 + iframe 预览"双视图结构。
+ * iframe 使用 sandbox + srcdoc 隔离执行，toolbar 按钮通过内联
+ * onclick 切换 show-preview 类来控制显示哪一侧。
+ */
+function buildHtmlPreviewBlock(code: string): string {
+  const highlighted = hljs.highlight(code, { language: "html" }).value;
+
+  // 如果模型只输出了 HTML 片段（非完整文档），补全基础框架以确保正确渲染
+  const isFullDoc = /^\s*<!doctype/i.test(code) || /^\s*<html[\s>]/i.test(code);
+  const docHtml = isFullDoc
+    ? code
+    : `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:16px;font-family:system-ui,sans-serif;line-height:1.6}</style></head><body>${code}</body></html>`;
+
+  // srcdoc 属性值内只需转义 & 和 "
+  const srcdoc = docHtml.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+
+  // onload 尝试按内容高度自适应（不超过 600px），sandbox allow-same-origin
+  // 让父页面能读 contentDocument.scrollHeight
+  const onload =
+    "try{var h=this.contentDocument.documentElement.scrollHeight" +
+    "||this.contentDocument.body.scrollHeight;" +
+    "this.style.height=Math.min(Math.max(h,120),600)+'px'}catch(e){}";
+
+  const onclick =
+    "var b=this.closest('.html-preview-block');" +
+    "b.classList.toggle('show-preview');" +
+    "this.textContent=b.classList.contains('show-preview')?'查看源码':'预览效果'";
+
+  return (
+    `<div class="html-preview-block">` +
+    `<div class="html-preview-toolbar">` +
+    `<button class="html-preview-toggle" onclick="${onclick}">预览效果</button>` +
+    `<span class="html-lang-badge">HTML</span>` +
+    `</div>` +
+    `<pre class="html-source-pre"><code class="hljs language-html">${highlighted}</code></pre>` +
+    `<iframe class="html-preview-frame" srcdoc="${srcdoc}" ` +
+    `sandbox="allow-scripts allow-same-origin allow-modals allow-forms" ` +
+    `onload="${onload}"></iframe>` +
+    `</div>`
+  );
+}
+
 // ============ Markdown 配置 ============
 
-// 使用 Promise 确保 marked 配置只执行一次
+// 使用单例确保 marked.use() 只调用一次（marked 修改全局实例）
 const markedInitPromise = (() => {
   let promise: Promise<void> | null = null;
   return () => {
     if (!promise) {
       promise = new Promise((resolve) => {
-        marked.use(
-          markedHighlight({
-            langPrefix: "hljs language-",
-            highlight(code, lang) {
-              const language = hljs.getLanguage(lang) ? lang : "plaintext";
-              return hljs.highlight(code, { language }).value;
+        marked.use({
+          renderer: {
+            // 处理所有围栏代码块（三参数形式是此版本 marked 的 Renderer 签名）
+            code(text: string, lang: string | undefined, _escaped: boolean): string {
+              // 取 info string 第一个单词作为语言标识（如 "html filename.html" → "html"）
+              const normalizedLang = ((lang ?? "").trim().split(/\s+/)[0] ?? "").toLowerCase();
+
+              if (normalizedLang === "html" || normalizedLang === "htm") {
+                return buildHtmlPreviewBlock(text);
+              }
+
+              // 其余语言走 highlight.js 常规高亮
+              const language = hljs.getLanguage(normalizedLang) ? normalizedLang : "plaintext";
+              const highlighted = hljs.highlight(text, { language }).value;
+              return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
             },
-          })
-        );
+          },
+        });
         resolve();
       });
     }
@@ -303,6 +356,69 @@ const handleCopy = async () => {
 
 .markdown-content :deep(p:last-child) {
   margin-bottom: 0;
+}
+
+/* ===== HTML 预览块 ===== */
+.markdown-content :deep(.html-preview-block) {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: $radius-lg;
+  overflow: hidden;
+  margin: 12px 0;
+
+  .html-preview-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: #252535;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    user-select: none;
+  }
+
+  .html-preview-toggle {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: $radius-sm;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: transparent;
+    color: #a6adc8;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #cdd6f4;
+    }
+  }
+
+  .html-lang-badge {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.3);
+    font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+    letter-spacing: 0.04em;
+  }
+
+  /* 源码视图：pre 撑满，iframe 隐藏 */
+  .html-source-pre {
+    margin: 0 !important;
+    border-radius: 0 !important;
+    border: none !important;
+    border-top: none !important;
+  }
+
+  .html-preview-frame {
+    display: none;
+    width: 100%;
+    min-height: 120px;
+    border: none;
+    background: #fff;
+  }
+
+  /* 切换到预览模式 */
+  &.show-preview {
+    .html-source-pre { display: none; }
+    .html-preview-frame { display: block; }
+  }
 }
 
 .markdown-content :deep(pre) {
