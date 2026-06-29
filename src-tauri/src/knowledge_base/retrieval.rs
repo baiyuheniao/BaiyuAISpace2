@@ -17,7 +17,8 @@ impl Retriever {
         Self { vector_store, db_path }
     }
 
-    /// Retrieve relevant chunks
+    /// Retrieve relevant chunks, then optionally expand each result with
+    /// sentence-window context (adjacent chunks from the same document).
     pub async fn retrieve(
         &self,
         request: RetrievalRequest,
@@ -26,7 +27,9 @@ impl Retriever {
         embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
-        match request.retrieval_mode {
+        let window_size = request.window_size;
+
+        let mut result = match request.retrieval_mode {
             RetrievalMode::Vector => {
                 self.vector_search(&request, embedding_provider, embedding_model, embedding_base_url, api_key).await
             }
@@ -36,7 +39,76 @@ impl Retriever {
             RetrievalMode::Hybrid => {
                 self.hybrid_search(&request, embedding_provider, embedding_model, embedding_base_url, api_key).await
             }
+        }?;
+
+        if window_size > 0 && !result.chunks.is_empty() {
+            result.chunks = self.expand_windows(result.chunks, window_size).await?;
         }
+
+        Ok(result)
+    }
+
+    /// Expand each retrieved chunk with up to `window` adjacent chunks on each
+    /// side (same document, ordered by chunk_index). The matched chunk's content
+    /// is replaced with the concatenated window so the LLM receives richer
+    /// context without changing any scores or ranking.
+    async fn expand_windows(
+        &self,
+        chunks: Vec<RetrievedChunk>,
+        window: i32,
+    ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
+        let db_path = self.db_path.clone();
+
+        // Collect identifiers before moving `chunks`
+        let targets: Vec<(String, String, i32)> = chunks
+            .iter()
+            .map(|c| (c.chunk.id.clone(), c.chunk.document_id.clone(), c.chunk.chunk_index))
+            .collect();
+
+        let expanded = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db_path)
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+            let mut stmt = conn
+                .prepare(
+                    "SELECT content FROM chunks \
+                     WHERE document_id = ?1 AND chunk_index BETWEEN ?2 AND ?3 \
+                     ORDER BY chunk_index ASC",
+                )
+                .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+            let mut map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+
+            for (chunk_id, doc_id, chunk_index) in &targets {
+                let contents: Vec<String> = stmt
+                    .query_map(
+                        rusqlite::params![doc_id, chunk_index - window, chunk_index + window],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                map.insert(chunk_id.clone(), contents.join("\n"));
+            }
+
+            Ok::<_, KnowledgeBaseError>(map)
+        })
+        .await
+        .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking: {}", e)))??;
+
+        let result = chunks
+            .into_iter()
+            .map(|mut c| {
+                if let Some(content) = expanded.get(&c.chunk.id) {
+                    c.chunk.content = content.clone();
+                }
+                c
+            })
+            .collect();
+
+        Ok(result)
     }
 
     /// Pure vector similarity search
@@ -114,27 +186,39 @@ impl Retriever {
         embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
-        // Get results from both methods with larger top_k for better fusion
+        // Get results from both methods with larger top_k for better fusion.
+        // Zero out similarity_threshold so vector_search doesn't pre-filter candidates
+        // before they get a chance to be rescued by keyword ranking in RRF — a chunk
+        // with low vector similarity but exact keyword match should survive the merge.
+        // RRF scores (≈0.001–0.033) are not comparable to cosine similarity (0–1),
+        // so we also skip threshold filtering on the merged output.
         let mut vector_request = request.clone();
         vector_request.top_k = request.top_k * 2;
+        vector_request.similarity_threshold = 0.0;
 
         let mut keyword_request = request.clone();
         keyword_request.top_k = request.top_k * 2;
 
         let vector_result = self.vector_search(&vector_request, embedding_provider, embedding_model, embedding_base_url, api_key).await?;
         let keyword_result = self.keyword_search(&keyword_request).await?;
-        
+
         // Merge and rerank using RRF
         let merged = self.merge_results(
             vector_result.chunks,
             keyword_result.chunks,
             request.top_k,
         );
-        
-        // Filter by similarity threshold
+
+        // Apply threshold to the original cosine score (vector_score), not the RRF
+        // score — RRF values (≈0.001–0.033) are incomparable to similarity_threshold
+        // (0–1). A chunk passes if its vector similarity is above threshold OR it
+        // matched a keyword (keyword match is itself a relevance signal).
         let filtered: Vec<_> = merged
             .into_iter()
-            .filter(|c| c.score >= request.similarity_threshold)
+            .filter(|c| {
+                c.vector_score.map_or(false, |vs| vs >= request.similarity_threshold)
+                    || c.keyword_score.is_some()
+            })
             .collect();
 
         Ok(RetrievalResult {

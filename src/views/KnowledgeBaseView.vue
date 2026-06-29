@@ -55,6 +55,8 @@ import {
   NDescriptions,
   NDescriptionsItem,
   NAlert,
+  NSwitch,
+  NDivider,
   useMessage,
 } from "naive-ui";
 import {
@@ -116,6 +118,13 @@ const embeddingApiConfigOptions = computed(() => {
   // 未选择状态；若把占位项塞进 options，由于其 value 为空字符串，会和
   // 初始空值匹配上，导致下拉列表里出现一个被打勾选中的假选项
   return settingsStore.embeddingApiConfigs.map(config => ({
+    label: `${config.name} (${config.model})`,
+    value: config.id,
+  }));
+});
+
+const rerankerApiConfigOptions = computed(() => {
+  return settingsStore.rerankerApiConfigs.map(config => ({
     label: `${config.name} (${config.model})`,
     value: config.id,
   }));
@@ -732,6 +741,33 @@ const getStatusTag = (status: Document["status"]) => {
                 </n-text>
               </div>
             </n-form-item>
+
+            <n-divider />
+
+            <!-- Reranker 精排 -->
+            <n-form-item label="启用 Reranker">
+              <n-switch v-model:value="kbStore.retrievalSettings.enableReranker" />
+            </n-form-item>
+
+            <template v-if="kbStore.retrievalSettings.enableReranker">
+              <n-form-item label="Reranker 配置">
+                <n-select
+                  v-model:value="kbStore.retrievalSettings.rerankerConfigId"
+                  :options="rerankerApiConfigOptions"
+                  placeholder="选择 Reranker 配置"
+                  clearable
+                />
+              </n-form-item>
+              <n-form-item label="精排保留 Top-N">
+                <n-input-number
+                  v-model:value="kbStore.retrievalSettings.rerankTopN"
+                  :min="1"
+                  :max="50"
+                  :placeholder="`默认与 Top-K 相同 (${kbStore.retrievalSettings.topK})`"
+                  clearable
+                />
+              </n-form-item>
+            </template>
           </n-form>
         </n-card>
 

@@ -21,6 +21,12 @@ export interface ImageAttachment {
   mediaType: string;  // MIME 类型，如 "image/jpeg"
 }
 
+/** 视频附件（base64 编码，不含 data URL 前缀，仅 Gemini provider 有效） */
+export interface VideoAttachment {
+  data: string;
+  mediaType: string;
+}
+
 /**
  * 前端消息类型
  * 用于在 UI 层表示聊天消息
@@ -37,6 +43,7 @@ export interface Message {
     size: number;                 // 文件大小 (字节)
   }>;
   images?: ImageAttachment[];     // 图片附件（已转 base64）
+  videos?: VideoAttachment[];     // 视频附件（已转 base64，仅 Gemini）
 }
 
 /**
@@ -534,16 +541,29 @@ export const useChatStore = defineStore("chat", () => {
    * @param images - 图片附件 (可选, 含 base64 数据)
    * @returns void
    */
-  const sendMessage = async (content: string, attachedFiles?: Array<{ name: string; size: number }>, images?: ImageAttachment[]) => {
+  const sendMessage = async (
+    content: string,
+    attachedFiles?: Array<{ name: string; size: number }>,
+    images?: ImageAttachment[],
+    videos?: VideoAttachment[],
+    documentContents?: Array<{ name: string; content: string }>
+  ) => {
     // 检查是否有当前会话
     if (!currentSession.value) return;
 
-    // 查找当前会话关联的 API 配置
-    const config = settings.apiConfigs.find(c => c.id === currentSession.value!.apiConfigId);
+    // 优先使用当前激活的 API 配置（允许在不新建会话的情况下切换 API）
+    const effectiveConfigId = settings.activeConfigId ?? currentSession.value!.apiConfigId;
+    const config = settings.apiConfigs.find(c => c.id === effectiveConfigId);
     if (!config) {
       console.error("API config not found for session");
       alert("未找到 API 配置，请检查设置");
       return;
+    }
+    // 若与会话绑定的配置不同，同步更新当前会话（影响 History 显示）
+    if (effectiveConfigId !== currentSession.value!.apiConfigId) {
+      currentSession.value!.apiConfigId = config.id;
+      currentSession.value!.provider = config.provider;
+      currentSession.value!.model = config.model;
     }
 
     // 检查 API 密钥是否已加载
@@ -558,26 +578,36 @@ export const useChatStore = defineStore("chat", () => {
 
     // 初始化内容变量
     let enhancedContent = content;
-    let retrievalContext = "";
+
+    // ============ 文档上下文注入 ============
+    let docContext = "";
+    if (documentContents && documentContents.length > 0) {
+      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
+      docContext = `[用户附加文档]\n${docParts.join('\n---\n')}`;
+    }
 
     // ============ RAG 检索增强 ============
+    let retrievalContext = "";
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
       const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
       if (kb) {
-        // API Key is retrieved from secure storage by backend (#32)
-        // Execute knowledge base search
         const result = await kbStore.searchKnowledgeBase(
           selectedKnowledgeBaseId.value,
           content
         );
-        
-        // If relevant content found, build enhanced context
         if (result && result.chunks.length > 0) {
           lastRetrievalResult.value = result;
           retrievalContext = buildRagContext(result);
-          enhancedContent = `${retrievalContext}\n\n问题：${content}`;
         }
       }
+    }
+
+    // 合并上下文，构建最终发送内容
+    const contextParts: string[] = [];
+    if (retrievalContext) contextParts.push(retrievalContext);
+    if (docContext) contextParts.push(docContext);
+    if (contextParts.length > 0) {
+      enhancedContent = `${contextParts.join('\n\n')}\n\n问题：${content}`;
     }
 
     // 构建用户消息对象
@@ -588,6 +618,7 @@ export const useChatStore = defineStore("chat", () => {
       timestamp: Date.now(),
       files: attachedFiles && attachedFiles.length > 0 ? attachedFiles : undefined,
       images: images && images.length > 0 ? images : undefined,
+      videos: videos && videos.length > 0 ? videos : undefined,
     };
 
     // 添加到当前会话
@@ -596,9 +627,9 @@ export const useChatStore = defineStore("chat", () => {
     isLoading.value = true;
     currentStreamContent.value = "";
 
-    // 保存到数据库
-    await saveMessageToDb(userMessage);
+    // 保存到数据库（先保存 session，再保存 message，满足外键约束）
     await saveSessionToDb();
+    await saveMessageToDb(userMessage);
 
     try {
       // 创建助手消息占位
@@ -612,19 +643,22 @@ export const useChatStore = defineStore("chat", () => {
       currentSession.value.messages.push(assistantMessage);
 
       // ============ 构建 API 消息列表 ============
+      // Use userMessage.id to identify the RAG target — positional index is
+      // unreliable when prior error messages have been filtered out of the array.
       const apiMessages = currentSession.value.messages
         // 过滤掉流式中和有错误的消息
         .filter(m => !m.streaming && !m.error)
-        .map((m, index) => {
-          // 如果启用了 RAG，在最后一条用户消息中添加检索上下文
-          if (ragEnabled.value && index === currentSession.value!.messages.length - 2) {
+        .map((m) => {
+          // 如果有增强内容（RAG 或文档注入），在当前用户消息中替换
+          if (m.id === userMessage.id && enhancedContent !== content) {
             return {
               id: m.id,
               role: m.role,
-              content: enhancedContent,  // 使用增强后的内容
+              content: enhancedContent,
               timestamp: m.timestamp,
               error: m.error,
               images: m.images ?? [],
+              videos: m.videos ?? [],
             };
           }
           return {
@@ -634,6 +668,7 @@ export const useChatStore = defineStore("chat", () => {
             timestamp: m.timestamp,
             error: m.error,
             images: m.images ?? [],
+            videos: m.videos ?? [],
           };
         });
 
@@ -656,6 +691,7 @@ export const useChatStore = defineStore("chat", () => {
             timestamp: Date.now(),
             error: undefined,
             images: [],
+            videos: [],
           });
         }
       }
@@ -713,7 +749,26 @@ export const useChatStore = defineStore("chat", () => {
       if (currentSession.value.messages.length === 2) {
         currentSession.value.title = content.slice(0, 30) + (content.length > 30 ? "..." : "");
         await saveSessionToDb();
-        await loadSessionsFromDb();
+        // 只局部更新 sessions 列表的标题，不调用 loadSessionsFromDb()
+        // 原因：loadSessionsFromDb 会用 DB 旧数据覆盖内存中正在 streaming 的 assistantMessage，导致消息消失
+        const sid = currentSession.value.id;
+        const newTitle = currentSession.value.title;
+        const existingIdx = sessions.value.findIndex(s => s.id === sid);
+        if (existingIdx !== -1) {
+          sessions.value[existingIdx] = { ...sessions.value[existingIdx], title: newTitle };
+        } else {
+          // 新会话还不在列表里（首次发消息），插到最前面
+          sessions.value.unshift({
+            id: currentSession.value.id,
+            title: newTitle,
+            provider: currentSession.value.provider,
+            model: currentSession.value.model,
+            apiConfigId: currentSession.value.apiConfigId,
+            createdAt: currentSession.value.createdAt,
+            updatedAt: Date.now(),
+            messages: [],
+          });
+        }
       }
     } catch (error) {
       // ============ 错误处理 ============

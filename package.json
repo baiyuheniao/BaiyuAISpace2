@@ -23,6 +23,7 @@
     "highlight.js": "^11.9.0",
     "marked": "^12.0.0",
     "marked-highlight": "^2.1.0",
+    "mermaid": "^11.16.0",
     "naive-ui": "^2.38.2",
     "pinia": "^2.1.7",
     "pinia-plugin-persistedstate": "^3.2.1",

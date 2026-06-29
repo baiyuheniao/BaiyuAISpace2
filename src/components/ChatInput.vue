@@ -18,6 +18,10 @@
 // 导入 Vue 相关功能
 import { ref, computed, onMounted } from "vue";
 
+// 导入 Tauri API
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+
 // 导入 NaiveUI 组件
 import {
   NButton,
@@ -79,6 +83,9 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 // 已附加的文件列表
 const attachedFiles = ref<File[]>([]);
 
+// 已附加的文档列表（供直接上下文注入，无需知识库）
+const attachedDocuments = ref<Array<{ name: string; path: string }>>([]);
+
 // 是否显示知识库选择器
 const showRagSelector = ref(false);
 
@@ -94,7 +101,8 @@ const showSkillSelector = ref(false);
 const canSend = computed(() => {
   const hasContent = inputValue.value.trim().length > 0;
   const hasFiles = attachedFiles.value.length > 0;
-  return (hasContent || hasFiles) && !chat.isLoading && settings.activeConfig;
+  const hasDocs = attachedDocuments.value.length > 0;
+  return (hasContent || hasFiles || hasDocs) && !chat.isLoading && settings.activeConfig;
 });
 
 // API 配置下拉选项
@@ -202,33 +210,57 @@ const handleSend = async () => {
     await chat.createSession(settings.activeConfig.id);
   }
 
-  // 只保留 image/* 的文件用于发送给 LLM，视频暂时以文本提及方式处理
+  // 分类附件文件
   const imageFiles = attachedFiles.value.filter(f => f.type.startsWith('image/'));
-  const nonImageFiles = attachedFiles.value.filter(f => !f.type.startsWith('image/'));
+  const videoFiles = attachedFiles.value.filter(f => f.type.startsWith('video/'));
+  const otherFiles = attachedFiles.value.filter(f => !f.type.startsWith('image/') && !f.type.startsWith('video/'));
 
-  // 读取图片文件为 base64
+  // 读取图片/视频文件为 base64
   const images = imageFiles.length > 0
     ? await Promise.all(imageFiles.map(readFileAsBase64))
+    : undefined;
+
+  const videos = videoFiles.length > 0
+    ? await Promise.all(videoFiles.map(readFileAsBase64))
     : undefined;
 
   // 文件元数据 (用于 UI 显示)
   const fileInfo = attachedFiles.value.map(f => ({ name: f.name, size: f.size }));
 
-  // 非图片文件以文本提及方式加入内容
+  // 其余文件以文本提及方式加入内容
   let messageContent = content;
-  const mentions = nonImageFiles.map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`);
+  const mentions = otherFiles.map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`);
   if (mentions.length > 0) {
     messageContent = messageContent ? `${messageContent}\n${mentions.join(' ')}` : mentions.join(' ');
   }
 
+  // 加载附加文档内容（并行读取）
+  const docsToLoad = [...attachedDocuments.value];
+  const documentContents: Array<{ name: string; content: string }> = [];
+  for (const doc of docsToLoad) {
+    try {
+      const text = await invoke<string>('read_document_for_context', { filePath: doc.path });
+      documentContents.push({ name: doc.name, content: text });
+    } catch (err) {
+      console.error(`Failed to read document ${doc.name}:`, err);
+    }
+  }
+
   inputValue.value = "";
   attachedFiles.value = [];
+  attachedDocuments.value = [];
   if (inputRef.value) {
     inputRef.value.style.height = "60px";
   }
 
   try {
-    await chat.sendMessage(messageContent, fileInfo.length > 0 ? fileInfo : undefined, images);
+    await chat.sendMessage(
+      messageContent,
+      fileInfo.length > 0 ? fileInfo : undefined,
+      images,
+      videos,
+      documentContents.length > 0 ? documentContents : undefined,
+    );
   } catch (error) {
     const errorInfo = chat.classifyError(error);
     notification.error({
@@ -338,9 +370,39 @@ const removeAttachedFile = (index: number) => {
 
 const getFileDisplayName = (file: File): string => {
   const maxLength = 20;
-  return file.name.length > maxLength 
-    ? file.name.substring(0, maxLength) + '...' 
+  return file.name.length > maxLength
+    ? file.name.substring(0, maxLength) + '...'
     : file.name;
+};
+
+// 打开文件对话框选择文档（直接上下文注入）
+const handleDocumentAttach = async () => {
+  const selected = await open({
+    multiple: true,
+    filters: [{
+      name: 'Documents',
+      extensions: ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'csv', 'pptx', 'md', 'markdown', 'html', 'htm', 'txt', 'rs', 'js', 'ts', 'py', 'java', 'c', 'cpp', 'h', 'go'],
+    }],
+  });
+  if (!selected) return;
+  const paths = Array.isArray(selected) ? selected : [selected];
+  for (const path of paths) {
+    const name = path.split(/[\\/]/).pop() ?? path;
+    if (!attachedDocuments.value.find(d => d.path === path)) {
+      attachedDocuments.value.push({ name, path });
+    }
+  }
+};
+
+// 移除已附加文档
+const removeAttachedDocument = (index: number) => {
+  attachedDocuments.value.splice(index, 1);
+};
+
+// 获取文档显示名称（截断长名称）
+const getDocDisplayName = (name: string): string => {
+  const maxLength = 22;
+  return name.length > maxLength ? name.substring(0, maxLength) + '...' : name;
 };
 </script>
 
@@ -522,6 +584,37 @@ const getFileDisplayName = (file: File): string => {
           添加图片/视频 ({{ attachedFiles.length }})
         </n-tooltip>
 
+        <!-- Document Attach -->
+        <n-tooltip placement="top">
+          <template #trigger>
+            <n-button
+              tertiary
+              circle
+              size="large"
+              :type="attachedDocuments.length > 0 ? 'info' : 'default'"
+              class="doc-btn"
+              @click="handleDocumentAttach"
+            >
+              <template #icon>
+                <n-icon>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="12" y1="18" x2="12" y2="12" />
+                    <line x1="9" y1="15" x2="15" y2="15" />
+                  </svg>
+                </n-icon>
+              </template>
+            </n-button>
+          </template>
+          附加文档（注入上下文）{{ attachedDocuments.length > 0 ? ` (${attachedDocuments.length})` : '' }}
+        </n-tooltip>
+
         <!-- MCP Toggle -->
         <n-tooltip placement="top">
           <template #trigger>
@@ -662,6 +755,39 @@ const getFileDisplayName = (file: File): string => {
           </template>
           {{ chat.isLoading ? '停止生成' : '发送消息' }}
         </n-tooltip>
+      </div>
+    </div>
+
+    <!-- Attached Documents Display -->
+    <div
+      v-if="attachedDocuments.length > 0"
+      class="attached-files"
+    >
+      <div class="files-label">
+        已附加文档（直接注入上下文）：
+      </div>
+      <div class="files-list">
+        <div
+          v-for="(doc, index) in attachedDocuments"
+          :key="index"
+          class="file-item"
+        >
+          <n-tag
+            closable
+            type="info"
+            class="file-tag"
+            @close="removeAttachedDocument(index)"
+          >
+            <template #icon>
+              <n-icon :size="14">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM12 18v-5h1v4h1v-3h1v3h1v-5h-5v5h1zm-3-5h1v5H9v-5zm-3 0h1v2H6v1h1v2H6v-5z"/>
+                </svg>
+              </n-icon>
+            </template>
+            {{ getDocDisplayName(doc.name) }}
+          </n-tag>
+        </div>
       </div>
     </div>
 

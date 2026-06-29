@@ -778,6 +778,7 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
                 timestamp: m.created_at,
                 error: None,
                 images: vec![],
+                videos: vec![],
             }
         })
         .collect()
@@ -818,6 +819,11 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
                 top_k: 5,
                 retrieval_mode: RetrievalMode::Hybrid,
                 similarity_threshold: 0.0,
+                window_size: 1,
+                reranker_config_id: None,
+                reranker_base_url: None,
+                reranker_model: None,
+                rerank_top_n: None,
             };
             match search_knowledge_base(request, kb_state.clone()).await {
                 Ok(result) if !result.chunks.is_empty() => {

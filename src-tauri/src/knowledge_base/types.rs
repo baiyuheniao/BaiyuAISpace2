@@ -92,6 +92,24 @@ pub struct RetrievalRequest {
     pub top_k: i32,
     pub retrieval_mode: RetrievalMode,
     pub similarity_threshold: f32,
+    /// Sentence-window size: fetch this many adjacent chunks on each side of a
+    /// matched chunk and concatenate them as extended context for the LLM.
+    /// 0 = disabled (default). Backward-compatible: missing field deserializes to 0.
+    #[serde(default)]
+    pub window_size: i32,
+    /// Reranker config ID (for keyring lookup). When set, retrieved chunks are
+    /// re-ranked by a Cohere-compatible reranker API after initial retrieval.
+    #[serde(default)]
+    pub reranker_config_id: Option<String>,
+    /// Reranker base URL (e.g. "https://api.cohere.com")
+    #[serde(default)]
+    pub reranker_base_url: Option<String>,
+    /// Reranker model name (e.g. "rerank-multilingual-v3.0")
+    #[serde(default)]
+    pub reranker_model: Option<String>,
+    /// How many chunks to keep after reranking. Defaults to top_k if absent.
+    #[serde(default)]
+    pub rerank_top_n: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -20,6 +20,7 @@ import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useSettingsStore } from "./settings";
 
 // ============ 类型定义 (与 Rust 后端对应) ============
 
@@ -123,6 +124,9 @@ export interface RetrievalSettings {
   mode: RetrievalMode;            // 检索模式
   topK: number;                   // 返回结果数量
   similarityThreshold: number;    // 相似度阈值
+  enableReranker: boolean;        // 是否启用 Reranker 精排
+  rerankerConfigId?: string;      // 选用的 Reranker 配置 ID
+  rerankTopN?: number;            // 精排后保留条数（默认等于 topK）
 }
 
 export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
@@ -148,6 +152,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     mode: "hybrid",
     topK: 5,
     similarityThreshold: 0.7,
+    enableReranker: false,
   });
 
   // ============ 计算属性 ============
@@ -317,6 +322,21 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     query: string,
   ): Promise<RetrievalResult | null> => {
     try {
+      // Build optional reranker params
+      const rerankerParams: Record<string, unknown> = {};
+      if (retrievalSettings.value.enableReranker && retrievalSettings.value.rerankerConfigId) {
+        const settingsStore = useSettingsStore();
+        const cfg = settingsStore.rerankerApiConfigs.find(
+          (c) => c.id === retrievalSettings.value.rerankerConfigId
+        );
+        if (cfg) {
+          rerankerParams.rerankerConfigId = cfg.id;
+          rerankerParams.rerankerBaseUrl = cfg.baseUrl;
+          rerankerParams.rerankerModel = cfg.model;
+          rerankerParams.rerankTopN = retrievalSettings.value.rerankTopN ?? retrievalSettings.value.topK;
+        }
+      }
+
       const result = await invoke<RetrievalResult>("search_knowledge_base", {
         request: {
           kbId,
@@ -324,6 +344,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
           topK: retrievalSettings.value.topK,
           retrievalMode: retrievalSettings.value.mode,
           similarityThreshold: retrievalSettings.value.similarityThreshold,
+          windowSize: 1, // fetch ±1 adjacent chunks to give LLM richer context
+          ...rerankerParams,
         },
       });
       return result;

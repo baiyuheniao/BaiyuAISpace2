@@ -41,6 +41,14 @@ pub struct ImageAttachment {
     pub media_type: String,
 }
 
+/// 视频附件 (base64 编码, 不含 data URL 前缀, 仅 Gemini provider 支持)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAttachment {
+    pub data: String,
+    pub media_type: String,
+}
+
 /// 聊天消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -57,6 +65,9 @@ pub struct ChatMessage {
     /// 图片附件 (仅 user 消息有效)
     #[serde(default)]
     pub images: Vec<ImageAttachment>,
+    /// 视频附件 (仅 Gemini provider 有效, 其他 provider 忽略)
+    #[serde(default)]
+    pub videos: Vec<VideoAttachment>,
 }
 
 /// 聊天会话结构
@@ -294,8 +305,8 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 .filter(|m| m.role != "system")
                 .map(|m| {
                     let role = if m.role == "assistant" { "model" } else { "user" };
-                    if role == "user" && !m.images.is_empty() {
-                        // Gemini image format: inline_data with mime_type + raw base64 (NOT data URL)
+                    if role == "user" && (!m.images.is_empty() || !m.videos.is_empty()) {
+                        // Gemini multimodal: inline_data with mime_type + raw base64 (NOT data URL)
                         let mut parts: Vec<serde_json::Value> = vec![];
                         if !m.content.is_empty() {
                             parts.push(serde_json::json!({"text": m.content}));
@@ -303,6 +314,11 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                         for img in &m.images {
                             parts.push(serde_json::json!({
                                 "inline_data": {"mime_type": img.media_type, "data": img.data}
+                            }));
+                        }
+                        for vid in &m.videos {
+                            parts.push(serde_json::json!({
+                                "inline_data": {"mime_type": vid.media_type, "data": vid.data}
                             }));
                         }
                         serde_json::json!({"role": "user", "parts": parts})
@@ -861,6 +877,7 @@ pub async fn stream_message(
                     timestamp: chrono::Utc::now().timestamp_millis(),
                     error: None,
                     images: vec![],
+                    videos: vec![],
                 });
             }
         }
@@ -1767,7 +1784,7 @@ mod provider_tool_calling_tests {
     fn anthropic_request_body_carries_tools_in_anthropic_shape() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
         let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -1781,7 +1798,7 @@ mod provider_tool_calling_tests {
     fn google_request_body_groups_tools_under_function_declarations() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
         let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -1863,7 +1880,7 @@ mod provider_tool_calling_tests {
     fn openai_shape_unaffected_by_provider_branching() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
         let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -1924,9 +1941,9 @@ mod provider_tool_calling_tests {
     #[test]
     fn build_native_messages_matches_provider_shapes() {
         let messages = vec![
-            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![] },
-            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![] },
-            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![] },
+            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
+            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
+            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
         ];
 
         let anthropic = build_native_messages("anthropic", &messages);

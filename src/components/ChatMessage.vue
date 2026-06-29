@@ -23,7 +23,7 @@
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed, ref } from "vue";
+import { computed, ref, watch, onMounted, nextTick } from "vue";
 
 // 导入 NaiveUI 组件
 import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
@@ -34,6 +34,9 @@ import { marked } from "marked";
 // 导入代码高亮库
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
+
+// 导入 Mermaid 图表库
+import mermaid from "mermaid";
 
 // 导入消息类型
 import type { Message } from "@/stores/chat";
@@ -46,6 +49,61 @@ import { Person, Sparkles, Copy } from "@vicons/ionicons5";
 const props = defineProps<{
   message: Message;
 }>();
+
+// ============ Mermaid 初始化 ============
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "dark",
+  securityLevel: "loose",
+  fontFamily: "system-ui, sans-serif",
+});
+
+// ref 指向渲染 markdown 的 DOM 节点，用于查找 Mermaid 占位元素
+const contentRef = ref<HTMLElement | null>(null);
+
+// 唯一 ID 计数器，mermaid.render() 要求每次传不同 id
+let mermaidIdCounter = 0;
+
+/** 查找并渲染当前消息内所有待渲染的 Mermaid 占位块 */
+async function renderMermaidDiagrams() {
+  if (!contentRef.value) return;
+  const pending = contentRef.value.querySelectorAll<HTMLElement>(
+    ".mermaid-diagram[data-pending='true']"
+  );
+  for (const el of pending) {
+    const code = decodeURIComponent(el.getAttribute("data-code") ?? "");
+    if (!code) continue;
+    el.setAttribute("data-pending", "false");
+    const id = `mermaid-${++mermaidIdCounter}`;
+    try {
+      const { svg } = await mermaid.render(id, code);
+      el.innerHTML = svg;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      el.innerHTML = `<pre class="mermaid-error">图表渲染失败:\n${msg}</pre>`;
+    }
+  }
+}
+
+// 流式输出结束后（streaming → false）渲染图表
+watch(
+  () => props.message.streaming,
+  async (isStreaming) => {
+    if (!isStreaming) {
+      await nextTick();
+      renderMermaidDiagrams();
+    }
+  }
+);
+
+// 组件挂载时渲染历史消息里的图表
+onMounted(async () => {
+  if (!props.message.streaming) {
+    await nextTick();
+    renderMermaidDiagrams();
+  }
+});
 
 // ============ HTML 预览块生成 ============
 
@@ -92,6 +150,35 @@ function buildHtmlPreviewBlock(code: string): string {
   );
 }
 
+// ============ Mermaid 预览块生成 ============
+
+/**
+ * 为 Mermaid 代码块生成"图表预览 + 源码"双视图结构。
+ * 默认展示渲染后的图表（show-diagram 类），点击按钮切换。
+ * 图表占位元素 data-pending="true"，由 renderMermaidDiagrams() 在 DOM 就绪后填充。
+ */
+function buildMermaidPreviewBlock(code: string): string {
+  const highlighted = hljs.highlight(code, { language: "plaintext" }).value;
+  // encodeURIComponent 保证特殊字符在 data-* 属性里安全传递
+  const encoded = encodeURIComponent(code);
+
+  const onclick =
+    "var b=this.closest('.mermaid-preview-block');" +
+    "b.classList.toggle('show-diagram');" +
+    "this.textContent=b.classList.contains('show-diagram')?'查看源码':'查看图表'";
+
+  return (
+    `<div class="mermaid-preview-block show-diagram">` +
+    `<div class="mermaid-toolbar">` +
+    `<button class="mermaid-toggle" onclick="${onclick}">查看源码</button>` +
+    `<span class="mermaid-lang-badge">Mermaid</span>` +
+    `</div>` +
+    `<pre class="mermaid-source-pre"><code class="hljs">${highlighted}</code></pre>` +
+    `<div class="mermaid-diagram" data-pending="true" data-code="${encoded}"></div>` +
+    `</div>`
+  );
+}
+
 // ============ Markdown 配置 ============
 
 // 使用单例确保 marked.use() 只调用一次（marked 修改全局实例）
@@ -109,6 +196,10 @@ const markedInitPromise = (() => {
 
               if (normalizedLang === "html" || normalizedLang === "htm") {
                 return buildHtmlPreviewBlock(text);
+              }
+
+              if (normalizedLang === "mermaid") {
+                return buildMermaidPreviewBlock(text);
               }
 
               // 其余语言走 highlight.js 常规高亮
@@ -199,6 +290,7 @@ const handleCopy = async () => {
         :class="{ 'user-body': isUser }"
       >
         <div
+          ref="contentRef"
           class="markdown-content"
           v-html="renderedContent"
         />
@@ -418,6 +510,86 @@ const handleCopy = async () => {
   &.show-preview {
     .html-source-pre { display: none; }
     .html-preview-frame { display: block; }
+  }
+}
+
+/* ===== Mermaid 预览块 ===== */
+.markdown-content :deep(.mermaid-preview-block) {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: $radius-lg;
+  overflow: hidden;
+  margin: 12px 0;
+
+  .mermaid-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: #252535;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    user-select: none;
+  }
+
+  .mermaid-toggle {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: $radius-sm;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: transparent;
+    color: #a6adc8;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #cdd6f4;
+    }
+  }
+
+  .mermaid-lang-badge {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.3);
+    font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+    letter-spacing: 0.04em;
+  }
+
+  /* 源码 pre 默认隐藏（diagram 模式） */
+  .mermaid-source-pre {
+    display: none;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    border: none !important;
+  }
+
+  /* 图表容器：居中显示 SVG，自适应高度 */
+  .mermaid-diagram {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 80px;
+    padding: 20px;
+    background: #1a1b26;
+
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
+  }
+
+  .mermaid-error {
+    color: #f38ba8;
+    font-size: 12px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* 切换到源码模式 */
+  &:not(.show-diagram) {
+    .mermaid-source-pre { display: block; }
+    .mermaid-diagram { display: none; }
   }
 }
 

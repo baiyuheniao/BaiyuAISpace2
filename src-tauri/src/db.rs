@@ -283,12 +283,7 @@ impl Database {
         session_id: &str,
         message: &ChatMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        log::info!("[save_message] Saving message - session_id: {}, message_id: {}, role: {}, content_len: {}, db_path: {}", 
-            session_id, message.id, message.role, message.content.len(), self.path);
-        
-        self.conn.execute("BEGIN IMMEDIATE", [])?;
-        
-        let affected = self.conn.execute(
+        self.conn.execute(
             r#"
             INSERT INTO messages (id, session_id, role, content, timestamp, error)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -305,29 +300,13 @@ impl Database {
                 &message.error.as_deref().unwrap_or(""),
             ],
         )?;
-        log::info!("[save_message] INSERT affected rows: {}, session_id='{}' (len={})", affected, session_id, session_id.len());
 
         self.conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             [&chrono::Utc::now().timestamp_millis().to_string(), session_id],
         )?;
-        
-        self.conn.execute("COMMIT", [])?;
-        
-        let session_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE id = ?",
-            [session_id],
-            |row| row.get(0)
-        )?;
-        log::info!("[save_message] VERIFY: sessions table has {} row(s) for id={}", session_count, session_id);
-        
-        let verify: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
-            [session_id],
-            |row| row.get(0)
-        )?;
-        log::info!("[save_message] VERIFY: messages for session {} after commit: {}", session_id, verify);
 
+        log::info!("[save_message] saved message {} for session {}", message.id, session_id);
         Ok(())
     }
 
@@ -362,6 +341,7 @@ impl Database {
                 timestamp: row.get(3)?,
                 error: if error.as_deref() == Some("") { None } else { error },
                 images: vec![],
+                videos: vec![],
             })
         })?;
 

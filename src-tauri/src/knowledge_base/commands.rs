@@ -608,11 +608,73 @@ pub async fn search_knowledge_base(
     let api_key = get_embedding_api_key(&embedding_api_config_id)?;
 
     let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
-    retriever.retrieve(request, &embedding_provider, &embedding_model, &embedding_base_url, &api_key).await
+    let mut result = retriever.retrieve(request.clone(), &embedding_provider, &embedding_model, &embedding_base_url, &api_key).await?;
+
+    // Optional reranker pass
+    if let Some(ref config_id) = request.reranker_config_id {
+        if !result.chunks.is_empty() {
+            match get_reranker_api_key(config_id) {
+                Ok(reranker_key) => {
+                    let base_url = request.reranker_base_url.as_deref().unwrap_or("");
+                    let model = request.reranker_model.as_deref().unwrap_or("");
+                    let top_n = request.rerank_top_n.unwrap_or(request.top_k) as usize;
+                    match super::reranker::rerank_chunks(
+                        &request.query,
+                        result.chunks,
+                        top_n,
+                        &reranker_key,
+                        model,
+                        base_url,
+                    ).await {
+                        Ok(reranked) => {
+                            result.total_chunks = reranked.len() as i32;
+                            result.chunks = reranked;
+                        }
+                        Err(e) => {
+                            log::warn!("[KB] Reranker failed, returning unranked results: {}", e);
+                            result.chunks = vec![];
+                            result.total_chunks = 0;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[KB] Could not load reranker API key: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Retrieve reranker API key from system keyring
+fn get_reranker_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
+    let entry = Entry::new(
+        "BaiyuAISpace",
+        &format!("api_keys_reranker_{}", config_id),
+    ).map_err(|e| KnowledgeBaseError::InvalidConfig(format!("Failed to access keyring: {}", e)))?;
+
+    match entry.get_password() {
+        Ok(key) => Ok(key),
+        Err(keyring::Error::NoEntry) => Err(KnowledgeBaseError::InvalidConfig(
+            format!("Reranker API key not found for config: {}", config_id)
+        )),
+        Err(e) => Err(KnowledgeBaseError::InvalidConfig(
+            format!("Failed to retrieve reranker API key: {}", e)
+        )),
+    }
 }
 
 /// Get available embedding models
 #[tauri::command]
 pub fn get_embedding_models() -> Vec<(String, String, i32)> {
     super::embedding::get_available_embedding_models()
+}
+
+/// 解析文档并返回全文（用于聊天时直接注入上下文，无需知识库/向量化）
+#[tauri::command]
+pub async fn read_document_for_context(
+    file_path: String,
+) -> Result<String, KnowledgeBaseError> {
+    parse_document(&file_path).await
 }

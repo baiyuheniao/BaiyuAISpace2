@@ -119,6 +119,20 @@ export interface EmbeddingApiConfig {
   createdAt: number;
 }
 
+/**
+ * Reranker API 配置接口
+ * 用于配置 Cohere-compatible Reranker 模型 (RAG 精排用)
+ */
+export interface RerankerApiConfig {
+  id: string;
+  name: string;
+  provider: string;
+  baseUrl: string;  // e.g. https://api.cohere.com
+  model: string;    // e.g. rerank-multilingual-v3.0
+  apiKey: string;
+  createdAt: number;
+}
+
 // 存储版本号 - 当数据结构变更时需要递增
 const STORAGE_VERSION = "6";
 const STORAGE_VERSION_KEY = "baiyu-aispace-version";
@@ -177,9 +191,12 @@ export const useSettingsStore = defineStore(
 
     // Embedding API 配置列表 (与 LLM 配置分开)
     const embeddingApiConfigs = ref<EmbeddingApiConfig[]>([]);
-    
+
     // 当前激活的 Embedding 配置 ID
     const activeEmbeddingApiConfigId = ref<string | null>(null);
+
+    // Reranker API 配置列表
+    const rerankerApiConfigs = ref<RerankerApiConfig[]>([]);
 
     // ============ 计算属性 ============
 
@@ -198,6 +215,14 @@ export const useSettingsStore = defineStore(
     // 获取 Embedding 配置下拉选项
     const embeddingApiConfigOptions = computed(() => {
       return embeddingApiConfigs.value.map((config) => ({
+        label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider} - ${config.model})`,
+        value: config.id,
+      }));
+    });
+
+    // 获取 Reranker 配置下拉选项
+    const rerankerApiConfigOptions = computed(() => {
+      return rerankerApiConfigs.value.map((config) => ({
         label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider} - ${config.model})`,
         value: config.id,
       }));
@@ -356,6 +381,66 @@ export const useSettingsStore = defineStore(
       activeEmbeddingApiConfigId.value = configId;
     };
 
+    // 创建新的 Reranker API 配置
+    const createRerankerApiConfig = (
+      name: string,
+      provider: string,
+      model: string,
+      apiKey: string,
+      customBaseUrl?: string
+    ): RerankerApiConfig => {
+      const preset = PRESET_PROVIDERS[provider];
+      const config: RerankerApiConfig = {
+        id: crypto.randomUUID(),
+        name,
+        provider,
+        baseUrl: customBaseUrl || preset?.baseUrl || "",
+        model,
+        apiKey,
+        createdAt: Date.now(),
+      };
+      rerankerApiConfigs.value.push(config);
+      saveApiKeyToSecureStorage(`reranker_${config.id}`, apiKey);
+      return config;
+    };
+
+    // 更新 Reranker API 配置
+    const updateRerankerApiConfig = (configId: string, updates: Partial<RerankerApiConfig>) => {
+      const idx = rerankerApiConfigs.value.findIndex((c) => c.id === configId);
+      if (idx === -1) return;
+      const config = rerankerApiConfigs.value[idx];
+      if (updates.apiKey !== undefined && updates.apiKey !== config.apiKey) {
+        saveApiKeyToSecureStorage(`reranker_${configId}`, updates.apiKey);
+      }
+      rerankerApiConfigs.value[idx] = { ...config, ...updates };
+    };
+
+    // 删除 Reranker API 配置
+    const deleteRerankerApiConfig = (configId: string) => {
+      rerankerApiConfigs.value = rerankerApiConfigs.value.filter((c) => c.id !== configId);
+      deleteApiKeyFromSecureStorage(`reranker_${configId}`);
+    };
+
+    // 加载 Reranker API 密钥
+    const loadRerankerApiKeyForConfig = async (configId: string): Promise<string | null> => {
+      try {
+        const apiKey = await invoke<string | null>("get_api_key", { provider: `reranker_${configId}` });
+        if (apiKey) {
+          const idx = rerankerApiConfigs.value.findIndex((c) => c.id === configId);
+          if (idx !== -1) rerankerApiConfigs.value[idx].apiKey = apiKey;
+        }
+        return apiKey;
+      } catch {
+        return null;
+      }
+    };
+
+    const loadAllRerankerApiKeys = async () => {
+      for (const config of rerankerApiConfigs.value) {
+        await loadRerankerApiKeyForConfig(config.id);
+      }
+    };
+
     // 从安全存储加载指定配置的 Embedding API 密钥
     const loadEmbeddingApiKeyForConfig = async (configId: string): Promise<string | null> => {
       try {
@@ -453,12 +538,20 @@ export const useSettingsStore = defineStore(
       setActiveEmbeddingApiConfig,
       loadEmbeddingApiKeyForConfig,
       loadAllEmbeddingApiKeys,
+      // Reranker API configs
+      rerankerApiConfigs,
+      rerankerApiConfigOptions,
+      createRerankerApiConfig,
+      updateRerankerApiConfig,
+      deleteRerankerApiConfig,
+      loadRerankerApiKeyForConfig,
+      loadAllRerankerApiKeys,
     };
   },
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId"],
+      paths: ["darkMode", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
     },
   }
 );

@@ -159,6 +159,7 @@ fn main() {
             knowledge_base::commands::delete_document,
             knowledge_base::commands::search_knowledge_base,
             knowledge_base::commands::get_embedding_models,
+            knowledge_base::commands::read_document_for_context,
             // MCP 相关命令
             commands::mcp::create_mcp_server,
             commands::mcp::list_mcp_servers,

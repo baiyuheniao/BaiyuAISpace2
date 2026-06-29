@@ -73,7 +73,13 @@ pub async fn parse_document(file_path: &str) -> Result<String, KnowledgeBaseErro
         DocumentFormat::Word => parse_word(file_path).await?,
         DocumentFormat::Pptx => parse_pptx(file_path).await?,
         DocumentFormat::Excel => parse_excel(file_path).await?,
-        DocumentFormat::Markdown | DocumentFormat::Html | DocumentFormat::Txt => {
+        DocumentFormat::Html => {
+            let raw = tokio::fs::read_to_string(file_path)
+                .await
+                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+            strip_html_tags(&raw)
+        }
+        DocumentFormat::Markdown | DocumentFormat::Txt => {
             tokio::fs::read_to_string(file_path)
                 .await
                 .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
@@ -141,21 +147,35 @@ async fn parse_word(file_path: &str) -> Result<String, KnowledgeBaseError> {
     Ok(extract_text_from_docx_xml(&xml_content))
 }
 
-/// 从 DOCX XML 中提取纯文本（保留段落换行）
+/// 从 DOCX XML 中提取纯文本，保留段落换行及表格结构（单元格用 Tab 分隔，行用换行）。
 ///
-/// `</w:p>` 出现在 `</w:t>` 之后，直接替换为 `\n` 时 `\n` 落在文本提取范围外。
-/// 改用哨兵字符串标记段落边界，并在遍历 chunk 时检测哨兵来插入换行。
+/// 用哨兵字符串标记结构边界，避免直接替换 `</w:p>` 为 `\n` 时位置错乱的问题。
+/// 判断逻辑：行结束（TR）优先于单元格结束（TC）优先于段落结束（PP）。
 fn extract_text_from_docx_xml(xml: &str) -> String {
-    const PARA_END: &str = "\x02PARA\x02";
-    let xml = xml.replace("</w:p>", PARA_END);
+    const CELL_END: &str = "\x02TC\x02";
+    const ROW_END: &str  = "\x02TR\x02";
+    const PARA_END: &str = "\x02PP\x02";
+
+    let xml = xml
+        .replace("<w:br/>", "\n")
+        .replace("<w:br />", "\n")
+        .replace("</w:tc>", CELL_END)
+        .replace("</w:tr>", ROW_END)
+        .replace("</w:p>", PARA_END);
+
     let mut result = String::new();
     for chunk in xml.split("<w:t") {
         if let Some(end) = chunk.find("</w:t>") {
             if let Some(start) = chunk.find('>') {
                 result.push_str(&chunk[start + 1..end]);
             }
-            // 若该文本元素之后紧跟段落结束哨兵，插入换行
-            if chunk[end..].contains(PARA_END) {
+            let after = &chunk[end..];
+            // Row end takes priority; within a row, cell-end → tab; else paragraph → newline.
+            if after.contains(ROW_END) {
+                result.push('\n');
+            } else if after.contains(CELL_END) {
+                result.push('\t');
+            } else if after.contains(PARA_END) {
                 result.push('\n');
             }
         }
@@ -263,6 +283,64 @@ async fn parse_excel(file_path: &str) -> Result<String, KnowledgeBaseError> {
 
 // ============ 通用工具 ============
 
+/// Strip HTML tags and decode common entities, preserving block-element whitespace.
+///
+/// Handles script/style content removal, block-element newlines, and table cell tabs.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    let mut tag_buf = String::new();
+    let mut skip_content = false; // inside <script> or <style>
+
+    for c in html.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag_buf.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let tag = tag_buf.trim().to_lowercase();
+                let tag_name = tag.split_whitespace().next().unwrap_or("");
+                let is_closing = tag_name.starts_with('/');
+                let base = tag_name.trim_start_matches('/');
+
+                if is_closing && (base == "script" || base == "style") {
+                    skip_content = false;
+                } else if !is_closing && (base == "script" || base == "style") {
+                    skip_content = true;
+                } else if !skip_content {
+                    match base {
+                        "br" => result.push('\n'),
+                        "td" | "th" => result.push('\t'),
+                        "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                        | "li" | "tr" | "blockquote" | "pre" | "article"
+                        | "section" | "header" | "footer" | "nav" | "main" => {
+                            result.push('\n');
+                        }
+                        _ => {}
+                    }
+                }
+                tag_buf.clear();
+            }
+            c if in_tag => tag_buf.push(c),
+            c if !skip_content => result.push(c),
+            _ => {}
+        }
+    }
+
+    // Decode common HTML entities (single pass, ordered to avoid double-decode)
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#160;", " ")
+}
+
 /// Clean and normalize text
 fn clean_text(text: &str) -> String {
     text.lines()
@@ -285,10 +363,17 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
     Ok(format!("{:x}", hash))
 }
 
-/// 分隔符按"粗粒度 → 细粒度"优先级排列；中英文句末标点都包含在内，
-/// 修复了原先只按英文句号 `.` 切句子、导致中文文本完全切不到句子级别、
-/// 只能直接硬切的问题。
+/// 分隔符按"粗粒度 → 细粒度"优先级排列。
+///
+/// Markdown 标题行（`\n# ` 等）排在最前，使同一标题下的内容优先聚在同一个块里。
+/// 标题分隔符保留在左侧块末尾（含 `\n# ` 字符），对语义影响极小。
+/// 之后依次是段落、句子、逗号、空格，最后由 `hard_split_by_chars` 兜底。
 const SPLIT_SEPARATORS: &[&str] = &[
+    "\n# ",
+    "\n## ",
+    "\n### ",
+    "\n#### ",
+    "\n##### ",
     "\n\n",
     "\n",
     "。", "！", "？", "；",
