@@ -736,13 +736,17 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
                         // OpenAI streams tool calls incrementally: the first delta for a
                         // given `index` carries `id` + `function.name`, and every
                         // subsequent delta for that same `index` carries only a fragment
-                        // of `function.arguments` (id/name absent). Each delta here is a
+                        // of `function.arguments` (id/name absent -- though some
+                        // OpenAI-compatible providers, e.g. SiliconFlow, send `""`
+                        // rather than omitting/nulling the field, so empty strings must
+                        // be normalized to "absent" here or they clobber the real value
+                        // accumulated from the first delta). Each delta here is a
                         // partial update, not a complete tool call -- the caller must
                         // accumulate fragments by `index` across the whole stream.
                         let deltas: Vec<_> = tool_calls.iter().filter_map(|call| {
                             let index = call["index"].as_u64()? as u32;
-                            let id = call["id"].as_str().map(|s| s.to_string());
-                            let name = call["function"]["name"].as_str().map(|s| s.to_string());
+                            let id = call["id"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
+                            let name = call["function"]["name"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
                             let arguments_fragment = call["function"]["arguments"].as_str().map(|s| s.to_string());
                             Some(ToolCallDelta { index, id, name, arguments_fragment })
                         }).collect();
@@ -1070,6 +1074,54 @@ pub async fn stream_message(
     }
 }
 
+/// Execute one round of tool calls (autonomous Skill invocations or real MCP
+/// tools) and return their results in the same order as `tool_calls`.
+async fn execute_tool_calls(
+    app_handle: &AppHandle,
+    state: tauri::State<'_, DbState>,
+    tool_calls: &[ToolCall],
+    mcp_tools: &[MCPTool],
+    all_skills: &[Skill],
+) -> Vec<serde_json::Value> {
+    let mut tool_results = Vec::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
+            // Autonomously-invoked Skill: the "tool result" is the
+            // skill's own instructions/resources, not an MCP call.
+            if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
+                log::info!("Model invoked skill: {}", skill.name);
+                let content = build_skill_context(std::slice::from_ref(skill), app_handle).await;
+                tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
+            } else {
+                log::warn!("Skill not found for autonomous call: {}", skill_id);
+                tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
+            }
+        } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
+            log::info!("Executing MCP tool: {}", tool.name);
+            let result = match call_mcp_tool(
+                state.clone(),
+                Some(tool.server_id.clone()),
+                tool.name.clone(),
+                serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
+            ).await {
+                Ok(result) => {
+                    log::info!("Tool execution result: {:?}", result);
+                    result
+                }
+                Err(e) => {
+                    log::error!("Tool execution failed: {}", e);
+                    serde_json::json!({ "error": e.to_string() })
+                }
+            };
+            tool_results.push(result);
+        } else {
+            log::warn!("MCP tool not found: {}", tool_call.function.name);
+            tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
+        }
+    }
+    tool_results
+}
+
 /// Finalize whatever tool-call fragments have accumulated by the end of a
 /// turn (id/name from the first fragment per index, arguments concatenated
 /// across every fragment for that index), execute them if any, ask the model
@@ -1103,69 +1155,54 @@ async fn finalize_turn(
         .collect();
 
     if !tool_calls.is_empty() {
-        let mut tool_results = Vec::with_capacity(tool_calls.len());
-        for tool_call in &tool_calls {
-            if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
-                // Autonomously-invoked Skill: the "tool result" is the
-                // skill's own instructions/resources, not an MCP call.
-                if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
-                    log::info!("Model invoked skill: {}", skill.name);
-                    let content = build_skill_context(std::slice::from_ref(skill), app_handle).await;
-                    tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
-                } else {
-                    log::warn!("Skill not found for autonomous call: {}", skill_id);
-                    tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
-                }
-            } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
-                log::info!("Executing MCP tool: {}", tool.name);
-                let result = match call_mcp_tool(
-                    state.clone(),
-                    Some(tool.server_id.clone()),
-                    tool.name.clone(),
-                    serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
-                ).await {
-                    Ok(result) => {
-                        log::info!("Tool execution result: {:?}", result);
-                        result
-                    }
-                    Err(e) => {
-                        log::error!("Tool execution failed: {}", e);
-                        serde_json::json!({ "error": e.to_string() })
-                    }
-                };
-                tool_results.push(result);
-            } else {
-                log::warn!("MCP tool not found: {}", tool_call.function.name);
-                tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
-            }
-        }
+        // A model can legitimately need more than one round of tool calls in
+        // a single turn (e.g. "list allowed directories" then "list files in
+        // that directory"). Loop, feeding the model's own tools back in on
+        // every follow-up request, until it returns plain text or we hit the
+        // round cap -- without the cap a misbehaving model could loop forever.
+        const MAX_TOOL_ROUNDS: usize = 5;
+        let mut rounds: Vec<(Vec<ToolCall>, Vec<serde_json::Value>)> = Vec::new();
+        let mut current_calls = tool_calls;
 
-        // Continue the conversation with a single follow-up request carrying
-        // the provider-appropriate "here's what I called and what it
-        // returned" shape, instead of one request per call.
-        match continue_after_tool_calls(
-            &request.provider,
-            &request.model,
-            &request.api_key,
-            &request.base_url,
-            effective_messages,
-            &tool_calls,
-            &tool_results,
-            max_tokens,
-        )
-        .await
-        {
-            Ok(live_reply) => {
-                let _ = app_handle.emit("stream-chunk", StreamChunk {
-                    session_id: request.session_id.clone(),
-                    message_id: message_id.to_string(),
-                    content: live_reply,
-                    done: false,
-                });
+        for round in 0..MAX_TOOL_ROUNDS {
+            let tool_results = execute_tool_calls(app_handle, state.clone(), &current_calls, mcp_tools, all_skills).await;
+            rounds.push((current_calls, tool_results));
+
+            match continue_after_tool_calls(
+                &request.provider,
+                &request.model,
+                &request.api_key,
+                &request.base_url,
+                effective_messages,
+                &rounds,
+                mcp_tools,
+                all_skills,
+                max_tokens,
+            )
+            .await
+            {
+                Ok(ContinuationResult::Text(live_reply)) => {
+                    let _ = app_handle.emit("stream-chunk", StreamChunk {
+                        session_id: request.session_id.clone(),
+                        message_id: message_id.to_string(),
+                        content: live_reply,
+                        done: false,
+                    });
+                    break;
+                }
+                Ok(ContinuationResult::ToolCalls(next_calls)) => {
+                    if round == MAX_TOOL_ROUNDS - 1 {
+                        log::warn!("Tool-call round limit ({}) reached, stopping", MAX_TOOL_ROUNDS);
+                    } else {
+                        current_calls = next_calls;
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    log::error!("Failed to continue reasoning after tool calls: {}", err);
+                }
             }
-            Err(err) => {
-                log::error!("Failed to continue reasoning after tool calls: {}", err);
-            }
+            break;
         }
     }
 
@@ -1179,26 +1216,39 @@ async fn finalize_turn(
     Ok(())
 }
 
+/// What a tool-call continuation request got back: either the model is done
+/// and has a plain-text reply, or it wants to call further tools (e.g. "list
+/// allowed directories" followed by "list files in that directory" -- two
+/// calls in one turn). `finalize_turn` loops on the latter.
+enum ContinuationResult {
+    Text(String),
+    ToolCalls(Vec<ToolCall>),
+}
+
 /// Continue a conversation after one or more tool calls have been executed,
 /// sending a single non-streaming follow-up request that tells the model
-/// what was called and what it returned, then returns its plain-text reply.
-/// Each provider has its own shape for "here's what I called" /
-/// "here's the result", so the request body and the response parsing both
-/// branch by provider.
+/// what was called and what it returned. The model's own tools are attached
+/// again here (a fresh API call has no memory of the original request's
+/// `tools` field), since without them a model that wants another tool call
+/// has no native way to make one and will instead try to fake one as plain
+/// text. Each provider has its own shape for "here's what I called" /
+/// "here's the result" and for the tool-call response itself, so both the
+/// request body and the response parsing branch by provider.
 async fn continue_after_tool_calls(
     provider: &str,
     model: &str,
     api_key: &str,
     base_url: &str,
     original_messages: &[ChatMessage],
-    tool_calls: &[ToolCall],
-    tool_results: &[serde_json::Value],
+    rounds: &[(Vec<ToolCall>, Vec<serde_json::Value>)],
+    mcp_tools: &[MCPTool],
+    autonomous_skills: &[Skill],
     max_tokens: Option<u32>,
-) -> Result<String, LLMError> {
+) -> Result<ContinuationResult, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client()?;
 
-    let body = match provider {
+    let mut body = match provider {
         "anthropic" => {
             let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
             let mut msgs: Vec<serde_json::Value> = original_messages
@@ -1213,35 +1263,37 @@ async fn continue_after_tool_calls(
                 .collect();
 
             // Anthropic requires the tool_use/tool_result blocks to be batched
-            // into exactly one assistant message and one user message (it
-            // enforces strict user/assistant alternation), unlike OpenAI's
-            // one-tool-message-per-result shape below.
-            let tool_use_blocks: Vec<_> = tool_calls
-                .iter()
-                .map(|tc| {
-                    serde_json::json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                            .unwrap_or_else(|_| serde_json::json!({})),
+            // into exactly one assistant message and one user message per
+            // round (it enforces strict user/assistant alternation), unlike
+            // OpenAI's one-tool-message-per-result shape below.
+            for (tool_calls, tool_results) in rounds {
+                let tool_use_blocks: Vec<_> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        })
                     })
-                })
-                .collect();
-            msgs.push(serde_json::json!({ "role": "assistant", "content": tool_use_blocks }));
+                    .collect();
+                msgs.push(serde_json::json!({ "role": "assistant", "content": tool_use_blocks }));
 
-            let tool_result_blocks: Vec<_> = tool_calls
-                .iter()
-                .zip(tool_results.iter())
-                .map(|(tc, result)| {
-                    serde_json::json!({
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                let tool_result_blocks: Vec<_> = tool_calls
+                    .iter()
+                    .zip(tool_results.iter())
+                    .map(|(tc, result)| {
+                        serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                        })
                     })
-                })
-                .collect();
-            msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
+                    .collect();
+                msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
+            }
 
             let max_tokens_val = max_tokens.unwrap_or(4096);
             let mut b = serde_json::json!({
@@ -1252,6 +1304,16 @@ async fn continue_after_tool_calls(
             });
             if let Some(sys) = system_msg {
                 b["system"] = serde_json::json!(sys);
+            }
+            if !mcp_tools.is_empty() {
+                let tools_json: Vec<_> = mcp_tools.iter().map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema,
+                    })
+                }).collect();
+                b["tools"] = serde_json::json!(tools_json);
             }
             b
         }
@@ -1268,35 +1330,37 @@ async fn continue_after_tool_calls(
                 })
                 .collect();
 
-            let call_parts: Vec<_> = tool_calls
-                .iter()
-                .map(|tc| {
-                    serde_json::json!({
-                        "functionCall": {
-                            "name": tc.function.name,
-                            "args": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                .unwrap_or_else(|_| serde_json::json!({})),
-                        }
+            for (tool_calls, tool_results) in rounds {
+                let call_parts: Vec<_> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "functionCall": {
+                                "name": tc.function.name,
+                                "args": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                            }
+                        })
                     })
-                })
-                .collect();
-            contents.push(serde_json::json!({ "role": "model", "parts": call_parts }));
+                    .collect();
+                contents.push(serde_json::json!({ "role": "model", "parts": call_parts }));
 
-            let response_parts: Vec<_> = tool_calls
-                .iter()
-                .zip(tool_results.iter())
-                .map(|(tc, result)| {
-                    serde_json::json!({
-                        "functionResponse": {
-                            "name": tc.function.name,
-                            "response": result,
-                        }
+                let response_parts: Vec<_> = tool_calls
+                    .iter()
+                    .zip(tool_results.iter())
+                    .map(|(tc, result)| {
+                        serde_json::json!({
+                            "functionResponse": {
+                                "name": tc.function.name,
+                                "response": result,
+                            }
+                        })
                     })
-                })
-                .collect();
-            // Gemini REST API requires "user" role for functionResponse parts,
-            // not "function" — the model role is "model", user inputs are "user".
-            contents.push(serde_json::json!({ "role": "user", "parts": response_parts }));
+                    .collect();
+                // Gemini REST API requires "user" role for functionResponse parts,
+                // not "function" — the model role is "model", user inputs are "user".
+                contents.push(serde_json::json!({ "role": "user", "parts": response_parts }));
+            }
 
             let mut b = serde_json::json!({
                 "contents": contents,
@@ -1304,6 +1368,16 @@ async fn continue_after_tool_calls(
             });
             if let Some(sys) = system_msg {
                 b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
+            }
+            if !mcp_tools.is_empty() {
+                let declarations: Vec<_> = mcp_tools.iter().map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    })
+                }).collect();
+                b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
             }
             b
         }
@@ -1313,41 +1387,58 @@ async fn continue_after_tool_calls(
                 .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
                 .collect();
 
-            let tool_calls_json: Vec<_> = tool_calls
-                .iter()
-                .map(|tc| {
-                    serde_json::json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        }
+            for (tool_calls, tool_results) in rounds {
+                let tool_calls_json: Vec<_> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            msgs.push(serde_json::json!({
-                "role": "assistant",
-                "content": serde_json::Value::Null,
-                "tool_calls": tool_calls_json,
-            }));
-
-            for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
                 msgs.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                    "role": "assistant",
+                    "content": serde_json::Value::Null,
+                    "tool_calls": tool_calls_json,
                 }));
+
+                for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
+                    msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": serde_json::to_string(result).unwrap_or_else(|_| "null".to_string()),
+                    }));
+                }
             }
 
-            serde_json::json!({
+            let mut b = serde_json::json!({
                 "model": model,
                 "messages": msgs,
                 "stream": false,
-            })
+            });
+            if !mcp_tools.is_empty() {
+                let tools_json: Vec<_> = mcp_tools.iter().map(|tool| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema
+                        }
+                    })
+                }).collect();
+                b["tools"] = serde_json::json!(tools_json);
+            }
+            b
         }
     };
+    append_skill_tools(&mut body, provider, autonomous_skills);
 
     let headers = build_headers(provider, api_key);
 
@@ -1393,34 +1484,85 @@ async fn continue_after_tool_calls(
         .map_err(LLMError::RequestError)?;
 
     match provider {
-        "anthropic" => json
-            .get("content")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")))
-            .and_then(|b| b.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string())),
-        "google" => json
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|cand| cand.get("content"))
-            .and_then(|content| content.get("parts"))
-            .and_then(|parts| parts.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|part| part.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string())),
+        "anthropic" => {
+            let blocks = json.get("content").and_then(|c| c.as_array());
+            let tool_use_calls: Vec<ToolCall> = blocks
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                        .filter_map(|b| {
+                            let id = b.get("id")?.as_str()?.to_string();
+                            let name = b.get("name")?.as_str()?.to_string();
+                            let arguments = b.get("input").map(|i| i.to_string()).unwrap_or_else(|| "{}".to_string());
+                            Some(ToolCall { id, function: ToolFunction { name, arguments } })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !tool_use_calls.is_empty() {
+                return Ok(ContinuationResult::ToolCalls(tool_use_calls));
+            }
+            blocks
+                .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")))
+                .and_then(|b| b.get("text"))
+                .and_then(|t| t.as_str())
+                .map(|s| ContinuationResult::Text(s.to_string()))
+                .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
+        }
+        "google" => {
+            let parts = json
+                .get("candidates")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|cand| cand.get("content"))
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array());
+            let call_parts: Vec<ToolCall> = parts
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|part| {
+                            let call = part.get("functionCall")?;
+                            let name = call.get("name")?.as_str()?.to_string();
+                            let arguments = call.get("args").map(|a| a.to_string()).unwrap_or_else(|| "{}".to_string());
+                            // Gemini doesn't hand back an id for functionCall parts;
+                            // synthesize one so downstream tool-result matching works.
+                            Some(ToolCall { id: format!("gemini-{}", name), function: ToolFunction { name, arguments } })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !call_parts.is_empty() {
+                return Ok(ContinuationResult::ToolCalls(call_parts));
+            }
+            parts
+                .and_then(|arr| arr.first())
+                .and_then(|part| part.get("text"))
+                .and_then(|t| t.as_str())
+                .map(|s| ContinuationResult::Text(s.to_string()))
+                .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
+        }
         _ => {
             if let Some(choices) = json["choices"].as_array() {
                 if let Some(first_choice) = choices.first() {
+                    if let Some(tool_calls) = first_choice["message"]["tool_calls"].as_array() {
+                        let calls: Vec<ToolCall> = tool_calls
+                            .iter()
+                            .filter_map(|tc| {
+                                let id = tc.get("id")?.as_str()?.to_string();
+                                let name = tc.get("function")?.get("name")?.as_str()?.to_string();
+                                let arguments = tc.get("function")?.get("arguments")?.as_str()?.to_string();
+                                Some(ToolCall { id, function: ToolFunction { name, arguments } })
+                            })
+                            .collect();
+                        if !calls.is_empty() {
+                            return Ok(ContinuationResult::ToolCalls(calls));
+                        }
+                    }
                     if let Some(text) = first_choice["message"]["content"].as_str() {
-                        return Ok(text.to_string());
+                        return Ok(ContinuationResult::Text(text.to_string()));
                     }
                     if let Some(text) = first_choice["text"].as_str() {
-                        return Ok(text.to_string());
+                        return Ok(ContinuationResult::Text(text.to_string()));
                     }
                 }
             }
