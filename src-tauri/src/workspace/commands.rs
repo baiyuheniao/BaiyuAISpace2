@@ -199,6 +199,26 @@ pub async fn workspace_send_user_message(
         return Err(WorkspaceError::InvalidConfig("消息内容不能为空".to_string()));
     }
     send_workspace_message(&app_handle, &workspace_id, "user", &to_agent_id, &content).await;
+
+    // Agent background loops are in-memory only (see `start_agent_loop`) and
+    // don't get restarted when the app relaunches. If the target's handle is
+    // missing, the notify inside `send_workspace_message` was a silent
+    // no-op: the message above still got saved and shown, but nobody will
+    // ever pick it up. Tell the frontend so it can warn the user instead of
+    // leaving them waiting on a reply that will never come.
+    let has_live_handle = {
+        let workspace_state = app_handle.state::<WorkspaceState>();
+        let handles = workspace_state.0.lock().unwrap();
+        handles.contains_key(&to_agent_id)
+    };
+    if !has_live_handle {
+        if let Ok(Some(agent)) = load_agent(&app_handle, &to_agent_id).await {
+            let _ = app_handle.emit(
+                "workspace://agent-inactive",
+                serde_json::json!({ "agentId": agent.id, "agentName": agent.name }),
+            );
+        }
+    }
     Ok(())
 }
 

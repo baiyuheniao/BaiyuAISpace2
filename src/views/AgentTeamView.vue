@@ -236,6 +236,25 @@ const openSchedulerPage = () => {
   router.push({ name: "Scheduler", query: wid ? { workspace: wid } : {} });
 };
 
+// ============ 提醒：目标 Agent 没有存活的后台任务 ============
+
+// Agent 的后台循环只存在于内存里，应用重启后不会自动恢复；发消息给这样的
+// Agent 不会报错，只是永远没有回复。收到提醒就弹一条警告，然后清空队列。
+watch(
+  () => workspace.inactiveAgentNotices.length,
+  () => {
+    while (workspace.inactiveAgentNotices.length > 0) {
+      const notice = workspace.inactiveAgentNotices.shift();
+      if (notice) {
+        message.warning(
+          `「${notice.agentName}」当前不在运行状态，消息已发送但暂时不会有回复。请重新添加该 Agent 以恢复其工作能力。`,
+          { duration: 8000 }
+        );
+      }
+    }
+  }
+);
+
 // ============ 待处理事项：主 Agent 创建子 Agent 提议 ============
 
 const proposalEdits = reactive<Record<string, CreateAgentRequest>>({});

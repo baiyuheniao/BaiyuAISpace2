@@ -58,8 +58,8 @@ onMounted(async () => {
     class="full-height"
   >
     <n-dialog-provider>
-      <n-message-provider>
-        <n-notification-provider>
+      <n-message-provider placement="bottom-left">
+        <n-notification-provider placement="bottom-left">
           <Layout />
         </n-notification-provider>
       </n-message-provider>

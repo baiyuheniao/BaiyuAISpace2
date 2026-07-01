@@ -108,6 +108,12 @@ interface AgentStatusEvent {
   status: AgentStatus;
 }
 
+/** 目标 Agent 没有存活的后台任务（多半是重启过应用），消息发了但不会有人处理。 */
+export interface AgentInactiveEvent {
+  agentId: string;
+  agentName: string;
+}
+
 export const useWorkspaceStore = defineStore("workspace", () => {
   const workspaces = ref<Workspace[]>([]);
   const currentWorkspaceId = ref<string | null>(null);
@@ -121,6 +127,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const proposals = ref<AgentProposalEvent[]>([]);
   const sleepRequests = ref<SleepRequestEvent[]>([]);
   const questions = ref<QuestionEvent[]>([]);
+  // 一次性提醒事件的队列，视图层 watch 它、用 message.warning() 弹出后自行清空 --
+  // 这里不直接调用 useMessage()，因为 store 不在组件树里，拿不到 NMessageProvider 的上下文。
+  const inactiveAgentNotices = ref<AgentInactiveEvent[]>([]);
 
   const currentWorkspace = computed(() => workspaces.value.find((w) => w.id === currentWorkspaceId.value) ?? null);
 
@@ -162,6 +171,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       listen<QuestionEvent>("workspace://question", (e) => {
         console.log(`[Workspace] Agent 提问: questionId=${e.payload.questionId} agent=${e.payload.agentName} | ${e.payload.question.slice(0, 60)}`);
         questions.value.push(e.payload);
+      }),
+      listen<AgentInactiveEvent>("workspace://agent-inactive", (e) => {
+        console.log(`[Workspace] Agent 未在运行: agentId=${e.payload.agentId} name=${e.payload.agentName}`);
+        inactiveAgentNotices.value.push(e.payload);
       }),
     ]);
   };
@@ -268,6 +281,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     proposals,
     sleepRequests,
     questions,
+    inactiveAgentNotices,
     initListeners,
     disposeListeners,
     listWorkspaces,
