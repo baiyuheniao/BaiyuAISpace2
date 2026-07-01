@@ -708,7 +708,8 @@ export const useChatStore = defineStore("chat", () => {
         activeSkillIds: activeSkillIds.value,
         enableSkillAutonomy: skillAutonomyEnabled.value,
         enableThinking: thinkingEnabled.value,
-      } as const;
+        maxTokens: config.maxTokens ?? null,
+      };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
       const maskedApiKey = requestPayload.apiKey

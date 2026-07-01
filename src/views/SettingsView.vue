@@ -29,9 +29,10 @@ import {
   NCard, 
   NForm, 
   NFormItem, 
-  NSelect, 
-  NInput, 
-  NSwitch, 
+  NSelect,
+  NInput,
+  NInputNumber,
+  NSwitch,
   NButton,
   NSpace,
   NList,
@@ -135,6 +136,7 @@ const formData = ref({
   baseUrl: PRESET_PROVIDERS.openai.baseUrl,  // 默认 Base URL
   model: "",                 // 模型名称
   apiKey: "",                // API 密钥
+  maxTokens: null as number | null,  // 最大输出 token 数（null = 后端默认值）
 });
 
 /**
@@ -171,6 +173,7 @@ const resetForm = () => {
     baseUrl: PRESET_PROVIDERS.openai.baseUrl,
     model: "",
     apiKey: "",
+    maxTokens: null,
   };
 };
 
@@ -217,6 +220,7 @@ const openEditModal = (config: ApiConfig) => {
     baseUrl: config.baseUrl,
     model: config.model,
     apiKey: config.apiKey,
+    maxTokens: config.maxTokens ?? null,
   };
   showEditModal.value = true;
 };
@@ -297,7 +301,8 @@ const handleCreate = async () => {
     formData.value.provider,
     formData.value.model,
     formData.value.apiKey,
-    formData.value.baseUrl
+    formData.value.baseUrl,
+    formData.value.maxTokens ?? undefined
   );
 
   // 提示成功并关闭弹窗
@@ -330,6 +335,7 @@ const handleUpdate = async () => {
     baseUrl: formData.value.baseUrl,
     model: formData.value.model,
     apiKey: formData.value.apiKey,
+    maxTokens: formData.value.maxTokens ?? undefined,
   });
 
   // 提示成功并关闭弹窗
@@ -1056,12 +1062,27 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           label="API Key"
           required
         >
-          <n-input 
-            v-model:value="formData.apiKey" 
+          <n-input
+            v-model:value="formData.apiKey"
             type="password"
             show-password-on="click"
             placeholder="输入 API Key"
           />
+        </n-form-item>
+
+        <n-form-item label="Max Tokens">
+          <n-input-number
+            v-model:value="formData.maxTokens"
+            :min="1"
+            :max="1000000"
+            placeholder="默认 4096（思考模式默认 16000）"
+            style="width: 100%"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">
+              留空使用默认值。Anthropic 必填此项，大多数模型不需要改动。
+            </n-text>
+          </template>
         </n-form-item>
       </n-form>
 
@@ -1168,6 +1189,21 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               style="font-size: 12px;"
             >
               留空表示保持原 API Key 不变
+            </n-text>
+          </template>
+        </n-form-item>
+
+        <n-form-item label="Max Tokens">
+          <n-input-number
+            v-model:value="formData.maxTokens"
+            :min="1"
+            :max="1000000"
+            placeholder="默认 4096（思考模式默认 16000）"
+            style="width: 100%"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">
+              留空使用默认值。Anthropic 必填此项，大多数模型不需要改动。
             </n-text>
           </template>
         </n-form-item>

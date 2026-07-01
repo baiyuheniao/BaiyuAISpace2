@@ -118,6 +118,9 @@ pub struct SendMessageRequest {
     /// 是否启用思考模式 (Extended Thinking)
     #[serde(default)]
     pub enable_thinking: bool,
+    /// 最大输出 token 数（None 时使用默认值: 普通模式 4096, 思考模式 16000）
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 /// 流式响应事件结构
@@ -238,7 +241,7 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
     }
 }
 
-fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool], enable_thinking: bool) -> serde_json::Value {
+fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool], enable_thinking: bool, max_tokens: Option<u32>) -> serde_json::Value {
     match provider {
         "anthropic" => {
             let system_msg = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
@@ -264,17 +267,36 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 })
                 .collect();
 
-            // Thinking requires higher token budget
-            let max_tokens = if enable_thinking { 16000 } else { 4096 };
+            // Thinking requires a higher token ceiling; user value overrides the default
+            // but when using the legacy budget_tokens format the ceiling must exceed the
+            // budget (8000), so we never go below 9000 in that case.
+            let is_legacy_thinking = enable_thinking
+                && (model.contains("claude-3") || model.contains("4-5") || model.contains("4.5"));
+            let default_max = if enable_thinking { 16000 } else { 4096 };
+            let max_tokens_val = match max_tokens {
+                Some(v) if is_legacy_thinking => v.max(9000),
+                Some(v) => v,
+                None => default_max,
+            };
             let mut body = serde_json::json!({
                 "model": model,
                 "messages": msgs,
-                "max_tokens": max_tokens,
+                "max_tokens": max_tokens_val,
                 "stream": true,
             });
 
             if enable_thinking {
-                body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 8000});
+                // Claude 4.6+ (Opus 4.6, Sonnet 4.6, Opus 4.7, Opus 4.8, Fable 5…) use the
+                // new adaptive thinking API; budget_tokens is rejected with a 400 on 4.7+.
+                // Older Claude 3.x / 4.5 models still require the legacy enabled+budget_tokens form.
+                let is_legacy_thinking = model.contains("claude-3")
+                    || model.contains("4-5")
+                    || model.contains("4.5");
+                if is_legacy_thinking {
+                    body["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 8000});
+                } else {
+                    body["thinking"] = serde_json::json!({"type": "adaptive"});
+                }
             }
 
             if let Some(sys) = system_msg {
@@ -903,7 +925,7 @@ pub async fn stream_message(
     }
 
     let client = create_http_client()?;
-    let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking);
+    let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking, request.max_tokens);
     append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);
 
@@ -1013,6 +1035,7 @@ pub async fn stream_message(
                                             &mcp_tools,
                                             &all_skills,
                                             std::mem::take(&mut tool_call_acc),
+                                            request.max_tokens,
                                         )
                                         .await;
                                     }
@@ -1037,6 +1060,7 @@ pub async fn stream_message(
                             &mcp_tools,
                             &all_skills,
                             std::mem::take(&mut tool_call_acc),
+                            request.max_tokens,
                         )
                         .await;
                     }
@@ -1063,6 +1087,7 @@ async fn finalize_turn(
     mcp_tools: &[MCPTool],
     all_skills: &[Skill],
     tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall>,
+    max_tokens: Option<u32>,
 ) -> Result<(), LLMError> {
     let tool_calls: Vec<ToolCall> = tool_call_acc
         .into_values()
@@ -1126,6 +1151,7 @@ async fn finalize_turn(
             effective_messages,
             &tool_calls,
             &tool_results,
+            max_tokens,
         )
         .await
         {
@@ -1167,6 +1193,7 @@ async fn continue_after_tool_calls(
     original_messages: &[ChatMessage],
     tool_calls: &[ToolCall],
     tool_results: &[serde_json::Value],
+    max_tokens: Option<u32>,
 ) -> Result<String, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client()?;
@@ -1216,10 +1243,11 @@ async fn continue_after_tool_calls(
                 .collect();
             msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
 
+            let max_tokens_val = max_tokens.unwrap_or(4096);
             let mut b = serde_json::json!({
                 "model": model,
                 "messages": msgs,
-                "max_tokens": 4096,
+                "max_tokens": max_tokens_val,
                 "stream": false,
             });
             if let Some(sys) = system_msg {
@@ -1266,7 +1294,9 @@ async fn continue_after_tool_calls(
                     })
                 })
                 .collect();
-            contents.push(serde_json::json!({ "role": "function", "parts": response_parts }));
+            // Gemini REST API requires "user" role for functionResponse parts,
+            // not "function" — the model role is "model", user inputs are "user".
+            contents.push(serde_json::json!({ "role": "user", "parts": response_parts }));
 
             let mut b = serde_json::json!({
                 "contents": contents,
@@ -1502,7 +1532,8 @@ pub fn append_tool_round(
                 .zip(results.iter())
                 .map(|(c, r)| serde_json::json!({ "functionResponse": { "name": c.name, "response": r } }))
                 .collect();
-            native_messages.push(serde_json::json!({ "role": "function", "parts": response_parts }));
+            // Gemini REST API requires "user" role for functionResponse parts.
+            native_messages.push(serde_json::json!({ "role": "user", "parts": response_parts }));
         }
         _ => {
             let tool_calls_json: Vec<_> = calls

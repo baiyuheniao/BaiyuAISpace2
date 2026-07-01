@@ -101,6 +101,7 @@ export interface ApiConfig {
   baseUrl: string;                 // API 基础 URL
   model: string;                   // 模型名称 (如 gpt-4, claude-3-opus)
   apiKey: string;                  // API 密钥 (会存储到系统安全存储)
+  maxTokens?: number;              // 最大输出 token 数（不填则后端默认 4096）
   createdAt: number;               // 创建时间戳
 }
 
@@ -259,7 +260,8 @@ export const useSettingsStore = defineStore(
       provider: string,
       model: string,
       apiKey: string,
-      customBaseUrl?: string
+      customBaseUrl?: string,
+      maxTokens?: number
     ): ApiConfig => {
       const preset = PRESET_PROVIDERS[provider];
       const config: ApiConfig = {
@@ -269,6 +271,7 @@ export const useSettingsStore = defineStore(
         baseUrl: customBaseUrl || preset?.baseUrl || "",
         model,
         apiKey,
+        maxTokens,
         createdAt: Date.now(),
       };
       apiConfigs.value.push(config);
