@@ -136,7 +136,13 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       }),
       listen<WorkspaceLogEntry>("workspace://log", (e) => {
         console.debug(`[Workspace] 日志 [${e.payload.kind}]: ${e.payload.content.slice(0, 80)}`);
-        if (e.payload.workspaceId === currentWorkspaceId.value) logs.value.push(e.payload);
+        if (e.payload.workspaceId !== currentWorkspaceId.value) return;
+        logs.value.push(e.payload);
+        // 主 Agent 的提议被批准后，子 Agent 是在其后台任务里异步创建的：
+        // 这条日志是创建完成的唯一前端信号，createAgent() 那种"invoke 返回值
+        // 直接 push 进 agents"的手动创建路径在这里走不通，得靠它触发一次
+        // 重新拉取，否则新 Agent 只会进日志时间线，不会出现在 Agent 列表里。
+        if (e.payload.kind === "agent_created") loadAgents();
       }),
       listen<AgentStatusEvent>("workspace://agent-status", (e) => {
         const agent = agents.value.find((a) => a.id === e.payload.agentId);
