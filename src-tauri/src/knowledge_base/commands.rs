@@ -198,6 +198,44 @@ pub async fn delete_knowledge_base(
     Ok(())
 }
 
+/// Mark a document as failed and clean up any chunks/FTS5 rows already
+/// written for it in Phase 1, so it never gets stuck showing "processing"
+/// forever with orphaned rows left behind (see #import_document Phase 2 failures).
+async fn mark_document_failed(
+    db_state: &State<'_, crate::db::DbState>,
+    doc_id: &str,
+    error_msg: &str,
+) -> Result<(), KnowledgeBaseError> {
+    log::error!("[KB] {}", error_msg);
+
+    let db = db_state.0.lock().await;
+    let conn = rusqlite::Connection::open(&db.path)
+        .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+    conn.execute(
+        "UPDATE documents SET status = 'error', error_message = ?1 WHERE id = ?2",
+        rusqlite::params![error_msg, doc_id],
+    ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+
+    // Clean up FTS5 entries BEFORE deleting chunks (need rowid from chunks)
+    if let Err(cleanup_err) = conn.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
+        rusqlite::params![doc_id],
+    ) {
+        log::warn!("[KB] Failed to clean up FTS5 entries: {}", cleanup_err);
+    }
+
+    // Clean up orphan chunks (after FTS5 cleanup)
+    if let Err(cleanup_err) = conn.execute(
+        "DELETE FROM chunks WHERE document_id = ?1",
+        rusqlite::params![doc_id],
+    ) {
+        log::warn!("[KB] Failed to clean up orphan chunks: {}", cleanup_err);
+    }
+
+    Ok(())
+}
+
 /// Import document to knowledge base
 ///
 /// # Fix for #33 and #34:
@@ -334,7 +372,14 @@ pub async fn import_document(
 
     // ===== Phase 2: Network operation (no DB lock held) =====
     // Retrieve API key from secure storage instead of receiving from frontend (#32)
-    let api_key = get_embedding_api_key(&kb.embedding_api_config_id)?;
+    let api_key = match get_embedding_api_key(&kb.embedding_api_config_id) {
+        Ok(key) => key,
+        Err(e) => {
+            let error_msg = format!("Embedding API key lookup failed: {}", e);
+            mark_document_failed(&db_state, &doc_id, &error_msg).await?;
+            return Err(e);
+        }
+    };
 
     // Use the embedding provider/model/base_url stored on the knowledge base
     // itself (set at creation time from the selected Embedding API config).
@@ -360,33 +405,7 @@ pub async fn import_document(
         Ok(emb) => emb,
         Err(e) => {
             let error_msg = format!("Embedding generation failed: {}", e);
-            log::error!("[KB] {}", error_msg);
-
-            let db = db_state.0.lock().await;
-            let conn = rusqlite::Connection::open(&db.path)
-                .map_err(|e2| KnowledgeBaseError::DatabaseError(e2.to_string()))?;
-
-            conn.execute(
-                "UPDATE documents SET status = 'error', error_message = ?1 WHERE id = ?2",
-                rusqlite::params![&error_msg, &doc_id],
-            ).map_err(|e2| KnowledgeBaseError::DatabaseError(e2.to_string()))?;
-
-            // Clean up FTS5 entries BEFORE deleting chunks (need rowid from chunks)
-            if let Err(cleanup_err) = conn.execute(
-                "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
-                rusqlite::params![&doc_id],
-            ) {
-                log::warn!("[KB] Failed to clean up FTS5 entries: {}", cleanup_err);
-            }
-
-            // Clean up orphan chunks (after FTS5 cleanup)
-            if let Err(cleanup_err) = conn.execute(
-                "DELETE FROM chunks WHERE document_id = ?1",
-                rusqlite::params![&doc_id],
-            ) {
-                log::warn!("[KB] Failed to clean up orphan chunks: {}", cleanup_err);
-            }
-
+            mark_document_failed(&db_state, &doc_id, &error_msg).await?;
             return Err(KnowledgeBaseError::EmbeddingError(error_msg));
         }
     };

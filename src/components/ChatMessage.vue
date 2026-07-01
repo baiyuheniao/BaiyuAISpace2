@@ -31,6 +31,9 @@ import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 // 导入 Markdown 解析库
 import { marked } from "marked";
 
+// 导入 HTML 净化库
+import DOMPurify from "dompurify";
+
 // 导入代码高亮库
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
@@ -57,6 +60,15 @@ mermaid.initialize({
   theme: "dark",
   securityLevel: "loose",
   fontFamily: "system-ui, sans-serif",
+});
+
+// DOMPurify 默认的 URI 安全校验会把 srcdoc 这种"值不是 URL 而是一整段
+// HTML"的属性直接剥离，用 hook 强制放行 -- buildHtmlPreviewBlock 生成的
+// srcdoc 内容里的引号已经手动转义过，不依赖这里的校验来防属性逃逸。
+DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  if (data.attrName === "srcdoc") {
+    data.forceKeepAttr = true;
+  }
 });
 
 // ref 指向渲染 markdown 的 DOM 节点，用于查找 Mermaid 占位元素
@@ -181,6 +193,18 @@ function buildMermaidPreviewBlock(code: string): string {
 
 // ============ Markdown 配置 ============
 
+// marked 默认把消息正文里出现的裸 HTML（不在围栏代码块内的）原样透传到输出，
+// 这里转义掉，防止 <script>/<img onerror>/<style> 等直接变成真实 DOM 节点。
+// 围栏代码块走的是下面的 code() 渲染器，不受影响。
+function escapeRawHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // 使用单例确保 marked.use() 只调用一次（marked 修改全局实例）
 const markedInitPromise = (() => {
   let promise: Promise<void> | null = null;
@@ -189,6 +213,10 @@ const markedInitPromise = (() => {
       promise = new Promise((resolve) => {
         marked.use({
           renderer: {
+            // 消息正文中的裸 HTML（块级或内联）一律转义为纯文本
+            html(html: string, _block?: boolean): string {
+              return escapeRawHtml(html);
+            },
             // 处理所有围栏代码块（三参数形式是此版本 marked 的 Renderer 签名）
             code(text: string, lang: string | undefined, _escaped: boolean): string {
               // 取 info string 第一个单词作为语言标识（如 "html filename.html" → "html"）
@@ -228,9 +256,21 @@ const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 
 // 渲染后的 Markdown 内容
+// 二次防线：即便 marked 的转义有疏漏，DOMPurify 仍会按白名单剥离危险标签/属性。
+// iframe/sandbox/srcdoc/onload/onclick 是 buildHtmlPreviewBlock 和
+// buildMermaidPreviewBlock 生成"预览/源码"切换按钮与沙箱预览所必需的，显式放行。
 const renderedContent = computed(() => {
   if (!props.message.content) return "";
-  return marked.parse(props.message.content, { async: false, breaks: true }) as string;
+  const html = marked.parse(props.message.content, { async: false, breaks: true }) as string;
+  return DOMPurify.sanitize(html, {
+    ADD_TAGS: ["iframe"],
+    ADD_ATTR: ["sandbox", "srcdoc", "onload", "onclick"],
+    // srcdoc's value is a full HTML document (it legitimately contains
+    // "</style>" etc.), which DOMPurify's SAFE_FOR_XML close-tag probe
+    // otherwise treats as an attribute-escape attempt and strips outright.
+    // The uponSanitizeAttribute hook above is what actually keeps srcdoc.
+    SAFE_FOR_XML: false,
+  });
 });
 
 // ============ 方法函数 ============

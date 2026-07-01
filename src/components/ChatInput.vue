@@ -729,7 +729,6 @@ const getDocDisplayName = (name: string): string => {
               circle
               size="large"
               :disabled="!canSend && !chat.isLoading"
-              :loading="chat.isLoading"
               class="send-btn"
               @click="chat.isLoading ? handleStop() : handleSend()"
             >
