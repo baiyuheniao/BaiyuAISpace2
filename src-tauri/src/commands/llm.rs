@@ -246,24 +246,41 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
         "anthropic" => {
             let system_msg = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
 
-            let msgs: Vec<_> = messages
+            let non_system: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
+            // Prompt caching: mark the last message *before* the newest one as a
+            // cache breakpoint. Everything up to and including that block gets
+            // cached server-side, so a growing conversation only pays full price
+            // for the newest turn instead of re-processing the whole history on
+            // every request. Skipped when there's no real history yet (a single
+            // first message has nothing worth caching).
+            let cache_breakpoint_idx = non_system.len().checked_sub(2);
+
+            let msgs: Vec<_> = non_system
                 .iter()
-                .filter(|m| m.role != "system")
-                .map(|m| {
+                .enumerate()
+                .map(|(i, m)| {
                     let role = if m.role == "assistant" { "assistant" } else { "user" };
-                    if role == "user" && !m.images.is_empty() {
+                    let mut blocks: Vec<serde_json::Value> = if role == "user" && !m.images.is_empty() {
                         // Anthropic image format: separate source.media_type + source.data (NOT data URL)
-                        let mut blocks: Vec<serde_json::Value> = m.images.iter().map(|img| serde_json::json!({
+                        let mut b: Vec<serde_json::Value> = m.images.iter().map(|img| serde_json::json!({
                             "type": "image",
                             "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
                         })).collect();
                         if !m.content.is_empty() {
-                            blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+                            b.push(serde_json::json!({"type": "text", "text": m.content}));
                         }
-                        serde_json::json!({"role": "user", "content": blocks})
+                        b
                     } else {
-                        serde_json::json!({"role": role, "content": m.content})
+                        vec![serde_json::json!({"type": "text", "text": m.content})]
+                    };
+
+                    if cache_breakpoint_idx == Some(i) {
+                        if let Some(last_block) = blocks.last_mut() {
+                            last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                        }
                     }
+
+                    serde_json::json!({"role": role, "content": blocks})
                 })
                 .collect();
 
@@ -300,7 +317,13 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             }
 
             if let Some(sys) = system_msg {
-                body["system"] = serde_json::json!(sys);
+                // System prompt is identical on every request for a given Agent/Skill
+                // config, so it's the single best thing to cache -- always mark it.
+                body["system"] = serde_json::json!([{
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": {"type": "ephemeral"}
+                }]);
             }
 
             if !tools.is_empty() {
@@ -1959,12 +1982,56 @@ mod provider_tool_calling_tests {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
-        let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false);
+        let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "get_weather");
         assert!(tools[0].get("input_schema").is_some(), "anthropic tools use `input_schema`, not `parameters`");
         assert!(tools[0].get("function").is_none(), "anthropic tools must not be nested under `function` like OpenAI");
+    }
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: content.into(), role: role.into(), content: content.into(),
+            timestamp: 0, error: None, images: vec![], videos: vec![],
+        }
+    }
+
+    #[test]
+    fn anthropic_prompt_caching_marks_system_and_last_history_message() {
+        let messages = vec![
+            msg("system", "you are a helpful assistant"),
+            msg("user", "turn 1"),
+            msg("assistant", "reply 1"),
+            msg("user", "turn 2 (newest)"),
+        ];
+        let body = build_stream_request_body("anthropic", "claude-opus-4-8", &messages, &[], false, None);
+
+        // System prompt is stable across every request for this config, so it's
+        // always worth caching.
+        let system = body["system"].as_array().expect("system should be a content-block array");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+
+        // Breakpoint goes on the last message *before* the newest one -- "reply 1"
+        // here -- so the newest turn ("turn 2") is the only uncached content.
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "system message is excluded from `messages`");
+        assert_eq!(msgs[0]["content"][0]["text"], "turn 1");
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(msgs[1]["content"][0]["text"], "reply 1");
+        assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral", "breakpoint belongs on the last historical message");
+        assert_eq!(msgs[2]["content"][0]["text"], "turn 2 (newest)");
+        assert!(msgs[2]["content"][0].get("cache_control").is_none(), "the newest turn changes every request, so caching it would never hit");
+    }
+
+    #[test]
+    fn anthropic_prompt_caching_skips_breakpoint_on_first_message() {
+        // A single first message has no repeated history yet -- nothing to cache.
+        let messages = vec![msg("user", "hello")];
+        let body = build_stream_request_body("anthropic", "claude-opus-4-8", &messages, &[], false, None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -1973,7 +2040,7 @@ mod provider_tool_calling_tests {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
-        let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false);
+        let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools.len(), 1, "Gemini nests every declaration under a single tools[0] entry");
         let declarations = tools[0]["functionDeclarations"].as_array().expect("functionDeclarations array");
@@ -2055,7 +2122,7 @@ mod provider_tool_calling_tests {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![],
         }];
-        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false);
+        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "get_weather");
@@ -2094,7 +2161,9 @@ mod provider_tool_calling_tests {
 
         assert_eq!(native[1]["role"], "model");
         assert_eq!(native[1]["parts"][0]["functionCall"]["name"], "get_weather");
-        assert_eq!(native[2]["role"], "function");
+        // Gemini REST API rejects "function" as a role -- functionResponse
+        // parts must use "user" (see append_tool_round's google branch).
+        assert_eq!(native[2]["role"], "user");
         assert_eq!(native[2]["parts"][0]["functionResponse"]["name"], "get_weather");
     }
 
