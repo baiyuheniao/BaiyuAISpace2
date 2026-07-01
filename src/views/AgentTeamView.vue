@@ -384,10 +384,10 @@ onMounted(async () => {
         >
           <n-form label-placement="left" label-width="80px" size="small">
             <n-form-item label="名称">
-              <n-input v-model:value="proposalEdits[p.proposalId].name" />
+              <n-input v-model:value="proposalEdits[p.proposalId].name" placeholder="给这个 Agent 起个名字" />
             </n-form-item>
             <n-form-item label="职责说明">
-              <n-input v-model:value="proposalEdits[p.proposalId].systemPrompt" type="textarea" :rows="2" />
+              <n-input v-model:value="proposalEdits[p.proposalId].systemPrompt" type="textarea" :rows="2" placeholder="这个 Agent 的职责说明..." />
             </n-form-item>
             <n-form-item label="提议的模型">
               <n-text depth="3">{{ p.draft.provider }} / {{ p.draft.model }}（仅供参考，实际以下方选择的 API 配置为准）</n-text>
@@ -506,7 +506,7 @@ onMounted(async () => {
           <n-input v-model:value="wsForm.name" placeholder="例如：产品文案小组" />
         </n-form-item>
         <n-form-item label="描述">
-          <n-input v-model:value="wsForm.description" type="textarea" :rows="2" />
+          <n-input v-model:value="wsForm.description" type="textarea" :rows="2" placeholder="简要描述这个工作组的用途（可选）" />
         </n-form-item>
         <n-form-item label="Agent 数量上限">
           <n-input-number v-model:value="wsForm.maxAgents" :min="1" :max="20" />
