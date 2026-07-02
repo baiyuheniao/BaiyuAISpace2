@@ -46,6 +46,29 @@ curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:s
   }'
 ```
 
+## 图片/视频输入格式 (Vision)
+
+图片和视频用同一种 `inline_data` part，`mime_type` + 纯 base64（不带 data URI 前缀）：
+
+```json
+{
+  "contents": [{
+    "role": "user",
+    "parts": [
+      {"text": "这段内容里有什么？"},
+      {"inline_data": {"mime_type": "image/jpeg", "data": "<BASE64_无前缀>"}},
+      {"inline_data": {"mime_type": "video/mp4", "data": "<BASE64_无前缀>"}}
+    ]
+  }]
+}
+```
+
+Gemini 是本表里目前唯一同时支持图片和视频输入的服务商（代码里 `ChatMessage.videos` 字段目前也只有 google 分支会消费；其余 provider 会忽略视频附件，详见 `src-tauri/src/commands/llm.rs` 顶部的字段注释）。
+
+## Context Caching (上下文缓存)
+
+Gemini 2.5+ 模型的**隐式缓存 (implicit caching)** 是服务端默认自动开启的，重复的历史前缀会自动打 9 折左右，**不需要客户端做任何代码改动**。显式缓存 (`cachedContent` 字段) 需要额外调用独立的缓存管理 API 创建/维护缓存对象，且门槛是 32768 tokens 起，对常规聊天历史场景用不上，目前没有适配，也没有必要适配。
+
 ## 常用模型
 
 - gemini-2.5-pro
@@ -55,4 +78,5 @@ curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:s
 
 ## 更新日志
 
+- 2026-07-02: 补充图片/视频输入格式，以及 Context Caching (隐式缓存自动生效，无需适配) 说明
 - 2026-04-25: 初始文档

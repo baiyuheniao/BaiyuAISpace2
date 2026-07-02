@@ -414,6 +414,12 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
             body
         }
         _ => {
+            // Mistral's Chat Completions endpoint puts the data URI directly as the
+            // `image_url` value (a string), not nested under an `{"url": ...}` object
+            // like OpenAI and every other "OpenAI-compatible" provider here. Sending
+            // the nested-object shape to Mistral fails to parse server-side.
+            let is_mistral = provider == "mistral";
+
             let msgs: Vec<_> = messages
                 .iter()
                 .map(|m| {
@@ -424,9 +430,10 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                             content.push(serde_json::json!({"type": "text", "text": m.content}));
                         }
                         for img in &m.images {
+                            let data_uri = format!("data:{};base64,{}", img.media_type, img.data);
                             content.push(serde_json::json!({
                                 "type": "image_url",
-                                "image_url": {"url": format!("data:{};base64,{}", img.media_type, img.data)}
+                                "image_url": if is_mistral { serde_json::json!(data_uri) } else { serde_json::json!({"url": data_uri}) }
                             }));
                         }
                         serde_json::json!({"role": m.role, "content": content})
@@ -2126,6 +2133,41 @@ mod provider_tool_calling_tests {
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "get_weather");
+    }
+
+    fn image_message() -> ChatMessage {
+        ChatMessage {
+            id: "1".into(), role: "user".into(), content: "what is this".into(),
+            timestamp: 0, error: None,
+            images: vec![ImageAttachment { data: "AAAA".into(), media_type: "image/png".into() }],
+            videos: vec![],
+        }
+    }
+
+    #[test]
+    fn openai_compatible_image_url_is_nested_under_url_object() {
+        let messages = vec![image_message()];
+        // Every "OpenAI-compatible" provider except Mistral (DeepSeek, SiliconFlow,
+        // Zhipu's OpenAI-compat endpoint, Aliyun, Baidu, Doubao, Moonshot, MiniMax...)
+        // expects the standard OpenAI `image_url: {"url": "data:..."}` object shape.
+        for provider in ["openai", "deepseek", "siliconflow", "zhipu", "aliyun", "moonshot"] {
+            let body = build_stream_request_body(provider, "some-model", &messages, &[], false, None);
+            let image_url = &body["messages"][0]["content"][1]["image_url"];
+            assert!(image_url.is_object(), "{provider}: image_url should be an object with a `url` key, got {image_url:?}");
+            assert_eq!(image_url["url"], "data:image/png;base64,AAAA");
+        }
+    }
+
+    #[test]
+    fn mistral_image_url_is_a_bare_data_uri_string_not_an_object() {
+        // Mistral's Chat Completions API puts the data URI directly as the
+        // `image_url` value -- confirmed against docs.mistral.ai/capabilities/vision.
+        // Sending the nested-object shape here fails to parse server-side.
+        let messages = vec![image_message()];
+        let body = build_stream_request_body("mistral", "pixtral-large-latest", &messages, &[], false, None);
+        let image_url = &body["messages"][0]["content"][1]["image_url"];
+        assert!(image_url.is_string(), "mistral: image_url should be a bare string, got {image_url:?}");
+        assert_eq!(image_url, "data:image/png;base64,AAAA");
     }
 
     fn sample_call() -> PendingToolCall {

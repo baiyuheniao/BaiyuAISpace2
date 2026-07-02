@@ -33,4 +33,5 @@
 
 ## 更新日志
 
+- 2026-07-02: 给每个服务商补充"图片/视频输入格式"章节（联网核实，不是凭记忆），修正了 Mistral 的格式差异导致的真实代码 bug（`image_url` 是裸字符串不是对象），记录了 Anthropic Prompt Caching / Google Context Caching 的适配情况
 - 2026-04-25: 初始版本

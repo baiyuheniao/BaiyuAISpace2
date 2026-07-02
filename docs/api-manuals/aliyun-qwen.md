@@ -43,6 +43,16 @@ curl https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
   }'
 ```
 
+## 图片输入格式 (Vision, Qwen-VL 系列)
+
+标准 OpenAI 兼容格式，`image_url` 是对象，支持 http(s) 链接或 base64 data URI：
+
+```json
+{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<BASE64>"}}
+```
+
+视觉模型需要用专门的 VL 系列模型名（如 `qwen3-vl-plus`、`qwen-vl-max`、`qwen2.5-vl-72b-instruct`），普通 `qwen-plus`/`qwen-turbo` 不支持图片输入。
+
 ## 常用模型
 
 - qwen-plus
@@ -50,6 +60,7 @@ curl https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
 - qwen-max
 - qwen-coder-plus
 - qwen2.5
+- qwen3-vl-plus / qwen-vl-max / qwen2.5-vl-72b-instruct（视觉）
 
 ## 注意事项
 
@@ -58,4 +69,5 @@ curl https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
 
 ## 更新日志
 
+- 2026-07-02: 核实并补充图片输入格式说明
 - 2026-04-25: 初始文档

@@ -43,6 +43,10 @@ curl https://api.deepseek.com/chat/completions \
   }'
 ```
 
+## 图片/视频输入 (Vision)
+
+**DeepSeek 官方 API 目前不支持图片/视频输入**，`deepseek-chat`/`deepseek-reasoner` 都是纯文本模型。代码里如果给 DeepSeek 发带图片的消息，请求会按标准 OpenAI `image_url` 格式发出（走 `build_stream_request_body` 的通用分支），但 DeepSeek 服务端大概率无法识别，不会报格式错误，而是直接忽略图片内容或返回错误 —— 应用层面目前没有针对这种情况做拦截提示。
+
 ## 常用模型
 
 - deepseek-chat (DeepSeek-V3)
@@ -50,4 +54,5 @@ curl https://api.deepseek.com/chat/completions \
 
 ## 更新日志
 
+- 2026-07-02: 核实确认官方 API 不支持图片/视频输入
 - 2026-04-25: 初始文档

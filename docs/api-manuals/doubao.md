@@ -42,6 +42,16 @@ curl https://ark.cn-beijing.volces.com/api/v3/chat/completions \
   }'
 ```
 
+## 图片输入格式 (Vision, 豆包多模态系列)
+
+标准 OpenAI 兼容格式，`image_url` 是对象，`url` 支持 http(s)/tos/s3 链接或 base64 data URI：
+
+```json
+{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<BASE64>"}}
+```
+
+需要用支持视觉的豆包模型（模型名通常带"vision"或走多模态专用 endpoint/模型 ID）。
+
 ## 常用模型
 
 - doubao-pro-v1
@@ -54,4 +64,5 @@ curl https://ark.cn-beijing.volces.com/api/v3/chat/completions \
 
 ## 更新日志
 
+- 2026-07-02: 补充图片输入格式说明
 - 2026-04-25: 初始文档

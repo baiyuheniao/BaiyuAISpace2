@@ -42,15 +42,29 @@ curl https://api.minimax.chat/v1/text/chatcompletion_v2 \
   }'
 ```
 
+## 图片/视频输入格式 (Vision)
+
+`chatcompletion_v2` 端点虽然路径长得不像标准 OpenAI 路径（`/v1/text/chatcompletion_v2`），但请求体本身是 OpenAI 兼容格式。较新的 MiniMax 模型（如 MiniMax-M3）支持 `image_url` **和** `video_url` 两种 content part：
+
+```json
+{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<BASE64>"}}
+{"type": "video_url", "video_url": {"url": "..."}}
+```
+
+⚠️ **代码目前没有适配 MiniMax 的视频输入**：`src-tauri/src/commands/llm.rs` 里视频（`ChatMessage.videos`）只有 google 分支会消费，MiniMax 走的通用分支完全不处理 `videos` 字段，用户上传的视频会被静默丢弃。如果要支持 MiniMax 的视频理解，需要单独适配 `video_url` 格式（跟 Gemini 的 `inline_data` 格式不同，不能直接复用）。
+
 ## 常用模型
 
 - abab6.5s-chat
 - abab6.5g-chat
+- MiniMax-M3（多模态，支持图片 + 视频）
 
 ## 注意事项
 
 - 需要在 MiniMax 开放平台注册并获取 API Key
+- 端点路径 `/v1/text/chatcompletion_v2` 与其他厂商的 `/v1/chat/completions` 不同，但请求/响应体格式仍是 OpenAI 兼容的
 
 ## 更新日志
 
+- 2026-07-02: 补充图片/视频输入格式说明；记录代码尚未适配 MiniMax 视频输入这一缺口
 - 2026-04-25: 初始文档
