@@ -174,5 +174,6 @@ visual-code/
 # Claude Code local config
 .claude/
 
-# DingTalk MCP server (contains webhook secrets)
+# DingTalk / Feishu MCP servers (contain webhook secrets)
 DingTalk.py
+Feishu.py
