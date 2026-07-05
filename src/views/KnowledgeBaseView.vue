@@ -362,12 +362,12 @@ const getStatusTag = (status: Document["status"]) => {
       <div class="kb-sidebar-content">
         <!-- 侧边栏头部 -->
         <div class="kb-header">
-          <h2 class="kb-title">
-            <n-icon :size="24">
-              <Library />
-            </n-icon>
-            知识库
-          </h2>
+          <div class="kb-title-block">
+            <span class="eyebrow">RAG</span>
+            <h2 class="kb-title">
+              知识库
+            </h2>
+          </div>
           <!-- 新建按钮 -->
           <n-button
             type="primary"
@@ -923,12 +923,13 @@ const getStatusTag = (status: Document["status"]) => {
 /* 主容器 */
 .kb-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
 /* 侧边栏背景 */
 .kb-sidebar {
-  background: var(--n-color-embed);
+  background: $bg;
+  border-right: $border;
 }
 
 /* 侧边栏内容 */
@@ -936,24 +937,32 @@ const getStatusTag = (status: Document["status"]) => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 20px;
+  padding: 2rem 1.25rem;
 }
 
 /* 侧边栏头部 */
 .kb-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+  align-items: flex-end;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: $border;
+}
+
+/* 标题区块 */
+.kb-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 /* 标题样式 */
 .kb-title {
-  font-size: 18px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  font-family: $font-serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: $leading-display;
   margin: 0;
 }
 

@@ -499,15 +499,12 @@ const handleTestSavedServer = async (server: MCPServer) => {
     >
       <div class="mcp-container">
         <!-- 页面标题 -->
-        <h1 class="page-title">
-          <n-icon
-            :size="28"
-            style="margin-right: 12px"
-          >
-            <Cube />
-          </n-icon>
-          MCP 服务管理
-        </h1>
+        <header class="page-header enter-up">
+          <span class="eyebrow">MCP</span>
+          <h1 class="page-title">
+            MCP 服务管理
+          </h1>
+        </header>
 
         <!-- 推荐服务预设卡片 -->
         <n-card
@@ -994,7 +991,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
 /* 主容器 */
 .mcp-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
 /* 内容区域 */
@@ -1006,25 +1003,38 @@ const handleTestSavedServer = async (server: MCPServer) => {
 .mcp-container {
   max-width: 900px;
   margin: 0 auto;
-  padding: 40px 32px;
+  padding: 5rem 2rem 8rem;
 }
 
 /* 页面标题 */
-.page-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin-bottom: 32px;
+.page-header {
+  margin-bottom: 4rem;
   display: flex;
-  align-items: center;
-  color: var(--n-text-color-1);
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.page-title {
+  font-family: $font-serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
 }
 
 /* 卡片样式 */
 .settings-card {
   margin-bottom: 20px;
-  border-radius: $radius-xl;
-  background: var(--n-color-embed);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: $bg;
+  border: $border-soft;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: $shadow-hover;
+  }
 }
 
 /* 卡片头部 */
@@ -1044,18 +1054,20 @@ const handleTestSavedServer = async (server: MCPServer) => {
 .form-section {
   margin-bottom: 24px;
   padding-bottom: 24px;
-  border-bottom: 1px solid var(--n-border-color);
+  border-bottom: $border-faint;
 
   &:last-child {
     border-bottom: none;
     margin-bottom: 0;
   }
 
-  /* 分区标题 */
+  /* 分区标题: 小字号大写 label */
   .section-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--n-text-color-2);
+    font-size: $label-size;
+    font-weight: 500;
+    letter-spacing: $label-tracking;
+    text-transform: uppercase;
+    color: $ink-faint;
     margin-bottom: 12px;
   }
 }

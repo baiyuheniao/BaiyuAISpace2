@@ -4,36 +4,27 @@
 
 <!--
   Layout.vue - 应用布局组件
-  
+
   功能说明:
   - 应用主布局结构 (左侧边栏 + 主内容区)
-  - 导航菜单
-  - 新建对话按钮
+  - 编辑设计风格导航: 两位数序号 + 名称, 激活项黑白反色
+  - 新建对话按钮 (黑底白字, 悬浮反色)
 
-  组成部分:
-  - 左侧边栏 (n-layout-sider): 包含 logo、导航菜单
-  - 主内容区 (n-layout): 显示路由视图
+  设计说明:
+  - 侧边栏与主区以 1px 黑色细线分隔
+  - 底部装饰: 旋转外框 + 轨道圆点
 -->
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed, h } from "vue";
+import { computed } from "vue";
 
 // 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
 
-// 导入 NaiveUI 组件
-import { NLayout, NLayoutSider, NMenu, NButton } from "naive-ui";
-
-// 导入类型
-import type { MenuOption } from "naive-ui";
-
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
-
-// 导入图标
-import { Chatbubbles, Time, Settings, Library, Cube, HardwareChipOutline, ExtensionPuzzleOutline, PeopleOutline, AlarmOutline } from "@vicons/ionicons5";
 
 // 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
@@ -55,57 +46,21 @@ const chat = useChatStore();
 // 当前激活的菜单项
 const activeKey = computed(() => route.name as string);
 
-// 导航菜单配置
-const menuOptions: MenuOption[] = [
-  {
-    label: "Chat/对话",
-    key: "Chat",
-    icon: () => h(Chatbubbles),
-  },
-  {
-    label: "Skill/技能",
-    key: "Skills",
-    icon: () => h(ExtensionPuzzleOutline),
-  },
-  {
-    label: "RAG/知识库",
-    key: "KnowledgeBase",
-    icon: () => h(Library),
-  },
-  {
-    label: "MCP/模型工具",
-    key: "MCP",
-    icon: () => h(Cube),
-  },
-  {
-    label: "本地部署",
-    key: "LocalDeploy",
-    icon: () => h(HardwareChipOutline),
-  },
-  {
-    label: "Agent Team/协作团队",
-    key: "AgentTeam",
-    icon: () => h(PeopleOutline),
-  },
-  {
-    label: "定时任务",
-    key: "Scheduler",
-    icon: () => h(AlarmOutline),
-  },
-  {
-    label: "History/历史记录",
-    key: "History",
-    icon: () => h(Time),
-  },
-  {
-    label: "Settings/设置",
-    key: "Settings",
-    icon: () => h(Settings),
-  },
+// 导航菜单配置: 序号 + 英文 label + 中文名
+const navItems = [
+  { key: "Chat", label: "Chat", name: "对话" },
+  { key: "Skills", label: "Skill", name: "技能" },
+  { key: "KnowledgeBase", label: "RAG", name: "知识库" },
+  { key: "MCP", label: "MCP", name: "模型工具" },
+  { key: "LocalDeploy", label: "Local", name: "本地部署" },
+  { key: "AgentTeam", label: "Agents", name: "协作团队" },
+  { key: "Scheduler", label: "Cron", name: "定时任务" },
+  { key: "History", label: "History", name: "历史记录" },
+  { key: "Settings", label: "Settings", name: "设置" },
 ];
 
 // 菜单项点击处理
-const handleMenuUpdate = (key: string) => {
+const handleNavClick = (key: string) => {
   router.push({ name: key });
 };
 
@@ -122,140 +77,270 @@ const handleNewChat = () => {
 </script>
 
 <template>
-  <n-layout
-    has-sider
-    class="layout"
-  >
+  <div class="layout">
     <!-- Sidebar -->
-    <n-layout-sider
-      bordered
-      collapse-mode="width"
-      :collapsed-width="72"
-      :width="260"
-      :native-scrollbar="false"
-      class="sidebar"
-    >
-      <div class="sidebar-content">
-        <!-- Logo -->
-        <div class="logo-section">
-          <div class="logo">
-            <img
-              :src="logoImg"
-              alt="BaiyuAI"
-              class="logo-img"
-            >
-            <span class="logo-text">BaiyuAI</span>
-          </div>
-        </div>
-
-        <!-- New Chat Button -->
-        <div class="new-chat-section">
-          <n-button
-            type="primary"
-            size="large"
-            block
-            round
-            class="new-chat-btn"
-            @click="handleNewChat"
+    <aside class="sidebar">
+      <!-- Logo -->
+      <div class="logo-section">
+        <div class="logo rotating-frame">
+          <img
+            :src="logoImg"
+            alt="BaiyuAI"
+            class="logo-img"
           >
-            新建对话
-          </n-button>
         </div>
-
-        <!-- Navigation Menu -->
-        <div class="menu-section">
-          <n-menu
-            :value="activeKey"
-            :collapsed-width="72"
-            :collapsed-icon-size="22"
-            :options="menuOptions"
-            :root-indent="18"
-            :indent="12"
-            @update:value="handleMenuUpdate"
-          />
+        <div class="logo-meta">
+          <span class="eyebrow">Workspace</span>
+          <span class="logo-text">BaiyuAI</span>
         </div>
       </div>
-    </n-layout-sider>
+
+      <!-- New Chat Button -->
+      <button
+        class="new-chat-btn"
+        @click="handleNewChat"
+      >
+        <span class="new-chat-label">New Session</span>
+        <span class="new-chat-text">新建对话</span>
+      </button>
+
+      <!-- Navigation -->
+      <nav class="nav">
+        <button
+          v-for="(item, index) in navItems"
+          :key="item.key"
+          class="nav-item"
+          :class="{ 'is-active': activeKey === item.key }"
+          @click="handleNavClick(item.key)"
+        >
+          <span class="nav-index">{{ String(index + 1).padStart(2, "0") }}</span>
+          <span class="nav-name">{{ item.name }}</span>
+          <span class="nav-label">{{ item.label }}</span>
+        </button>
+      </nav>
+
+      <!-- Footer decoration -->
+      <div class="sidebar-footer">
+        <div class="footer-orbit orbit-ring" />
+        <span class="footer-note">Baiyu AI Space — Monochrome</span>
+      </div>
+    </aside>
 
     <!-- Main Content -->
-    <n-layout class="main-layout">
+    <main class="main-area">
       <router-view v-slot="{ Component }">
         <keep-alive>
           <component :is="Component" />
         </keep-alive>
       </router-view>
-    </n-layout>
-  </n-layout>
+    </main>
+  </div>
 </template>
 
 <style scoped lang="scss">
 .layout {
   height: 100vh;
   width: 100vw;
+  display: flex;
+  background: $bg;
 }
 
 .sidebar {
-  background: linear-gradient(180deg, var(--n-color-embed) 0%, var(--n-color) 100%);
-}
-
-.sidebar-content {
-  height: 100%;
+  width: $sidebar-width;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 20px 16px;
+  border-right: $border;
+  background: $bg;
+  padding: 2rem 0 1.5rem;
+  overflow: hidden;
 }
 
+// ---------- Logo ----------
 .logo-section {
-  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 1.5rem;
+  margin-bottom: 2rem;
 }
 
 .logo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 8px;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: $border;
+  padding: 4px;
+
+  &.rotating-frame::before {
+    inset: -8px;
+  }
 }
 
 .logo-img {
-  width: 48px;
-  height: 48px;
-  border-radius: $radius-md;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
-  image-rendering: crisp-edges;
-  background: var(--n-color-embed);
-  padding: 4px;
+  // 强制黑白: logo 也纳入单色系统
+  filter: grayscale(1) contrast(1.1);
+}
+
+.logo-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
 }
 
 .logo-text {
-  font-size: 22px;
+  font-family: $font-serif;
+  font-size: 1.25rem;
   font-weight: 700;
-  color: var(--n-text-color);
+  line-height: $leading-display;
+  color: $ink;
 }
 
-.new-chat-section {
-  margin-bottom: 20px;
-  padding: 0 8px;
-}
-
+// ---------- 新建对话 ----------
 .new-chat-btn {
-  background: #000000;
-  border-color: #000000;
-  color: #ffffff;
-  transition: all 0.3s ease;
+  margin: 0 1.5rem 2rem;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  cursor: pointer;
+  background: $ink;
+  color: $bg;
+  border: $border;
+  text-align: left;
+  transition:
+    background $duration $ease,
+    color $duration $ease;
+
+  &:hover {
+    background: $bg;
+    color: $ink;
+  }
 }
 
-.new-chat-btn:hover {
-  transform: translateY(-1px);
-  background: #1a1a1a;
-  border-color: #1a1a1a;
+.new-chat-label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: $label-tracking;
+  text-transform: uppercase;
+  opacity: 0.6;
 }
 
-.menu-section {
+.new-chat-text {
+  font-family: $font-serif;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+// ---------- 导航 ----------
+.nav {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  border-top: $border-faint;
 }
 
-.main-layout {
-  background: var(--n-color);
+.nav-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.8rem 1.5rem;
+  background: transparent;
+  border: none;
+  border-bottom: $border-faint;
+  cursor: pointer;
+  text-align: left;
+  color: $ink-soft;
+  transition:
+    background $duration $ease,
+    color $duration $ease,
+    padding-left $duration $ease;
+
+  &:hover {
+    background: $surface;
+    color: $ink;
+    padding-left: 1.9rem;
+  }
+
+  // 激活项: 黑白反色
+  &.is-active {
+    background: $ink;
+    color: $bg;
+
+    .nav-index,
+    .nav-label {
+      color: inherit;
+      opacity: 0.55;
+    }
+  }
+}
+
+.nav-index {
+  font-family: $font-mono;
+  font-size: 0.7rem;
+  color: $ink-faint;
+  transition: color $duration $ease;
+}
+
+.nav-name {
+  font-family: $font-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  flex: 1;
+}
+
+.nav-label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: $ink-faint;
+  transition: color $duration $ease;
+}
+
+// ---------- 底部装饰 ----------
+.sidebar-footer {
+  padding: 1.25rem 1.5rem 0;
+  border-top: $border-faint;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.footer-orbit {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  border-radius: 50%;
+
+  &::after {
+    --orbit-radius: 14px;
+    width: 4px;
+    height: 4px;
+    margin: -2px 0 0 -2px;
+  }
+}
+
+.footer-note {
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: $ink-faint;
+}
+
+// ---------- 主内容区 ----------
+.main-area {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: $bg;
 }
 </style>

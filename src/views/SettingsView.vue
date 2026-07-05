@@ -32,7 +32,6 @@ import {
   NSelect,
   NInput,
   NInputNumber,
-  NSwitch,
   NButton,
   NSpace,
   NList,
@@ -54,9 +53,7 @@ import {
   type RerankerApiConfig
 } from "@/stores/settings";
 import {
-  ServerOutline,
   KeyOutline,
-  ColorPaletteOutline,
   InformationCircleOutline,
   DocumentTextOutline,
   Add,
@@ -506,15 +503,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
     >
       <div class="settings-container">
         <!-- 页面标题 -->
-        <h1 class="page-title">
-          <n-icon
-            :size="28"
-            style="margin-right: 12px;"
-          >
-            <ServerOutline />
-          </n-icon>
-          设置
-        </h1>
+        <header class="page-header enter-up">
+          <span class="eyebrow">Settings</span>
+          <h1 class="page-title">
+            设置
+          </h1>
+        </header>
 
         <!-- LLM API 配置卡片 -->
         <n-card
@@ -873,47 +867,6 @@ const providerOptions = computed(() => settings.presetProviderOptions);
           </template>
         </n-card>
 
-        <!-- 外观设置卡片 -->
-        <n-card
-          class="settings-card"
-          :bordered="false"
-        >
-          <template #header>
-            <div class="card-header">
-              <n-icon
-                :size="20"
-                depth="3"
-              >
-                <ColorPaletteOutline />
-              </n-icon>
-              <span>外观</span>
-            </div>
-          </template>
-
-          <!-- 表单设置 -->
-          <n-form
-            label-placement="left"
-            label-width="100px"
-            class="settings-form"
-          >
-            <n-form-item label="深色模式">
-              <!-- 主题切换开关 -->
-              <n-switch
-                :value="settings.darkMode"
-                size="large"
-                @update:value="settings.toggleTheme"
-              >
-                <template #checked>
-                  开启
-                </template>
-                <template #unchecked>
-                  关闭
-                </template>
-              </n-switch>
-            </n-form-item>
-          </n-form>
-        </n-card>
-
         <!-- 关于卡片 -->
         <n-card
           class="settings-card"
@@ -1166,7 +1119,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             <n-text
               v-if="formData.provider === 'baidu'"
               depth="2"
-              style="font-size: 12px; color: #f0a020;"
+              style="font-size: 12px; color: #444444;"
             >
               百度千帆需要 access_token，而非 API Key。请在
               <n-a
@@ -1470,7 +1423,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 /* 设置主容器 */
 .settings-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
 /* 设置内容区域 */
@@ -1482,25 +1435,38 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 .settings-container {
   max-width: 700px;
   margin: 0 auto;
-  padding: 40px 32px;
+  padding: 5rem 2rem 8rem;
 }
 
-/* 页面标题样式 */
-.page-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin-bottom: 32px;
+/* 页面标题区域 */
+.page-header {
+  margin-bottom: 4rem;
   display: flex;
-  align-items: center;
-  color: var(--n-text-color-1);
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.page-title {
+  font-family: $font-serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
 }
 
 /* 设置卡片样式 */
 .settings-card {
   margin-bottom: 20px;
-  border-radius: $radius-xl;
-  background: var(--n-color-embed);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: $bg;
+  border: $border-soft;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: $shadow-hover;
+  }
 }
 
 /* 卡片标题样式 */

@@ -2,6 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+// ============================================================
+// 全局样式 · 黑白编辑设计系统
+// ============================================================
+
 * {
   margin: 0;
   padding: 0;
@@ -14,10 +18,34 @@ body,
   height: 100%;
   width: 100%;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: $font-sans;
+  font-weight: 400;
+  color: $ink;
+  background: $bg;
+  line-height: $leading-body;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-// Custom scrollbar
+// ---------- 标题：中文衬线，窄行高 ----------
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: $font-serif;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
+}
+
+::selection {
+  background: $ink;
+  color: $bg;
+}
+
+// ---------- 滚动条：细黑线 ----------
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -28,32 +56,260 @@ body,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #8884;
-  border-radius: $radius-sm;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8888;
+  background: $ink;
 }
 
-// Code block styles
+// ============================================================
+// 排版原子
+// ============================================================
+
+// 区块前缀 label：小字号 + 宽字距 + 全大写
+.eyebrow {
+  font-family: $font-sans;
+  font-size: $label-size;
+  font-weight: 500;
+  letter-spacing: $label-tracking;
+  text-transform: uppercase;
+  color: $ink-faint;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+
+  &::before {
+    content: "";
+    display: inline-block;
+    width: 2rem;
+    height: 1px;
+    background: $ink;
+  }
+}
+
+// 展示标题
+.display-title {
+  font-family: $font-serif;
+  font-weight: 700;
+  line-height: $leading-display;
+  letter-spacing: -0.01em;
+  color: $ink;
+}
+
+.text-soft {
+  color: $ink-soft;
+}
+
+.text-faint {
+  color: $ink-faint;
+}
+
+// ============================================================
+// 几何元素
+// ============================================================
+
+// 1px 细线方框
+.hairline-box {
+  border: $border;
+  background: $bg;
+}
+
+// 嵌套方框：多层边框由外向内渐淡
+.nested-frame {
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  padding: 0.5rem;
+
+  > .nested-frame-inner {
+    border: 1px solid rgba(0, 0, 0, 0.5);
+    padding: 0.5rem;
+    height: 100%;
+
+    > .nested-frame-core {
+      border: 1px solid rgba(0, 0, 0, 0.4);
+      height: 100%;
+    }
+  }
+}
+
+// SVG 线框背景层（圆 / 线 / 矩形，opacity 0.04）
+.bg-wireframe {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  overflow: hidden;
+  z-index: 0;
+
+  svg {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+// 轨道圆点：8s 环绕
+.orbit-ring {
+  position: relative;
+
+  &::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 6px;
+    height: 6px;
+    margin: -3px 0 0 -3px;
+    background: $ink;
+    border-radius: 50%;
+    transform-origin: 0 0;
+    animation: orbit 8s linear infinite;
+  }
+}
+
+// 旋转外框：60s 线性无限
+.rotating-frame {
+  position: relative;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: -14px;
+    border: 1px solid rgba(0, 0, 0, 0.3);
+    animation: spin-slow 60s linear infinite;
+  }
+}
+
+@keyframes orbit {
+  from {
+    transform: rotate(0deg) translateX(var(--orbit-radius, 60px));
+  }
+  to {
+    transform: rotate(360deg) translateX(var(--orbit-radius, 60px));
+  }
+}
+
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ============================================================
+// 动画
+// ============================================================
+
+// 入场：opacity 0→1 + translateY(40px)→0 + scale(0.95)→1
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(40px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.enter-up {
+  animation: enter-up $duration-slow $ease both;
+}
+
+// 滚动揭示（配合 v-reveal 指令，IntersectionObserver threshold 0.15）
+.reveal {
+  opacity: 0;
+  transform: translateY(40px) scale(0.95);
+  transition:
+    opacity $duration-slow $ease,
+    transform $duration-slow $ease;
+  will-change: opacity, transform;
+
+  &.is-visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+// 悬浮上浮卡片
+.hover-lift {
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: $shadow-hover;
+  }
+}
+
+// 按钮悬浮反色（黑→白 / 白→黑）
+.btn-invert {
+  background: $ink;
+  color: $bg;
+  border: $border;
+  transition:
+    background $duration $ease,
+    color $duration $ease;
+
+  &:hover {
+    background: $bg;
+    color: $ink;
+  }
+}
+
+.btn-invert-light {
+  background: $bg;
+  color: $ink;
+  border: $border;
+  transition:
+    background $duration $ease,
+    color $duration $ease;
+
+  &:hover {
+    background: $ink;
+    color: $bg;
+  }
+}
+
+// ============================================================
+// 代码与 Markdown
+// ============================================================
+
 pre {
   margin: 12px 0;
-  border-radius: $radius-md;
   overflow-x: auto;
+  border: 1px solid rgba(0, 0, 0, 0.4);
 }
 
 code {
-  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-family: $font-mono;
   font-size: 0.9em;
 }
 
-// Markdown content styles
 .markdown-body {
-  line-height: 1.6;
+  line-height: $leading-body;
+  color: $ink;
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: $font-serif;
+    margin: 1.2em 0 0.5em;
+  }
 
   p {
     margin: 8px 0;
+  }
+
+  a {
+    color: $ink;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   ul,
@@ -65,9 +321,9 @@ code {
   blockquote {
     margin: 12px 0;
     padding: 8px 16px;
-    border-left: 4px solid $primary-color;
-    background: rgba($primary-color, 0.05);
-    border-radius: 0 $radius-sm $radius-sm 0;
+    border-left: 2px solid $ink;
+    background: $surface;
+    color: $ink-soft;
   }
 
   table {
@@ -77,13 +333,18 @@ code {
 
     th,
     td {
-      border: 1px solid $light-border;
+      border: 1px solid rgba(0, 0, 0, 0.6);
       padding: 8px 12px;
       text-align: left;
     }
 
     th {
-      background: rgba($primary-color, 0.1);
+      font-family: $font-sans;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      background: $surface;
     }
   }
 }

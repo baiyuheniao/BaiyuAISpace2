@@ -21,9 +21,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { NLayout, NLayoutContent, NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm } from "naive-ui";
+import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace } from "naive-ui";
 import { useChatStore } from "@/stores/chat";
-import { ChatbubblesOutline, TimeOutline, TrashOutline, EnterOutline } from "@vicons/ionicons5";
+import { ChatbubblesOutline, TrashOutline, EnterOutline } from "@vicons/ionicons5";
 
 // ============ 路由和状态管理 ============
 
@@ -119,23 +119,19 @@ onMounted(() => {
 
 <template>
   <!-- 历史记录主布局容器 -->
-  <n-layout class="history-view">
-    <!-- 历史记录内容区域 -->
-    <n-layout-content
-      :native-scrollbar="false"
-      class="history-content"
-    >
+  <div class="history-view">
+    <div class="history-content">
       <div class="history-container">
         <!-- 页面标题 -->
-        <h1 class="page-title">
-          <n-icon
-            :size="28"
-            style="margin-right: 12px;"
-          >
-            <TimeOutline />
-          </n-icon>
-          历史记录
-        </h1>
+        <header class="page-header enter-up">
+          <span class="eyebrow">History</span>
+          <h1 class="page-title">
+            历史记录
+          </h1>
+          <p class="page-desc">
+            所有对话会话的存档，点击任意条目继续对话。
+          </p>
+        </header>
 
         <!-- 加载状态 -->
         <div
@@ -271,37 +267,52 @@ onMounted(() => {
           </n-list-item>
         </n-list>
       </div>
-    </n-layout-content>
-  </n-layout>
+    </div>
+  </div>
 </template>
 
 <style scoped lang="scss">
 /* 历史记录主容器 */
 .history-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
-/* 内容区域 */
+/* 内容区域 - 承担滚动 */
 .history-content {
   height: 100%;
+  overflow-y: auto;
 }
 
-/* 内容容器 - 限制最大宽度并居中 */
+/* 内容容器 - 限制最大宽度并居中，大面积留白 */
 .history-container {
   max-width: 800px;
   margin: 0 auto;
-  padding: 40px 32px;
+  padding: 5rem 2rem 8rem;
+}
+
+/* 页面标题区域 */
+.page-header {
+  margin-bottom: 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
 /* 页面标题样式 */
 .page-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin-bottom: 32px;
-  display: flex;
-  align-items: center;
-  color: var(--n-text-color-1);
+  font-family: $font-serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
+}
+
+/* 页面描述 */
+.page-desc {
+  font-size: 0.95rem;
+  line-height: $leading-body;
+  color: $ink-soft;
 }
 
 /* 加载状态 - 垂直居中 */
@@ -326,29 +337,32 @@ onMounted(() => {
 /* 会话项样式 */
 .history-item {
   margin-bottom: 12px;
-  border-radius: $radius-lg;
-  background: var(--n-color-embed);
-  border: 1px solid transparent;
+  background: $bg;
+  border: $border-soft;
+  padding: 4px 8px;
   // 过渡动画效果
-  transition: all 0.2s ease;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease,
+    border-color $duration $ease;
   // 相对定位 (用于提示定位)
   position: relative;
   overflow: hidden;
 }
 
-/* 会话项悬停效果 */
+/* 会话项悬停效果: 上浮 + 黑色阴影 */
 .history-item:hover {
-  border-color: rgba(0, 0, 0, 0.2);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-  // 向右轻微移动
-  transform: translateX(4px);
+  border-color: $ink;
+  box-shadow: $shadow-hover;
+  transform: translateY(-4px);
 }
 
 /* 会话标题样式 */
 .session-title {
-  font-weight: 600;
+  font-family: $font-serif;
+  font-weight: 700;
   font-size: 15px;
-  color: var(--n-text-color-1);
+  color: $ink;
 }
 
 /* 会话元信息间距 */
@@ -374,6 +388,7 @@ onMounted(() => {
 /* 时间文字样式 */
 .time-text {
   font-size: 13px;
+  font-family: $font-mono;
   // 防止换行
   white-space: nowrap;
 }
@@ -396,8 +411,8 @@ onMounted(() => {
   top: 50%;
   transform: translateY(-50%);
   opacity: 0;
-  transition: opacity 0.2s;
-  color: var(--n-text-color-3);
+  transition: opacity $duration $ease;
+  color: $ink-faint;
 }
 
 /* 悬停时显示进入提示 */

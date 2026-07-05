@@ -551,15 +551,12 @@ onMounted(async () => {
     >
       <div class="local-deploy-container">
         <!-- 页面标题 -->
-        <h1 class="page-title">
-          <n-icon
-            :size="28"
-            style="margin-right: 12px;"
-          >
-            <HardwareChipOutline />
-          </n-icon>
-          本地部署
-        </h1>
+        <header class="page-header enter-up">
+          <span class="eyebrow">Local</span>
+          <h1 class="page-title">
+            本地部署
+          </h1>
+        </header>
 
         <!-- Ollama / LM Studio 切换标签 -->
         <n-tabs
@@ -664,7 +661,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="localModel.isOnline ? '#18a058' : '#d03050'"
+                    :color="localModel.isOnline ? '#000000' : '#888888'"
                   >
                     <HardwareChipOutline />
                   </n-icon>
@@ -1139,7 +1136,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="lmStudio.isOnline ? '#18a058' : '#d03050'"
+                    :color="lmStudio.isOnline ? '#000000' : '#888888'"
                   >
                     <HardwareChipOutline />
                   </n-icon>
@@ -1437,7 +1434,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="docker.isAvailable ? '#18a058' : docker.dockerStatus.installed ? '#f0a020' : '#d03050'"
+                    :color="docker.isAvailable ? '#000000' : docker.dockerStatus.installed ? '#444444' : '#888888'"
                   >
                     <CubeOutline />
                   </n-icon>
@@ -1571,7 +1568,7 @@ onMounted(async () => {
                 <div>
                   正在拉取镜像: {{ docker.pullingImage }}
                   <div
-                    style="margin-top: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.05); border-radius: 4px; padding: 6px;"
+                    style="margin-top: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 11px; background: #f5f5f5; border: 1px solid rgba(0,0,0,0.2); padding: 6px;"
                   >
                     <div
                       v-for="(line, idx) in docker.pullLogs.slice(-20)"
@@ -1729,7 +1726,7 @@ onMounted(async () => {
 /* 主容器 */
 .local-deploy-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
 /* 内容区域 */
@@ -1741,25 +1738,38 @@ onMounted(async () => {
 .local-deploy-container {
   max-width: 900px;
   margin: 0 auto;
-  padding: 40px 32px;
+  padding: 5rem 2rem 8rem;
 }
 
 /* 页面标题 */
-.page-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin-bottom: 32px;
+.page-header {
+  margin-bottom: 4rem;
   display: flex;
-  align-items: center;
-  color: var(--n-text-color-1);
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.page-title {
+  font-family: $font-serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
 }
 
 /* 卡片样式 */
 .settings-card {
   margin-bottom: 20px;
-  border-radius: $radius-xl;
-  background: var(--n-color-embed);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: $bg;
+  border: $border-soft;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: $shadow-hover;
+  }
 }
 
 /* 卡片头部 */
@@ -1776,14 +1786,14 @@ onMounted(async () => {
   .section-title {
     margin-bottom: 8px;
     padding-bottom: 4px;
-    border-bottom: 1px dashed var(--n-border-color);
+    border-bottom: 1px dashed rgba(0, 0, 0, 0.4);
   }
 }
 
 /* 搜索结果列表 */
 .search-result-list {
   .search-result-series {
-    background: var(--n-color-modal);
+    background: $surface;
   }
 
   .search-result-tag-row {

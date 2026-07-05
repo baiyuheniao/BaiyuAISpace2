@@ -821,15 +821,12 @@ const handleRemoveResourceFile = async (filename: string) => {
     >
       <div class="skills-container">
         <!-- 页面标题 -->
-        <h1 class="page-title">
-          <n-icon
-            :size="28"
-            style="margin-right: 12px"
-          >
-            <ExtensionPuzzleOutline />
-          </n-icon>
-          Skill
-        </h1>
+        <header class="page-header enter-up">
+          <span class="eyebrow">Skill</span>
+          <h1 class="page-title">
+            技能
+          </h1>
+        </header>
 
         <!-- Skill 列表卡片 -->
         <n-card
@@ -1212,7 +1209,7 @@ const handleRemoveResourceFile = async (filename: string) => {
 <style scoped lang="scss">
 .skills-view {
   height: 100%;
-  background: var(--n-color);
+  background: $bg;
 }
 
 .skills-content {
@@ -1222,23 +1219,36 @@ const handleRemoveResourceFile = async (filename: string) => {
 .skills-container {
   max-width: 900px;
   margin: 0 auto;
-  padding: 40px 32px;
+  padding: 5rem 2rem 8rem;
+}
+
+.page-header {
+  margin-bottom: 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
 .page-title {
-  font-size: 28px;
-  font-weight: 600;
-  margin-bottom: 32px;
-  display: flex;
-  align-items: center;
-  color: var(--n-text-color-1);
+  font-family: $font-serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
 }
 
 .settings-card {
   margin-bottom: 20px;
-  border-radius: $radius-xl;
-  background: var(--n-color-embed);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  background: $bg;
+  border: $border-soft;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
+
+  &:hover {
+    transform: translateY(-4px);
+    box-shadow: $shadow-hover;
+  }
 }
 
 .card-header {
@@ -1260,15 +1270,16 @@ const handleRemoveResourceFile = async (filename: string) => {
 }
 
 .preset-name {
+  font-family: $font-serif;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   margin-bottom: 6px;
-  color: var(--n-text-color);
+  color: $ink;
 }
 
 .preset-desc {
   font-size: 12px;
-  color: var(--n-text-color-3);
-  line-height: 1.5;
+  color: $ink-faint;
+  line-height: $leading-body;
 }
 </style>

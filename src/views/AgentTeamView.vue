@@ -21,7 +21,7 @@ import {
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
   NTag, NTimeline, NTimelineItem, NPopconfirm, useMessage,
 } from "naive-ui";
-import { Add, TrashOutline, EnterOutline, PeopleOutline, AlarmOutline } from "@vicons/ionicons5";
+import { Add, TrashOutline, EnterOutline, AlarmOutline } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
 import { useWorkspaceStore, type AgentProposalEvent, type AgentStatus, type CreateAgentRequest, type WorkspaceLogEntry } from "@/stores/workspace";
@@ -343,10 +343,10 @@ onMounted(async () => {
 
 <template>
   <div class="agent-team-view">
-    <div class="page-header">
+    <div class="page-header enter-up">
       <div class="header-left">
-        <n-icon :size="24"><PeopleOutline /></n-icon>
-        <h1 class="page-title">Agent Team</h1>
+        <span class="eyebrow">Agents</span>
+        <h1 class="page-title">协作团队</h1>
       </div>
       <n-space>
         <n-select
@@ -574,28 +574,33 @@ onMounted(async () => {
 <style scoped lang="scss">
 .agent-team-view {
   height: 100%;
-  padding: 24px;
+  padding: 3rem 2.5rem 8rem;
   overflow-y: auto;
-  background: var(--n-color);
+  background: $bg;
 }
 
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 3rem;
+  padding-bottom: 1.5rem;
+  border-bottom: $border;
 }
 
 .header-left {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
 }
 
 .page-title {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--n-text-color-1);
+  font-family: $font-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: $leading-display;
+  color: $ink;
 }
 
 .pending-section {
@@ -606,7 +611,7 @@ onMounted(async () => {
 }
 
 .pending-card {
-  border-left: 3px solid var(--n-warning-color);
+  border-left: 2px solid $ink;
 }
 
 .main-grid {
@@ -631,7 +636,7 @@ onMounted(async () => {
 }
 
 .agent-list :deep(.n-list-item.selected) {
-  background: var(--n-color-embed);
+  background: $surface;
 }
 
 .message-scroll {

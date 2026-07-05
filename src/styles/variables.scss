@@ -2,33 +2,71 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-// Colors
-$primary-color: #18a058;
-$primary-color-hover: #36ad6a;
-$primary-color-pressed: #0c7a43;
+// ============================================================
+// 黑白编辑设计系统 · Monochrome Editorial Design System
+// 氛围：克制、优雅、精确、瑞士国际主义、技术人文
+// ============================================================
 
-// Dark mode colors
-$dark-bg: #101014;
-$dark-card: #18181c;
-$dark-border: #ffffff10;
+// ---------- 配色（纯黑白，无任何彩色） ----------
+$bg: #ffffff;            // 背景
+$ink: #000000;           // 主文本
+$ink-soft: #444444;      // 辅助文本（柔和）
+$ink-faint: #888888;     // 辅助文本（微弱）
+$surface: #f5f5f5;       // 表面层
+$line: #000000;          // 边框线
 
-// Light mode colors
-$light-bg: #f5f5f5;
-$light-card: #ffffff;
-$light-border: #e0e0e6;
+$border: 1px solid $line;
+$border-soft: 1px solid rgba(0, 0, 0, 0.6);
+$border-faint: 1px solid rgba(0, 0, 0, 0.4);
 
-// Transitions
-$transition-duration: 0.3s;
-$transition-timing: ease-in-out;
+// ---------- 字体 ----------
+// 中文标题：Noto Serif SC（衬线，人文优雅）
+// 英文与正文：Inter（无衬线，现代干净）
+$font-serif: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", "SimSun", serif;
+$font-sans: "Inter Variable", "Inter", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+$font-mono: "JetBrains Mono", "Fira Code", "Consolas", monospace;
 
-// Border Radius
-$radius-sm: 4px;
-$radius-md: 8px;
-$radius-lg: 12px;
-$radius-xl: 16px;
-$radius-pill: 20px;
+// ---------- 动效 ----------
+// 核心缓动曲线：拒绝 linear 与 ease-in-out 的粗暴过渡
+$ease: cubic-bezier(0.22, 1, 0.36, 1);
+$duration: 0.5s;
+$duration-fast: 0.3s;
+$duration-slow: 0.9s;
 
-// Layout
+// 悬浮反馈阴影（纯黑低透明度）
+$shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.08);
+
+// ---------- 排版 ----------
+$section-pad: 8rem;          // 区块留白起步
+$leading-display: 1.15;      // 展示标题行高
+$leading-body: 1.65;         // 正文行高
+$label-size: 0.75rem;        // eyebrow label 字号
+$label-tracking: 0.15em;     // eyebrow label 字间距
+
+// ---------- 布局 ----------
 $sidebar-width: 260px;
 $header-height: 60px;
 $chat-input-height: 120px;
+
+// ---------- 兼容别名（旧代码引用，逐步清退） ----------
+$primary-color: $ink;
+$primary-color-hover: $ink-soft;
+$primary-color-pressed: $ink;
+
+$dark-bg: $bg;
+$dark-card: $surface;
+$dark-border: rgba(0, 0, 0, 0.4);
+
+$light-bg: $bg;
+$light-card: $bg;
+$light-border: $line;
+
+$transition-duration: $duration;
+$transition-timing: $ease;
+
+// 黑白系统一律直角
+$radius-sm: 0;
+$radius-md: 0;
+$radius-lg: 0;
+$radius-xl: 0;
+$radius-pill: 0;

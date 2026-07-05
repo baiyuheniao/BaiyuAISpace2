@@ -631,7 +631,7 @@ const getDocDisplayName = (name: string): string => {
                 <n-badge
                   v-if="chat.mcpEnabled && enabledMcpServersCount > 0"
                   :value="availableMcpToolsCount"
-                  color="warning"
+                  color="#000000"
                 >
                   <n-icon><Cube /></n-icon>
                 </n-badge>
@@ -689,7 +689,7 @@ const getDocDisplayName = (name: string): string => {
                 <n-badge
                   v-if="activeSkillNames.length > 0"
                   :value="activeSkillNames.length"
-                  color="info"
+                  color="#000000"
                 >
                   <n-icon><ExtensionPuzzleOutline /></n-icon>
                 </n-badge>
@@ -1073,17 +1073,17 @@ const getDocDisplayName = (name: string): string => {
   display: flex;
   gap: 12px;
   align-items: flex-end;
-  background: var(--n-color-embed);
-  border-radius: $radius-pill;
+  background: $bg;
   padding: 12px 16px;
-  border: 1px solid var(--n-border-color);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  transition: all 0.2s ease;
+  border: $border;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
 }
 
 .input-container:focus-within {
-  border-color: rgba(0, 0, 0, 0.3);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  transform: translateY(-4px);
+  box-shadow: $shadow-hover;
 }
 
 .input-box {
@@ -1099,16 +1099,16 @@ const getDocDisplayName = (name: string): string => {
   padding: 10px 12px;
   border: none;
   background: transparent;
-  color: var(--n-text-color-1);
+  color: $ink;
   font-size: 15px;
-  line-height: 1.6;
+  line-height: $leading-body;
   resize: none;
   font-family: inherit;
   outline: none;
 }
 
 .chat-input::placeholder {
-  color: var(--n-text-color-3);
+  color: $ink-faint;
 }
 
 .chat-input:disabled {
@@ -1132,13 +1132,14 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .send-btn {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  transition: all 0.2s;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
 }
 
 .send-btn:not(:disabled):hover {
-  transform: scale(1.05);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+  transform: translateY(-4px);
+  box-shadow: $shadow-hover;
 }
 
 .send-btn:disabled {
@@ -1151,12 +1152,23 @@ const getDocDisplayName = (name: string): string => {
   left: 32px;
   right: 32px;
   margin-bottom: 8px;
-  background: var(--n-color);
-  border: 1px solid var(--n-border-color);
-  border-radius: $radius-lg;
+  background: $bg;
+  border: $border;
   padding: 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  box-shadow: $shadow-hover;
   z-index: 100;
+  animation: message-enter $duration $ease both;
+}
+
+@keyframes message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(40px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .api-selector {
@@ -1203,7 +1215,7 @@ const getDocDisplayName = (name: string): string => {
 
 .rag-text {
   font-size: 12px;
-  color: var(--n-text-color-1);
+  color: $ink;
 }
 
 .attached-files {
@@ -1213,7 +1225,7 @@ const getDocDisplayName = (name: string): string => {
 
 .files-label {
   font-size: 12px;
-  color: var(--n-text-color-3);
+  color: $ink-faint;
   margin-bottom: 6px;
 }
 

@@ -36,7 +36,8 @@ import DOMPurify from "dompurify";
 
 // 导入代码高亮库
 import hljs from "highlight.js";
-import "highlight.js/styles/github-dark.css";
+// 灰度高亮主题，契合黑白设计系统
+import "highlight.js/styles/grayscale.css";
 
 // 导入 Mermaid 图表库
 import mermaid from "mermaid";
@@ -57,9 +58,10 @@ const props = defineProps<{
 
 mermaid.initialize({
   startOnLoad: false,
-  theme: "dark",
+  // neutral 主题为灰度配色，契合黑白设计系统
+  theme: "neutral",
   securityLevel: "loose",
-  fontFamily: "system-ui, sans-serif",
+  fontFamily: '"Inter Variable", "Inter", system-ui, sans-serif',
 });
 
 // DOMPurify 默认的 URI 安全校验会把 srcdoc 这种"值不是 URL 而是一整段
@@ -391,17 +393,18 @@ const handleCopy = async () => {
   display: flex;
   gap: 16px;
   padding: 20px 0;
-  animation: fadeIn 0.3s ease;
+  animation: message-enter $duration-slow $ease both;
 }
 
-@keyframes fadeIn {
+// 入场: opacity 0→1 + translateY(40px)→0 + scale(0.95)→1
+@keyframes message-enter {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(40px) scale(0.95);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -422,13 +425,14 @@ const handleCopy = async () => {
 }
 
 .user-avatar {
-  background: #000000;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  background: $ink;
+  color: $bg;
 }
 
 .ai-avatar {
-  background: #333333;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  background: $bg;
+  color: $ink;
+  border: $border;
 }
 
 .message-content {
@@ -448,38 +452,40 @@ const handleCopy = async () => {
 }
 
 .message-author {
-  font-weight: 600;
-  color: var(--n-text-color-1);
+  font-family: $font-serif;
+  font-weight: 700;
+  color: $ink;
 }
 
 .message-time {
-  color: var(--n-text-color-3);
+  color: $ink-faint;
   font-size: 12px;
+  font-family: $font-mono;
 }
 
 .message-body {
   padding: 16px 20px;
-  background: var(--n-color-embed);
-  border-radius: $radius-xl;
-  border-bottom-left-radius: $radius-sm;
+  background: $bg;
+  border: $border-soft;
   word-break: break-word;
-  line-height: 1.7;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition: box-shadow 0.2s;
+  line-height: $leading-body;
+  transition:
+    transform $duration $ease,
+    box-shadow $duration $ease;
 }
 
 .message-body:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  transform: translateY(-4px);
+  box-shadow: $shadow-hover;
 }
 
 .message-body.user-body {
-  background: rgba(0, 0, 0, 0.05);
-  border-bottom-left-radius: $radius-xl;
-  border-bottom-right-radius: $radius-sm;
+  background: $surface;
+  border: $border;
 }
 
 .markdown-content {
-  color: var(--n-text-color-1);
+  color: $ink;
 }
 
 .markdown-content :deep(p) {
@@ -492,8 +498,7 @@ const handleCopy = async () => {
 
 /* ===== HTML 预览块 ===== */
 .markdown-content :deep(.html-preview-block) {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: $radius-lg;
+  border: $border-soft;
   overflow: hidden;
   margin: 12px 0;
 
@@ -502,32 +507,32 @@ const handleCopy = async () => {
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
-    background: #252535;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: $surface;
+    border-bottom: $border-faint;
     user-select: none;
   }
 
   .html-preview-toggle {
     font-size: 12px;
     padding: 3px 10px;
-    border-radius: $radius-sm;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(0, 0, 0, 0.6);
     background: transparent;
-    color: #a6adc8;
+    color: $ink-soft;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition: background $duration $ease, color $duration $ease;
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
-      color: #cdd6f4;
+      background: $ink;
+      color: $bg;
     }
   }
 
   .html-lang-badge {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.3);
-    font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
-    letter-spacing: 0.04em;
+    color: $ink-faint;
+    font-family: $font-mono;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   /* 源码视图：pre 撑满，iframe 隐藏 */
@@ -555,8 +560,7 @@ const handleCopy = async () => {
 
 /* ===== Mermaid 预览块 ===== */
 .markdown-content :deep(.mermaid-preview-block) {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: $radius-lg;
+  border: $border-soft;
   overflow: hidden;
   margin: 12px 0;
 
@@ -565,32 +569,32 @@ const handleCopy = async () => {
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
-    background: #252535;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: $surface;
+    border-bottom: $border-faint;
     user-select: none;
   }
 
   .mermaid-toggle {
     font-size: 12px;
     padding: 3px 10px;
-    border-radius: $radius-sm;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(0, 0, 0, 0.6);
     background: transparent;
-    color: #a6adc8;
+    color: $ink-soft;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition: background $duration $ease, color $duration $ease;
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
-      color: #cdd6f4;
+      background: $ink;
+      color: $bg;
     }
   }
 
   .mermaid-lang-badge {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.3);
-    font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
-    letter-spacing: 0.04em;
+    color: $ink-faint;
+    font-family: $font-mono;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   /* 源码 pre 默认隐藏（diagram 模式） */
@@ -608,7 +612,7 @@ const handleCopy = async () => {
     align-items: center;
     min-height: 80px;
     padding: 20px;
-    background: #1a1b26;
+    background: $bg;
 
     svg {
       max-width: 100%;
@@ -617,7 +621,7 @@ const handleCopy = async () => {
   }
 
   .mermaid-error {
-    color: #f38ba8;
+    color: $ink;
     font-size: 12px;
     padding: 0;
     background: transparent;
@@ -634,30 +638,29 @@ const handleCopy = async () => {
 }
 
 .markdown-content :deep(pre) {
-  background: #1e1e2e;
-  border-radius: $radius-lg;
+  background: $surface;
   padding: 16px;
   margin: 12px 0;
   overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: $border-faint;
 }
 
 .markdown-content :deep(code) {
-  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-family: $font-mono;
   font-size: 0.9em;
 }
 
 .markdown-content :deep(pre code) {
   background: transparent;
   padding: 0;
-  color: #cdd6f4;
+  color: $ink;
 }
 
 .markdown-content :deep(:not(pre) > code) {
-  background: rgba(128, 128, 128, 0.15);
+  background: $surface;
   padding: 3px 6px;
-  border-radius: $radius-sm;
-  color: var(--n-text-color-1);
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  color: $ink;
 }
 
 .markdown-content :deep(ul),
@@ -673,33 +676,35 @@ const handleCopy = async () => {
 .markdown-content :deep(blockquote) {
   margin: 12px 0;
   padding: 12px 16px;
-  border-left: 4px solid #000000;
-  background: rgba(0, 0, 0, 0.04);
-  border-radius: 0 $radius-md $radius-md 0;
+  border-left: 2px solid $ink;
+  background: $surface;
+  color: $ink-soft;
 }
 
 .markdown-content :deep(table) {
   width: 100%;
   border-collapse: collapse;
   margin: 12px 0;
-  border-radius: $radius-md;
   overflow: hidden;
 }
 
 .markdown-content :deep(th),
 .markdown-content :deep(td) {
-  border: 1px solid var(--n-border-color);
+  border: 1px solid rgba(0, 0, 0, 0.6);
   padding: 10px 14px;
   text-align: left;
 }
 
 .markdown-content :deep(th) {
-  background: rgba(24, 160, 88, 0.1);
+  background: $surface;
   font-weight: 600;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .markdown-content :deep(tr:nth-child(even)) {
-  background: var(--n-color-embed);
+  background: $surface;
 }
 
 .streaming-indicator {
@@ -708,8 +713,8 @@ const handleCopy = async () => {
   gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px dashed var(--n-border-color);
-  color: var(--n-text-color-3);
+  border-top: 1px dashed rgba(0, 0, 0, 0.4);
+  color: $ink-faint;
   font-size: 13px;
 }
 
@@ -735,21 +740,22 @@ const handleCopy = async () => {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: none;
-  border-radius: $radius-sm;
-  background: transparent;
-  color: var(--n-text-color-3);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  background: $bg;
+  color: $ink-soft;
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    background $duration $ease,
+    color $duration $ease;
 }
 
 .streaming-text {
-  color: var(--n-text-color-3);
+  color: $ink-faint;
   font-size: 13px;
 }
 
 .action-btn:hover {
-  background: var(--n-color-embed);
-  color: var(--n-text-color-1);
+  background: $ink;
+  color: $bg;
 }
 </style>

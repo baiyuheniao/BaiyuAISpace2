@@ -11,7 +11,7 @@ import {
   NRadioGroup, NRadio, NSwitch, NDatePicker, NTimePicker,
   NSpace, NPopconfirm, useMessage,
 } from "naive-ui";
-import { Add, AlarmOutline, TrashOutline } from "@vicons/ionicons5";
+import { Add, TrashOutline } from "@vicons/ionicons5";
 
 import { useSchedulerStore, type CreateScheduleRequest, type Schedule } from "@/stores/scheduler";
 import { useWorkspaceStore, type WorkspaceAgent } from "@/stores/workspace";
@@ -168,9 +168,9 @@ const handleDelete = async (id: string) => {
 
 <template>
   <div class="scheduler-view">
-    <div class="page-header">
+    <div class="page-header enter-up">
       <div class="page-title-row">
-        <n-icon size="24" style="color: var(--n-primary-color)"><AlarmOutline /></n-icon>
+        <span class="eyebrow">Cron</span>
         <h1 class="page-title">定时任务</h1>
       </div>
       <n-space align="center">
@@ -278,31 +278,39 @@ const handleDelete = async (id: string) => {
 <style scoped lang="scss">
 .scheduler-view {
   height: 100%;
-  padding: 24px;
+  padding: 3rem 2.5rem 8rem;
   box-sizing: border-box;
   overflow-y: auto;
+  background: $bg;
 }
 
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 3rem;
+  padding-bottom: 1.5rem;
+  border-bottom: $border;
 }
 
 .page-title-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
 }
 
 .page-title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 600;
+  font-family: $font-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: $leading-display;
 }
 
 .list-card {
+  border: $border-soft;
+
   :deep(.n-card__content) {
     padding: 0;
   }
