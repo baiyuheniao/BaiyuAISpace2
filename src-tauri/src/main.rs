@@ -38,10 +38,22 @@ use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingMeetingTurns, init_workspace_tables};
 use scheduler::init_scheduler_tables;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::path::PathBuf;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio::sync::Mutex;
+
+// 关闭窗口时是否最小化到托盘（而非直接退出进程）。
+// 由前端设置页通过 set_close_to_tray 命令同步，默认最小化到托盘。
+struct CloseToTrayState(Arc<AtomicBool>);
+
+// 从托盘唤起主窗口的全局快捷键，默认 Ctrl+Alt+Space，可在设置页修改。
+const DEFAULT_SHOW_HOTKEY: &str = "Ctrl+Alt+Space";
+struct ShowHotkeyState(StdMutex<String>);
 
 // 进程实际在写的日志文件路径——只在 init_logging() 里算一次。
 // 不能让 get_log_path/read_log_file/copy_log_file 各自用"现在的日期"重新拼文件名：
@@ -133,6 +145,36 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         // 注册对话框插件 (用于文件选择)
         .plugin(tauri_plugin_dialog::init())
+        // 注册全局快捷键插件：用于从托盘唤起主窗口
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(),
+        )
+        // 关闭窗口时按设置决定：最小化到托盘 或 真正退出
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let close_to_tray = window
+                    .state::<CloseToTrayState>()
+                    .0
+                    .load(Ordering::Relaxed);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         // 注册命令处理器
         .invoke_handler(tauri::generate_handler![
             // LLM 相关命令
@@ -229,6 +271,11 @@ fn main() {
             get_log_path,
             read_log_file,
             copy_log_file,
+            // 系统托盘相关命令
+            set_close_to_tray,
+            get_close_to_tray,
+            set_show_hotkey,
+            get_show_hotkey,
         ])
         // 应用初始化设置
         .setup(move |app| {
@@ -296,7 +343,58 @@ fn main() {
             app.manage(PendingSleepRequests::default());
             app.manage(PendingQuestions::default());
             app.manage(PendingMeetingTurns::default());
+            app.manage(CloseToTrayState(Arc::new(AtomicBool::new(true))));
             log::info!("Database and vector store initialized");
+
+            // 注册默认的托盘唤起快捷键（前端设置页会在启动时同步实际保存的值）
+            if let Err(e) = app.global_shortcut().register(DEFAULT_SHOW_HOTKEY) {
+                log::warn!("Failed to register default show-hotkey: {}", e);
+            }
+            app.manage(ShowHotkeyState(StdMutex::new(DEFAULT_SHOW_HOTKEY.to_string())));
+
+            // 系统托盘图标：左键点击/菜单“显示主界面”唤回窗口，菜单“退出程序”真正结束进程
+            {
+                let show_item = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
+                let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+                let mut tray_builder = TrayIconBuilder::new()
+                    .tooltip("BaiyuAISpace")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    tray_builder = tray_builder.icon(icon.clone());
+                }
+                tray_builder.build(app)?;
+            }
 
             // 启动定时任务调度循环
             {
@@ -392,6 +490,40 @@ fn read_log_file() -> Result<String, String> {
     } else {
         Err("无法获取日志目录".to_string())
     }
+}
+
+#[tauri::command]
+fn set_close_to_tray(enabled: bool, state: tauri::State<CloseToTrayState>) {
+    state.0.store(enabled, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn get_close_to_tray(state: tauri::State<CloseToTrayState>) -> bool {
+    state.0.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+fn set_show_hotkey(
+    accelerator: String,
+    app: tauri::AppHandle,
+    state: tauri::State<ShowHotkeyState>,
+) -> Result<(), String> {
+    let mut current = state.0.lock().map_err(|e| e.to_string())?;
+    if *current == accelerator {
+        return Ok(());
+    }
+    // 先注册新快捷键，成功后再解绑旧的——避免注册失败时把原有快捷键也丢了
+    app.global_shortcut()
+        .register(accelerator.as_str())
+        .map_err(|e| e.to_string())?;
+    let _ = app.global_shortcut().unregister(current.as_str());
+    *current = accelerator;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_show_hotkey(state: tauri::State<ShowHotkeyState>) -> Result<String, String> {
+    state.0.lock().map(|s| s.clone()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

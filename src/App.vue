@@ -197,6 +197,10 @@ const settings = useSettingsStore();
 onMounted(async () => {
   // 从安全存储加载所有 API 密钥
   await settings.loadAllApiKeys();
+  // 把当前的“关闭按钮行为”设置同步给后端（后端只在启动时给了默认值）
+  await settings.syncCloseToTray();
+  // 把当前的托盘唤起快捷键同步给后端注册（后端启动时只注册了默认值）
+  await settings.syncShowHotkey();
 });
 </script>
 

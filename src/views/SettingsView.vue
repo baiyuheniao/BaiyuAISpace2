@@ -20,7 +20,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { 
@@ -34,6 +34,7 @@ import {
   NInputNumber,
   NButton,
   NSpace,
+  NSwitch,
   NList,
   NListItem,
   NThing,
@@ -62,6 +63,7 @@ import {
   CheckmarkCircle,
   LinkOutline,
   CubeOutline,
+  SettingsOutline,
 } from "@vicons/ionicons5";
 
 // ============ 状态管理 ============
@@ -483,6 +485,92 @@ const handleRerankerDelete = (configId: string) => {
   message.success("Reranker 配置已删除");
 };
 
+// ============ 通用设置 ============
+
+/**
+ * 切换“关闭窗口时最小化到系统托盘”开关
+ * 同时把设置同步给 Rust 后端（窗口关闭事件在后端拦截）
+ */
+const handleCloseToTrayChange = async (enabled: boolean) => {
+  await settings.setCloseToTray(enabled);
+  message.success(enabled ? "已开启：关闭窗口将最小化到托盘" : "已关闭：关闭窗口将直接退出程序");
+};
+
+// ============ 托盘唤起快捷键录制 ============
+
+/** 是否正在录制快捷键 */
+const recordingHotkey = ref(false);
+
+/** 键盘事件 code 中纯修饰键的集合——录制时忽略，等待用户按下真正的主键 */
+const MODIFIER_CODES = new Set([
+  "ControlLeft", "ControlRight",
+  "AltLeft", "AltRight",
+  "ShiftLeft", "ShiftRight",
+  "MetaLeft", "MetaRight",
+]);
+
+/** 把 KeyboardEvent.code 转成更易读的主键名（KeyA -> A，Digit1 -> 1，其余原样） */
+const formatMainKey = (code: string): string => {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  return code;
+};
+
+let hotkeyRecordListener: ((e: KeyboardEvent) => void) | null = null;
+
+const stopRecordingHotkey = () => {
+  if (hotkeyRecordListener) {
+    window.removeEventListener("keydown", hotkeyRecordListener, true);
+    hotkeyRecordListener = null;
+  }
+  recordingHotkey.value = false;
+};
+
+const startRecordingHotkey = () => {
+  if (recordingHotkey.value) return;
+  recordingHotkey.value = true;
+
+  hotkeyRecordListener = async (e: KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.key === "Escape") {
+      stopRecordingHotkey();
+      return;
+    }
+
+    // 纯修饰键还没构成完整组合，继续等待主键
+    if (MODIFIER_CODES.has(e.code)) return;
+
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    if (e.metaKey) mods.push("Super");
+
+    if (mods.length === 0) {
+      message.warning("请至少搭配一个修饰键（Ctrl / Alt / Shift），避免和普通按键冲突");
+      return;
+    }
+
+    const accelerator = [...mods, formatMainKey(e.code)].join("+");
+    stopRecordingHotkey();
+
+    try {
+      await settings.setShowHotkey(accelerator);
+      message.success(`唤起快捷键已设置为 ${accelerator}`);
+    } catch (error) {
+      message.error(`设置快捷键失败（可能已被其他程序占用）：${error}`);
+    }
+  };
+
+  window.addEventListener("keydown", hotkeyRecordListener, true);
+};
+
+onBeforeUnmount(() => {
+  stopRecordingHotkey();
+});
+
 // ============ 计算属性 ============
 
 /**
@@ -865,6 +953,67 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               Reranker 用于对 RAG 检索结果进行二次精排，兼容 Cohere / Jina / Voyage 等 API 格式
             </n-text>
           </template>
+        </n-card>
+
+        <!-- 通用设置卡片 -->
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
+          <template #header>
+            <div class="card-header">
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <SettingsOutline />
+              </n-icon>
+              <span>通用设置</span>
+            </div>
+          </template>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">关闭窗口时最小化到系统托盘</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                开启后，点击窗口右上角的关闭按钮只会隐藏窗口，程序继续在系统托盘运行；需从托盘图标菜单选择“退出程序”才会真正结束。关闭后，点击关闭按钮将直接退出程序。
+              </n-text>
+            </div>
+            <n-switch
+              :value="settings.closeToTray"
+              @update:value="handleCloseToTrayChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">从托盘唤起窗口的快捷键</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                在任意界面按下该组合键，即可把最小化到托盘的窗口唤回桌面。点击右侧按钮后按下新的组合键即可修改，按 Esc 取消录制。
+              </n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="12"
+            >
+              <n-tag size="medium">
+                {{ settings.showHotkey }}
+              </n-tag>
+              <n-button
+                size="small"
+                :type="recordingHotkey ? 'warning' : 'default'"
+                @click="startRecordingHotkey"
+              >
+                {{ recordingHotkey ? '请按下组合键…' : '修改快捷键' }}
+              </n-button>
+            </n-space>
+          </div>
         </n-card>
 
         <!-- 关于卡片 -->
@@ -1480,6 +1629,30 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   .n-button {
     margin-left: auto;
   }
+}
+
+/* 通用设置项 */
+.general-setting-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.general-setting-item + .general-setting-item {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.general-setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.general-setting-label {
+  font-weight: 600;
 }
 
 </style>

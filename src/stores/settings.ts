@@ -182,6 +182,44 @@ export const useSettingsStore = defineStore(
       }
     };
 
+    // ============ 系统托盘相关状态 ============
+
+    // 关闭窗口按钮的行为：true = 最小化到系统托盘，false = 直接退出程序
+    const closeToTray = ref(true);
+
+    // 设置关闭按钮行为，并同步给 Rust 后端（窗口关闭事件在后端拦截，需要后端知道当前设置）
+    const setCloseToTray = async (enabled: boolean) => {
+      closeToTray.value = enabled;
+      await syncCloseToTray();
+    };
+
+    // 将当前 closeToTray 值同步给后端（应用启动时调用一次，之后每次修改再调用）
+    const syncCloseToTray = async () => {
+      try {
+        await invoke("set_close_to_tray", { enabled: closeToTray.value });
+      } catch (error) {
+        console.error("Failed to sync close-to-tray setting:", error);
+      }
+    };
+
+    // 从托盘唤起主窗口的全局快捷键（Tauri accelerator 格式，如 "Ctrl+Alt+Space"）
+    const showHotkey = ref("Ctrl+Alt+Space");
+
+    // 设置唤起快捷键，并同步给后端注册（失败会抛出，调用方需自行提示用户）
+    const setShowHotkey = async (accelerator: string) => {
+      await invoke("set_show_hotkey", { accelerator });
+      showHotkey.value = accelerator;
+    };
+
+    // 将当前 showHotkey 值同步给后端（应用启动时调用一次）
+    const syncShowHotkey = async () => {
+      try {
+        await invoke("set_show_hotkey", { accelerator: showHotkey.value });
+      } catch (error) {
+        console.error("Failed to sync show-hotkey setting:", error);
+      }
+    };
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -519,6 +557,12 @@ export const useSettingsStore = defineStore(
       darkMode,
       toggleTheme,
       initTheme,
+      closeToTray,
+      setCloseToTray,
+      syncCloseToTray,
+      showHotkey,
+      setShowHotkey,
+      syncShowHotkey,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -554,7 +598,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
     },
   }
 );
