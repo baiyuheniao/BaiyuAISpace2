@@ -12,7 +12,7 @@
  * - 会话和消息管理
  */
 
-use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT};
+use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT, LLM_STREAM_READ_TIMEOUT};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
@@ -591,6 +591,16 @@ fn create_http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// 流式请求专用：`timeout()` 是含读完整个响应体的总时长，SSE 长回复会被
+/// 中途掐断（表现为 "Stream error: error decoding response body"），
+/// 因此这里只设读间隔超时，流只要还在吐数据就不会被断开。
+fn create_streaming_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .read_timeout(LLM_STREAM_READ_TIMEOUT)
+        .connect_timeout(LLM_CONNECT_TIMEOUT)
+        .build()
+}
+
 fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -958,7 +968,7 @@ pub async fn stream_message(
         return Err(LLMError::ApiError("Invalid target URL".to_string()));
     }
 
-    let client = create_http_client()?;
+    let client = create_streaming_http_client()?;
     let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking, request.max_tokens);
     append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);

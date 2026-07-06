@@ -179,6 +179,15 @@ fn create_ollama_client(_base_url: &str) -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// 流式下载专用（模型拉取等）：总超时会在下载超过设定时长时把还在
+/// 正常传输的连接掐断，因此只设读间隔超时——断流才算失败。
+fn create_download_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .read_timeout(crate::commands::constants::DOWNLOAD_READ_TIMEOUT)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+}
+
 /// Build Ollama API URL from base URL and endpoint
 fn build_ollama_url(base_url: &str, endpoint: &str) -> String {
     let base = base_url.trim_end_matches('/');
@@ -292,7 +301,7 @@ pub async fn pull_local_model(
     ollama_base_url: String,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    let client = create_ollama_client(&ollama_base_url)
+    let client = create_download_client()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/pull");
@@ -837,7 +846,7 @@ pub async fn download_ollama(
     });
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(600))
+        .read_timeout(crate::commands::constants::DOWNLOAD_READ_TIMEOUT)
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;

@@ -17,7 +17,7 @@
  * - HTTP: HTTP API
  */
 
-use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT};
+use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT, MCP_TOOL_CALL_TIMEOUT};
 use crate::db::DbState;
 use std::collections::HashMap;
 use std::path::Path;
@@ -728,7 +728,7 @@ async fn call_mcp_tool_stdio(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     // Read first line (should be the JSON response)
-    let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
+    let response_line = tokio::time::timeout(MCP_TOOL_CALL_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| MCPError::CommunicationError("Tool execution timeout".to_string()))?
         .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
