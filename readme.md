@@ -46,38 +46,48 @@
 
 ### 对话 & 模型接入
 
-- [x] **多源 LLM 接入**：OpenAI、Claude、Kimi 等 15+ 提供商统一接口
+- [x] **多源 LLM 接入**：OpenAI、Claude、Gemini、Kimi、DeepSeek 等 15+ 提供商统一接口
 - [x] **本地模型**：支持 Ollama 和 LM Studio（OpenAI 兼容接口），无需云端
-- [x] **流式输出**：实时打字机效果、支持中断
-- [x] **精美聊天界面**：Markdown 渲染、代码高亮、深色模式
-- [x] **会话管理**：历史记录浏览、会话永久保存
+- [x] **流式输出**：实时打字机效果、支持中断（后端 CancellationToken 真取消）
+- [x] **多模态输入**：图片（JPEG/PNG/GIF/WebP，多 provider）、视频（MP4/WebM/MPEG，仅 Gemini）
+- [x] **文档上下文注入**：PDF / Word / Excel / PPT / Markdown / 代码文件直接附加进对话，无需建知识库
+- [x] **思考模式**：一键开关 Extended Thinking（Anthropic 自适应/预算、Gemini thinkingBudget、SiliconFlow Qwen3）
+- [x] **Prompt Caching**：Anthropic 请求自动打 cache_control 断点，长对话省钱提速
+- [x] **消息渲染**：Markdown、代码高亮（grayscale 主题）、Mermaid 图表、HTML 代码块沙箱 iframe 实时预览、DOMPurify XSS 防护
+- [x] **会话管理**：历史记录浏览、会话永久保存、会话内随时切换 API 配置
+- [x] **自定义 Max Tokens**：每个 API 配置可单独设置最大输出 token
 
 ### RAG / 知识库
 
-- [x] **文档导入**：TXT / PDF / Markdown 等格式
-- [x] **向量化检索**：本地 Embedding，混合检索（向量 + 关键词）
+- [x] **文档导入**：PDF / Word (.docx) / PowerPoint (.pptx) / Excel (.xlsx/.xls/.csv) / Markdown / HTML / TXT / 常见代码文件
+- [x] **向量化检索**：可配置 Embedding API，混合检索（向量 + 关键词）
+- [x] **Reranker 精排**：可选 Cohere 兼容 Rerank API 对检索结果二次排序
+- [x] **检索调参**：分块大小 / 重叠、Top-K 结果数均可配置
 - [x] **知识库挂接**：可在对话中或 Agent 中动态引用
 
 ### MCP 工具
 
-- [x] **多服务器管理**：Stdio / HTTP 两种协议
-- [x] **工具自动发现**：启动时枚举，LLM 函数调用透明代理
-- [x] **预设一键安装**：内置浏览器自动化、文件系统等常用预设
+- [x] **多服务器管理**：Stdio / HTTP / SSE 三种协议
+- [x] **工具自动发现**：启动时枚举，LLM 原生函数调用透明代理（支持多轮工具循环）
+- [x] **预设一键安装**：内置文件系统、记忆、网页抓取、Playwright 浏览器自动化、时间、Git、Office（Word/PPT/Excel）等 10 个预设
 
 ### Skill
 
-- [x] **自定义 Skill**：名称 + 描述 + 指令三段式定义，绑定 MCP 服务器和知识库
+- [x] **自定义 Skill**：名称 + 描述 + 指令三段式定义，绑定 MCP 服务器和知识库，支持资源文件
 - [x] **预设库**：内置 23 条开发者 / 商务 / 通用场景预设，一键导入
+- [x] **两种激活方式**：对话中手动勾选，或开启「模型自主调用」让 LLM 按需触发
 
 ### Agent Team（多 Agent 协作）
 
 - [x] **工作组管理**：新建 / 删除工作组，配置最大 Agent 数量上限
-- [x] **Agent 生命周期**：手动添加 / 删除；主 Agent 可提议创建子 Agent（需用户审批）
-- [x] **四种状态**：Idle / Running / Meeting / Sleeping
-- [x] **消息路由**：点对点或广播，用户可直接与任意 Agent 对话
-- [x] **圆桌会议**：任意 Agent 可发起 `workspace_meeting`，其余成员轮流就议题发言，超时自动跳过
+- [x] **Agent 生命周期**：手动添加 / 删除；主 Agent 可提议创建子 Agent（需用户审批，10 分钟超时）
+- [x] **每 Agent 独立配置**：各自绑定 API 配置 / 系统提示词 / MCP 服务器 / 知识库 / Skill
+- [x] **四种状态**：Idle / Running / Meeting / Sleeping；子 Agent 申请休眠需主 Agent 或用户批准
+- [x] **消息路由**：点对点或广播（`to_agent_id = "all"`），用户可直接与任意 Agent 对话
+- [x] **圆桌会议**：任意 Agent 可发起 `workspace_meeting`，其余成员按创建顺序轮流就议题发言，超时自动跳过
+- [x] **向用户提问**：Agent 通过 `workspace_asks` 弹出提问卡片，等待用户回答
 - [x] **活动时间线**：消息 + 日志合并展示，`scheduled_trigger` 定时触发有专属条目
-- [x] **工具集**：`workspace_agent_list` / `workspace_message` / `workspace_meeting` / `workspace_create_agent` / `workspace_sleep` / `workspace_ask_user` / `workspace_agent_note`
+- [x] **工具集**：`workspace_message` / `workspace_agent_list` / `workspace_asks` / `workspace_log` / `workspace_meeting`（人人可用）；`workspace_create_agent` / `workspace_approve_sleep` / `workspace_reject_sleep`（主 Agent 专属）；`workspace_sleep`（子 Agent 专属）
 
 ### 定时任务（Scheduler）
 
@@ -87,6 +97,19 @@
 - [x] **广播支持**：`target_agent_id = null` 时广播给工作组全部 Agent
 - [x] **后台轮询**：Rust 端每 30 秒检查一次到期任务，App 运行期间全自动触发
 - [x] **快速入口**：Agent Team 页的时钟图标直接跳转到定时任务页并预填当前工作组筛选
+
+### 本地部署（Local Deploy）
+
+- [x] **Ollama 全托管**：检测安装 / 一键下载安装（多镜像源）/ 服务启停 / 版本查看
+- [x] **模型管理**：在线搜索（含各尺寸 tag）、下载、删除本地模型
+- [x] **LM Studio**：连接状态检测、模型下载、加载 / 卸载
+- [x] **Docker 部署**：镜像 / 容器管理（拉取、启动、停止、删除），内置 Ollama、LocalAI（CPU/GPU）三个部署预设
+
+### 其他
+
+- [x] **API 密钥加密存储**：Windows Credential Manager / macOS Keychain / Linux Secret Service
+- [x] **日志系统**：按日期落盘（`%APPDATA%/BaiyuAISpace2/logs`），设置页一键导出
+- [x] **黑白编辑设计系统**：纯黑白配色、衬线中文标题（Noto Serif SC）+ Inter 正文、滚动揭示动效，字体本地打包离线可用
 
 ### 开发中 / 规划中
 
@@ -113,10 +136,11 @@ graph LR
 
 - **Tauri 2.0**：替代 Electron，安装包减少 80%
 - **Vue 3 + TypeScript**：响应式开发，类型安全
-- **Naive UI**：精美组件库，暗色主题
-- **Rust + Tokio**：异步后端，`CancellationToken` 管理 Agent 生命周期
+- **Naive UI**：组件库，经 themeOverrides 收敛为黑白编辑设计系统
+- **Rust + Tokio**：异步后端，`CancellationToken` 管理流式取消与 Agent 生命周期
 - **Pinia**：状态管理，持久化存储
 - **SQLite（rusqlite）**：本地持久化，WAL 模式
+- **marked + highlight.js + Mermaid + DOMPurify**：消息渲染与 XSS 防护
 
 ***
 
@@ -196,31 +220,44 @@ registry = "sparse+https://rsproxy.cn/index/"
 BaiyuAISpace2/
 ├── src/                        # Vue 3 前端
 │   ├── components/
-│   │   ├── Layout.vue          # 侧边栏 + 主布局
-│   │   └── ChatMessage.vue     # 消息渲染
+│   │   ├── Layout.vue          # 侧边栏 + 主布局（序号编辑式导航）
+│   │   ├── ChatInput.vue       # 输入区（附件/文档/MCP/RAG/Skill/思考模式）
+│   │   └── ChatMessage.vue     # 消息渲染（Markdown/Mermaid/HTML 预览）
 │   ├── views/
 │   │   ├── ChatView.vue        # 对话页
 │   │   ├── AgentTeamView.vue   # Agent 工作组
 │   │   ├── SchedulerView.vue   # 定时任务（独立页）
 │   │   ├── SkillsView.vue      # Skill 管理 + 预设库
 │   │   ├── KnowledgeBaseView.vue # 知识库管理
-│   │   ├── MCPView.vue         # MCP 管理
-│   │   ├── LocalDeployView.vue # 本地部署管理
+│   │   ├── MCPView.vue         # MCP 管理 + 预设库
+│   │   ├── LocalDeployView.vue # 本地部署（Ollama/LM Studio/Docker 三个 Tab）
 │   │   ├── HistoryView.vue     # 历史记录
-│   │   └── SettingsView.vue    # 设置
+│   │   └── SettingsView.vue    # 设置（LLM/Embedding/Reranker API 配置）
 │   ├── stores/
-│   │   ├── chat.ts
+│   │   ├── chat.ts             # 会话 + 消息发送 + RAG/MCP/Skill 编排
+│   │   ├── settings.ts         # API 配置（LLM/Embedding/Reranker）
 │   │   ├── workspace.ts        # Agent Team 状态
 │   │   ├── scheduler.ts        # 定时任务状态
 │   │   ├── skills.ts           # Skill 状态
 │   │   ├── knowledgeBase.ts    # 知识库状态
 │   │   ├── mcp.ts              # MCP 状态
-│   │   └── settings.ts         # 设置状态
+│   │   ├── localModel.ts       # Ollama 状态
+│   │   ├── lmStudio.ts         # LM Studio 状态
+│   │   └── docker.ts           # Docker 状态
+│   ├── styles/                 # 黑白设计系统全局样式与变量
 │   └── router/index.ts
 ├── src-tauri/src/
-│   ├── main.rs
+│   ├── main.rs                 # 入口：命令注册、DB 初始化、调度循环启动
+│   ├── db.rs                   # 会话/消息 SQLite 存储
+│   ├── secure_storage.rs       # API 密钥系统密钥链存储
 │   ├── commands/
-│   │   └── llm.rs              # LLM 流式调用
+│   │   ├── llm.rs              # LLM 流式调用（多 provider、思考模式、工具循环、Prompt Caching）
+│   │   ├── mcp.rs              # MCP 服务器管理与工具调用
+│   │   ├── skills.rs           # Skill 存储 + 资源文件
+│   │   ├── local_model.rs      # Ollama 安装/服务/模型管理
+│   │   ├── lmstudio.rs         # LM Studio 集成
+│   │   ├── docker.rs           # Docker 镜像/容器管理
+│   │   └── auth.rs             # 百度 Access Token 等认证
 │   ├── workspace/              # Agent Team 后端
 │   │   ├── commands.rs         # Tauri 命令 + Agent 循环 + 会议逻辑
 │   │   ├── db.rs
@@ -229,8 +266,13 @@ BaiyuAISpace2/
 │   │   ├── commands.rs         # Tauri 命令 + 后台轮询循环
 │   │   ├── db.rs               # 数据库操作
 │   │   └── types.rs            # 数据库类型定义
-│   ├── knowledge_base/
-│   └── secure_storage.rs      # 安全存储
+│   └── knowledge_base/         # RAG 后端
+│       ├── commands.rs         # 知识库 Tauri 命令
+│       ├── document.rs         # PDF/Word/PPT/Excel 等文档解析
+│       ├── embedding.rs        # Embedding API 调用
+│       ├── retrieval.rs        # 混合检索（流式 top-k 堆）
+│       ├── reranker.rs         # Cohere 兼容精排
+│       └── db.rs               # 向量存储
 └── package.json
 ```
 
@@ -302,6 +344,14 @@ pnpm tauri build
 
 本软件采用 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0) 开源。
 **注意·本项目还有 BaiyuAISpace 许可证补充条款**
+
+***
+
+## 🧪 测试
+
+- 人工测试清单（全场景、可逐项打勾）：[docs/MANUAL_TEST_CHECKLIST.md](./docs/MANUAL_TEST_CHECKLIST.md)
+- 测试策略与流程：[docs/SOFTWARE_TESTING_PLAN.md](./docs/SOFTWARE_TESTING_PLAN.md)
+- 更多文档见 [docs/ 索引](./docs/README.md)
 
 ***
 
