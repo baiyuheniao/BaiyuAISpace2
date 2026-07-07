@@ -360,7 +360,7 @@ onMounted(async () => {
           <template #icon><n-icon><Add /></n-icon></template>
           新建工作组
         </n-button>
-        <n-popconfirm v-if="workspace.currentWorkspace" @positive-click="handleDeleteWorkspace">
+        <n-popconfirm v-if="workspace.currentWorkspace" positive-text="删除" negative-text="取消" @positive-click="handleDeleteWorkspace">
           <template #trigger>
             <n-button type="error" ghost>
               <template #icon><n-icon><TrashOutline /></n-icon></template>
@@ -450,9 +450,14 @@ onMounted(async () => {
                 <template #suffix>
                   <n-space vertical align="end" size="small">
                     <n-tag size="small" :type="statusMeta[agent.status].type">{{ statusMeta[agent.status].label }}</n-tag>
-                    <n-button quaternary circle size="tiny" type="error" @click.stop="handleDeleteAgent(agent.id)">
-                      <template #icon><n-icon><TrashOutline /></n-icon></template>
-                    </n-button>
+                    <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDeleteAgent(agent.id)">
+                      <template #trigger>
+                        <n-button quaternary circle size="tiny" type="error" @click.stop>
+                          <template #icon><n-icon><TrashOutline /></n-icon></template>
+                        </n-button>
+                      </template>
+                      确定删除 Agent「{{ agent.name }}」？
+                    </n-popconfirm>
                   </n-space>
                 </template>
               </n-list-item>

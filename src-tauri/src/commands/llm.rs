@@ -242,6 +242,17 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
 }
 
 fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool], enable_thinking: bool, max_tokens: Option<u32>) -> serde_json::Value {
+    // A stream stopped before any token arrived (see `cancel_stream`) leaves behind
+    // an assistant message with empty content and no attachments. Forwarding that
+    // as history carries no information, and strict providers (e.g. Moonshot) 400
+    // the whole request with "message ... must not be empty" -- which then repeats
+    // on every subsequent turn since the empty message never leaves the history.
+    let non_empty: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| !m.content.trim().is_empty() || !m.images.is_empty() || !m.videos.is_empty())
+        .cloned()
+        .collect();
+    let messages = non_empty.as_slice();
     match provider {
         "anthropic" => {
             let system_msg = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
@@ -1288,6 +1299,17 @@ async fn continue_after_tool_calls(
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client()?;
 
+    // Same empty-message guard as `build_stream_request_body`: a message left
+    // contentless by a stream cancelled before any token arrived must not be
+    // replayed as history here either, or the same "message ... must not be
+    // empty" 400 resurfaces on the very first tool-calling turn.
+    let non_empty: Vec<ChatMessage> = original_messages
+        .iter()
+        .filter(|m| !m.content.trim().is_empty() || !m.images.is_empty() || !m.videos.is_empty())
+        .cloned()
+        .collect();
+    let original_messages = non_empty.as_slice();
+
     let mut body = match provider {
         "anthropic" => {
             let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
@@ -1779,7 +1801,7 @@ pub async fn run_turn(
             let mut b = serde_json::json!({
                 "model": model, "messages": native_messages, "max_tokens": 4096, "stream": false,
             });
-            if let Some(sys) = system_prompt {
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
                 b["system"] = serde_json::json!(sys);
             }
             if !tools.is_empty() {
@@ -1795,7 +1817,7 @@ pub async fn run_turn(
             let mut b = serde_json::json!({
                 "contents": native_messages, "generationConfig": { "maxOutputTokens": 4096 },
             });
-            if let Some(sys) = system_prompt {
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
                 b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
             }
             if !tools.is_empty() {
@@ -1809,7 +1831,7 @@ pub async fn run_turn(
         }
         _ => {
             let mut all_messages = Vec::with_capacity(native_messages.len() + 1);
-            if let Some(sys) = system_prompt {
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
                 all_messages.push(serde_json::json!({ "role": "system", "content": sys }));
             }
             all_messages.extend_from_slice(native_messages);

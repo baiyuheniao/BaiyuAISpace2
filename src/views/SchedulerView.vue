@@ -218,7 +218,7 @@ const handleDelete = async (id: string) => {
           <template #suffix>
             <n-space align="center" size="small">
               <n-switch :value="s.enabled" size="small" @update:value="handleToggle(s)" />
-              <n-popconfirm @positive-click="handleDelete(s.id)">
+              <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDelete(s.id)">
                 <template #trigger>
                   <n-button quaternary circle size="small" type="error">
                     <template #icon><n-icon><TrashOutline /></n-icon></template>

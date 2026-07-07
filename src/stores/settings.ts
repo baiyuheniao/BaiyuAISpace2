@@ -599,6 +599,24 @@ export const useSettingsStore = defineStore(
     persist: {
       key: "baiyu-aispace-settings",
       paths: ["darkMode", "closeToTray", "showHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
+      // only kept in these arrays in-memory for request building. Without
+      // this serializer it would otherwise round-trip into plaintext
+      // localStorage on every mutation; loadAllApiKeys()/loadAllEmbeddingApiKeys()
+      // re-populate it from secure storage on startup, so stripping it here is safe.
+      serializer: {
+        serialize: (state: Record<string, unknown>) => {
+          const stripApiKey = (configs: unknown) =>
+            Array.isArray(configs) ? configs.map(({ apiKey: _apiKey, ...rest }) => rest) : configs;
+          return JSON.stringify({
+            ...state,
+            apiConfigs: stripApiKey(state.apiConfigs),
+            embeddingApiConfigs: stripApiKey(state.embeddingApiConfigs),
+            rerankerApiConfigs: stripApiKey(state.rerankerApiConfigs),
+          });
+        },
+        deserialize: (raw: string) => JSON.parse(raw),
+      },
     },
   }
 );

@@ -999,7 +999,7 @@ onMounted(async () => {
                         </template>
                         去对话
                       </n-button>
-                      <n-popconfirm @positive-click="handleUndeploy(model.name)">
+                      <n-popconfirm positive-text="确定" negative-text="取消" @positive-click="handleUndeploy(model.name)">
                         <template #trigger>
                           <n-button size="small" secondary>
                             取消部署
@@ -1028,7 +1028,7 @@ onMounted(async () => {
                       </n-tooltip>
                     </template>
 
-                    <n-popconfirm @positive-click="handleDeleteModel(model.name)">
+                    <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDeleteModel(model.name)">
                       <template #trigger>
                         <n-button
                           size="small"
@@ -1635,7 +1635,7 @@ onMounted(async () => {
                         <template #icon><n-icon><StopOutline /></n-icon></template>
                         停止
                       </n-button>
-                      <n-popconfirm @positive-click="handleRemoveDockerContainer(container.id)">
+                      <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleRemoveDockerContainer(container.id)">
                         <template #trigger>
                           <n-button size="small" type="error" quaternary>
                             <template #icon><n-icon><TrashOutline /></n-icon></template>

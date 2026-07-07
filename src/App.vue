@@ -21,7 +21,7 @@
 import { onMounted } from "vue";
 
 // 导入 NaiveUI 组件和类型
-import { type GlobalThemeOverrides, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider } from "naive-ui";
+import { type GlobalThemeOverrides, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider, zhCN, dateZhCN } from "naive-ui";
 
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
@@ -197,6 +197,11 @@ const settings = useSettingsStore();
 onMounted(async () => {
   // 从安全存储加载所有 API 密钥
   await settings.loadAllApiKeys();
+  // 加载后重新写入 localStorage：若 secure storage 里的值和已持久化的旧值恰好
+  // 相同（例如老版本遗留的明文 apiKey），Vue 不会判定为变更、也就不会触发
+  // persist 中间件重新序列化 —— 显式调用一次 $persist() 强制用新版
+  // serializer（见 stores/settings.ts）覆盖写入，清理掉历史遗留的明文密钥。
+  settings.$persist();
   // 把当前的“关闭按钮行为”设置同步给后端（后端只在启动时给了默认值）
   await settings.syncCloseToTray();
   // 把当前的托盘唤起快捷键同步给后端注册（后端启动时只注册了默认值）
@@ -207,6 +212,8 @@ onMounted(async () => {
 <template>
   <n-config-provider
     :theme-overrides="themeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
     class="full-height"
   >
     <n-dialog-provider>
