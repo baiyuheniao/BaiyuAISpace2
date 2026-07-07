@@ -1,0 +1,63 @@
+# CI：每次 push / PR 自动验证前端类型检查 + 后端编译
+# Windows 是主力平台，Ubuntu 用来验证跨平台编译是否被改坏
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.claude/**'
+      - '.gitignore'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.claude/**'
+      - '.gitignore'
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 2 在 Linux 上的系统依赖（webkit2gtk 4.1 + 托盘图标所需的 appindicator）
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # vue-tsc --noEmit + vite build；同时产出 dist/ 供 cargo 编译期读取
+      - name: Frontend typecheck and build
+        run: pnpm build
+
+      # cargo check 比完整 build 快，作为编译门禁足够
+      - name: Backend compile check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
