@@ -65,6 +65,7 @@ import {
   CubeOutline,
   SettingsOutline,
 } from "@vicons/ionicons5";
+import { isModifierOnly, acceleratorFromEvent } from "@/utils/hotkey";
 
 // ============ 状态管理 ============
 
@@ -496,25 +497,10 @@ const handleCloseToTrayChange = async (enabled: boolean) => {
   message.success(enabled ? "已开启：关闭窗口将最小化到托盘" : "已关闭：关闭窗口将直接退出程序");
 };
 
-// ============ 托盘唤起快捷键录制 ============
+// ============ 快捷键录制（托盘唤起 / 新建会话） ============
 
-/** 是否正在录制快捷键 */
-const recordingHotkey = ref(false);
-
-/** 键盘事件 code 中纯修饰键的集合——录制时忽略，等待用户按下真正的主键 */
-const MODIFIER_CODES = new Set([
-  "ControlLeft", "ControlRight",
-  "AltLeft", "AltRight",
-  "ShiftLeft", "ShiftRight",
-  "MetaLeft", "MetaRight",
-]);
-
-/** 把 KeyboardEvent.code 转成更易读的主键名（KeyA -> A，Digit1 -> 1，其余原样） */
-const formatMainKey = (code: string): string => {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  return code;
-};
+/** 当前正在录制哪个快捷键；null 表示未在录制 */
+const recordingHotkeyTarget = ref<"show" | "newSession" | null>(null);
 
 let hotkeyRecordListener: ((e: KeyboardEvent) => void) | null = null;
 
@@ -523,12 +509,12 @@ const stopRecordingHotkey = () => {
     window.removeEventListener("keydown", hotkeyRecordListener, true);
     hotkeyRecordListener = null;
   }
-  recordingHotkey.value = false;
+  recordingHotkeyTarget.value = null;
 };
 
-const startRecordingHotkey = () => {
-  if (recordingHotkey.value) return;
-  recordingHotkey.value = true;
+const startRecordingHotkey = (target: "show" | "newSession") => {
+  if (recordingHotkeyTarget.value) return;
+  recordingHotkeyTarget.value = target;
 
   hotkeyRecordListener = async (e: KeyboardEvent) => {
     e.preventDefault();
@@ -540,27 +526,26 @@ const startRecordingHotkey = () => {
     }
 
     // 纯修饰键还没构成完整组合，继续等待主键
-    if (MODIFIER_CODES.has(e.code)) return;
+    if (isModifierOnly(e)) return;
 
-    const mods: string[] = [];
-    if (e.ctrlKey) mods.push("Ctrl");
-    if (e.altKey) mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (e.metaKey) mods.push("Super");
-
-    if (mods.length === 0) {
+    const accelerator = acceleratorFromEvent(e);
+    if (!accelerator) {
       message.warning("请至少搭配一个修饰键（Ctrl / Alt / Shift），避免和普通按键冲突");
       return;
     }
 
-    const accelerator = [...mods, formatMainKey(e.code)].join("+");
     stopRecordingHotkey();
 
-    try {
-      await settings.setShowHotkey(accelerator);
-      message.success(`唤起快捷键已设置为 ${accelerator}`);
-    } catch (error) {
-      message.error(`设置快捷键失败（可能已被其他程序占用）：${error}`);
+    if (target === "show") {
+      try {
+        await settings.setShowHotkey(accelerator);
+        message.success(`唤起快捷键已设置为 ${accelerator}`);
+      } catch (error) {
+        message.error(`设置快捷键失败（可能已被其他程序占用）：${error}`);
+      }
+    } else {
+      settings.setNewSessionHotkey(accelerator);
+      message.success(`新建会话快捷键已设置为 ${accelerator}`);
     }
   };
 
@@ -1007,10 +992,37 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               </n-tag>
               <n-button
                 size="small"
-                :type="recordingHotkey ? 'warning' : 'default'"
-                @click="startRecordingHotkey"
+                :type="recordingHotkeyTarget === 'show' ? 'warning' : 'default'"
+                @click="startRecordingHotkey('show')"
               >
-                {{ recordingHotkey ? '请按下组合键…' : '修改快捷键' }}
+                {{ recordingHotkeyTarget === 'show' ? '请按下组合键…' : '修改快捷键' }}
+              </n-button>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">新建会话的快捷键</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                在应用窗口获得焦点时按下该组合键，即可快速开始一个新对话。点击右侧按钮后按下新的组合键即可修改，按 Esc 取消录制。
+              </n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="12"
+            >
+              <n-tag size="medium">
+                {{ settings.newSessionHotkey }}
+              </n-tag>
+              <n-button
+                size="small"
+                :type="recordingHotkeyTarget === 'newSession' ? 'warning' : 'default'"
+                @click="startRecordingHotkey('newSession')"
+              >
+                {{ recordingHotkeyTarget === 'newSession' ? '请按下组合键…' : '修改快捷键' }}
               </n-button>
             </n-space>
           </div>
@@ -1177,12 +1189,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             v-model:value="formData.maxTokens"
             :min="1"
             :max="1000000"
-            placeholder="默认 4096（思考模式默认 16000）"
+            placeholder="留空则不限制（Anthropic 除外）"
             style="width: 100%"
           />
           <template #feedback>
             <n-text depth="3" style="font-size: 12px;">
-              留空使用默认值。Anthropic 必填此项，大多数模型不需要改动。
+              留空时大多数服务商不会传这个参数，不会截断长回答。Anthropic 接口强制要求该字段，留空则用 32000。
             </n-text>
           </template>
         </n-form-item>
@@ -1300,12 +1312,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             v-model:value="formData.maxTokens"
             :min="1"
             :max="1000000"
-            placeholder="默认 4096（思考模式默认 16000）"
+            placeholder="留空则不限制（Anthropic 除外）"
             style="width: 100%"
           />
           <template #feedback>
             <n-text depth="3" style="font-size: 12px;">
-              留空使用默认值。Anthropic 必填此项，大多数模型不需要改动。
+              留空时大多数服务商不会传这个参数，不会截断长回答。Anthropic 接口强制要求该字段，留空则用 32000。
             </n-text>
           </template>
         </n-form-item>
