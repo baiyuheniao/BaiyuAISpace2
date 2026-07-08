@@ -284,11 +284,20 @@ onMounted(() => {
   overflow-y: auto;
 }
 
-/* 内容容器 - 限制最大宽度并居中，大面积留白 */
+/* 内容容器 - 限制最大宽度并居中，大面积留白
+   宽屏/超宽屏下分级放宽，会话行能容纳更多信息，两侧也不至于大片空白 */
 .history-container {
   max-width: 800px;
   margin: 0 auto;
   padding: 5rem 2rem 8rem;
+
+  @media (min-width: $bp-wide) {
+    max-width: 1050px;
+  }
+
+  @media (min-width: $bp-ultrawide) {
+    max-width: 1250px;
+  }
 }
 
 /* 页面标题区域 */

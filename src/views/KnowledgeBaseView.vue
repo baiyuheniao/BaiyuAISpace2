@@ -1027,12 +1027,25 @@ const getStatusTag = (status: Document["status"]) => {
   padding: 24px 32px;
 }
 
-/* 详情页头部：面包屑导航 + 标签页切换按钮，两行之间留出间距 */
+/* 详情页头部：面包屑导航 + 标签页切换按钮，两行之间留出间距
+   宽屏下文档列表/表单不设上限会被拉成一整行贴到屏幕两端，
+   所以头部与内容区统一限宽居中，避免宽屏下比例失衡 */
 .kb-detail-header {
   display: flex;
   flex-direction: column;
   gap: 16px;
   margin-bottom: 24px;
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+
+  @media (min-width: $bp-wide) {
+    max-width: 1200px;
+  }
+
+  @media (min-width: $bp-ultrawide) {
+    max-width: 1400px;
+  }
 }
 
 /* 文档标签页 */

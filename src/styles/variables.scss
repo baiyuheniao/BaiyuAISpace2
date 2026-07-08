@@ -48,6 +48,12 @@ $sidebar-width: 260px;
 $header-height: 60px;
 $chat-input-height: 120px;
 
+// ---------- 响应式断点 ----------
+// 内容容器默认宽度按编辑排版收窄（利于阅读），超过这些视口宽度时分级放宽，
+// 避免宽屏/超宽屏下大片留白、列表卡片挤成单列
+$bp-wide: 1600px;
+$bp-ultrawide: 2200px;
+
 // ---------- 兼容别名（旧代码引用，逐步清退） ----------
 $primary-color: $ink;
 $primary-color-hover: $ink-soft;

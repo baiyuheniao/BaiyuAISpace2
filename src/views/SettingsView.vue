@@ -1580,11 +1580,21 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   height: 100%;
 }
 
-/* 内容容器 - 限制最大宽度并居中 */
+/* 内容容器 - 限制最大宽度并居中
+   宽屏/超宽屏下分级放宽，避免两侧大片留白（但设置项是一行行的表单/列表，
+   放太宽反而拉散标签和操作按钮的视觉关联，所以放宽幅度比列表页克制） */
 .settings-container {
   max-width: 700px;
   margin: 0 auto;
   padding: 5rem 2rem 8rem;
+
+  @media (min-width: $bp-wide) {
+    max-width: 900px;
+  }
+
+  @media (min-width: $bp-ultrawide) {
+    max-width: 1000px;
+  }
 }
 
 /* 页面标题区域 */

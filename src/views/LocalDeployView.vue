@@ -1734,11 +1734,20 @@ onMounted(async () => {
   height: 100%;
 }
 
-/* 内容容器 */
+/* 内容容器
+   宽屏/超宽屏下分级放宽，列表行能容纳更多信息，两侧也不至于大片空白 */
 .local-deploy-container {
   max-width: 900px;
   margin: 0 auto;
   padding: 5rem 2rem 8rem;
+
+  @media (min-width: $bp-wide) {
+    max-width: 1150px;
+  }
+
+  @media (min-width: $bp-ultrawide) {
+    max-width: 1350px;
+  }
 }
 
 /* 页面标题 */
