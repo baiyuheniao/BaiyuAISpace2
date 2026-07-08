@@ -87,6 +87,14 @@ interface MCPPreset {
 
 const MCP_PRESETS: MCPPreset[] = [
   {
+    id: "web-search",
+    name: "网络搜索",
+    description: "通过 DuckDuckGo 搜索网页并抓取正文内容，让模型获取实时信息，无需 API Key（基于 duckduckgo-mcp-server）",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["duckduckgo-mcp-server"],
+  },
+  {
     id: "filesystem",
     name: "文件系统访问",
     description: "读写指定目录下的本地文件",
