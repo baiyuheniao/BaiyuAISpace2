@@ -224,6 +224,15 @@ export const useSettingsStore = defineStore(
       }
     };
 
+    // 新建会话的应用内快捷键（纯前端 window keydown 监听，只在应用窗口
+    // 获得焦点时生效——不同于上面 showHotkey 那个要注册进操作系统的
+    // 全局快捷键，这个不需要经后端，直接改本地状态即可）
+    const newSessionHotkey = ref("Ctrl+K");
+
+    const setNewSessionHotkey = (accelerator: string) => {
+      newSessionHotkey.value = accelerator;
+    };
+
     // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
     const systemPrompt = ref("");
 
@@ -570,6 +579,8 @@ export const useSettingsStore = defineStore(
       showHotkey,
       setShowHotkey,
       syncShowHotkey,
+      newSessionHotkey,
+      setNewSessionHotkey,
       systemPrompt,
       apiConfigs,
       activeConfigId,
@@ -606,7 +617,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

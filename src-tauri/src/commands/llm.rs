@@ -302,12 +302,19 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 })
                 .collect();
 
-            // Thinking requires a higher token ceiling; user value overrides the default
-            // but when using the legacy budget_tokens format the ceiling must exceed the
-            // budget (8000), so we never go below 9000 in that case.
+            // max_tokens is a required field for Anthropic's Messages API (unlike
+            // every other provider here, it can't just be omitted), so an unset
+            // user value still needs *some* number. 32000 comfortably covers a long
+            // answer without being rejected as exceeding the model's output-token
+            // ceiling (note: that ceiling is much lower than the 200K *context*
+            // window -- a naive "just use the context size" default 400s here).
+            //
+            // Thinking requires the ceiling to exceed its own budget; when using the
+            // legacy budget_tokens format specifically it must exceed 8000, so a user
+            // value paired with legacy thinking never goes below 9000.
             let is_legacy_thinking = enable_thinking
                 && (model.contains("claude-3") || model.contains("4-5") || model.contains("4.5"));
-            let default_max = if enable_thinking { 16000 } else { 4096 };
+            let default_max: u32 = 32000;
             let max_tokens_val = match max_tokens {
                 Some(v) if is_legacy_thinking => v.max(9000),
                 Some(v) => v,
@@ -391,9 +398,13 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 })
                 .collect();
 
-            let mut generation_config = serde_json::json!({
-                "maxOutputTokens": 4096,
-            });
+            // Unlike Anthropic, Gemini doesn't require maxOutputTokens -- omitting it
+            // lets the model use its own (much higher) default instead of silently
+            // truncating long replies at a small hardcoded ceiling.
+            let mut generation_config = serde_json::json!({});
+            if let Some(v) = max_tokens {
+                generation_config["maxOutputTokens"] = serde_json::json!(v);
+            }
             if enable_thinking {
                 // Gemini 2.5 series: thinkingBudget; 3.x series uses thinkingLevel
                 generation_config["thinkingConfig"] = serde_json::json!({"thinkingBudget": 8000});
@@ -466,6 +477,13 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 "messages": msgs,
                 "stream": true,
             });
+
+            // Unset -> omit entirely rather than substituting some guessed default;
+            // these providers don't require the field, and a small hardcoded value
+            // would silently truncate long replies for everyone who leaves it blank.
+            if let Some(v) = max_tokens {
+                body["max_tokens"] = serde_json::json!(v);
+            }
 
             // SiliconFlow thinking: enable_thinking + thinking_budget (Qwen3 series)
             if enable_thinking && provider == "siliconflow" {
@@ -1364,7 +1382,10 @@ async fn continue_after_tool_calls(
                 msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
             }
 
-            let max_tokens_val = max_tokens.unwrap_or(4096);
+            // Same reasoning as build_stream_request_body: Anthropic requires this
+            // field, so an unset user value falls back to a generous default rather
+            // than a number that clips a long reply.
+            let max_tokens_val = max_tokens.unwrap_or(32000);
             let mut b = serde_json::json!({
                 "model": model,
                 "messages": msgs,
@@ -1431,9 +1452,13 @@ async fn continue_after_tool_calls(
                 contents.push(serde_json::json!({ "role": "user", "parts": response_parts }));
             }
 
+            let mut generation_config = serde_json::json!({});
+            if let Some(v) = max_tokens {
+                generation_config["maxOutputTokens"] = serde_json::json!(v);
+            }
             let mut b = serde_json::json!({
                 "contents": contents,
-                "generationConfig": { "maxOutputTokens": 4096 },
+                "generationConfig": generation_config,
             });
             if let Some(sys) = system_msg {
                 b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
@@ -1491,6 +1516,9 @@ async fn continue_after_tool_calls(
                 "messages": msgs,
                 "stream": false,
             });
+            if let Some(v) = max_tokens {
+                b["max_tokens"] = serde_json::json!(v);
+            }
             if !mcp_tools.is_empty() {
                 let tools_json: Vec<_> = mcp_tools.iter().map(|tool| {
                     serde_json::json!({
