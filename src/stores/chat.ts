@@ -672,6 +672,27 @@ export const useChatStore = defineStore("chat", () => {
           };
         });
 
+      // ============ 全局 System Prompt ============
+      const globalSystemPrompt = settings.systemPrompt.trim();
+      if (globalSystemPrompt) {
+        if (apiMessages.length > 0 && apiMessages[0].role === "system") {
+          apiMessages[0] = {
+            ...apiMessages[0],
+            content: globalSystemPrompt + "\n\n" + apiMessages[0].content,
+          };
+        } else {
+          apiMessages.unshift({
+            id: crypto.randomUUID(),
+            role: "system",
+            content: globalSystemPrompt,
+            timestamp: Date.now(),
+            error: undefined,
+            images: [],
+            videos: [],
+          });
+        }
+      }
+
       // ============ MCP 系统提示 ============
       if (mcpEnabled.value && mcp.availableTools.length > 0) {
         const mcpSystemPrompt = buildMcpSystemPrompt(mcp.availableTools);

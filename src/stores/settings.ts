@@ -84,6 +84,10 @@ export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }>
     name: "本地模型 (Ollama)",
     baseUrl: "http://localhost:11434/v1",
   },
+  openclaw: {
+    name: "OpenClaw (本地网关)",
+    baseUrl: "http://127.0.0.1:18789/v1",
+  },
   custom: {
     name: "自定义 (OpenAI 兼容)",
     baseUrl: "http://localhost:11434/v1",
@@ -228,6 +232,9 @@ export const useSettingsStore = defineStore(
     const setNewSessionHotkey = (accelerator: string) => {
       newSessionHotkey.value = accelerator;
     };
+
+    // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
+    const systemPrompt = ref("");
 
     // ============ API 配置状态 ============
     
@@ -574,6 +581,7 @@ export const useSettingsStore = defineStore(
       syncShowHotkey,
       newSessionHotkey,
       setNewSessionHotkey,
+      systemPrompt,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -609,7 +617,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext
