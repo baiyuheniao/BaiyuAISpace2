@@ -33,8 +33,6 @@ import {
   NSpace,
   NPopconfirm,
   NIcon,
-  NGrid,
-  NGridItem,
   NTabs,
   NTabPane,
   useMessage,
@@ -986,32 +984,29 @@ const handleRemoveResourceFile = async (filename: string) => {
                   开发者
                 </n-space>
               </template>
-              <n-grid :cols="2" :x-gap="12" :y-gap="12" style="margin-top: 12px">
-                <n-grid-item
+              <div class="preset-grid">
+                <n-card
                   v-for="preset in DEV_PRESETS"
                   :key="preset.name"
+                  size="small"
+                  :bordered="true"
+                  class="preset-card"
                 >
-                  <n-card
-                    size="small"
-                    :bordered="true"
-                    class="preset-card"
-                  >
-                    <div class="preset-name">{{ preset.name }}</div>
-                    <div class="preset-desc">{{ preset.description }}</div>
-                    <template #footer>
-                      <n-button
-                        size="small"
-                        :type="isPresetImported(preset.name) ? 'default' : 'primary'"
-                        :disabled="isPresetImported(preset.name)"
-                        :loading="importingPreset === preset.name"
-                        @click="handleImportPreset(preset)"
-                      >
-                        {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
-                      </n-button>
-                    </template>
-                  </n-card>
-                </n-grid-item>
-              </n-grid>
+                  <div class="preset-name">{{ preset.name }}</div>
+                  <div class="preset-desc">{{ preset.description }}</div>
+                  <template #footer>
+                    <n-button
+                      size="small"
+                      :type="isPresetImported(preset.name) ? 'default' : 'primary'"
+                      :disabled="isPresetImported(preset.name)"
+                      :loading="importingPreset === preset.name"
+                      @click="handleImportPreset(preset)"
+                    >
+                      {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
+                    </n-button>
+                  </template>
+                </n-card>
+              </div>
             </n-tab-pane>
 
             <n-tab-pane name="biz" tab="商务">
@@ -1021,32 +1016,29 @@ const handleRemoveResourceFile = async (filename: string) => {
                   商务
                 </n-space>
               </template>
-              <n-grid :cols="2" :x-gap="12" :y-gap="12" style="margin-top: 12px">
-                <n-grid-item
+              <div class="preset-grid">
+                <n-card
                   v-for="preset in BIZ_PRESETS"
                   :key="preset.name"
+                  size="small"
+                  :bordered="true"
+                  class="preset-card"
                 >
-                  <n-card
-                    size="small"
-                    :bordered="true"
-                    class="preset-card"
-                  >
-                    <div class="preset-name">{{ preset.name }}</div>
-                    <div class="preset-desc">{{ preset.description }}</div>
-                    <template #footer>
-                      <n-button
-                        size="small"
-                        :type="isPresetImported(preset.name) ? 'default' : 'primary'"
-                        :disabled="isPresetImported(preset.name)"
-                        :loading="importingPreset === preset.name"
-                        @click="handleImportPreset(preset)"
-                      >
-                        {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
-                      </n-button>
-                    </template>
-                  </n-card>
-                </n-grid-item>
-              </n-grid>
+                  <div class="preset-name">{{ preset.name }}</div>
+                  <div class="preset-desc">{{ preset.description }}</div>
+                  <template #footer>
+                    <n-button
+                      size="small"
+                      :type="isPresetImported(preset.name) ? 'default' : 'primary'"
+                      :disabled="isPresetImported(preset.name)"
+                      :loading="importingPreset === preset.name"
+                      @click="handleImportPreset(preset)"
+                    >
+                      {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
+                    </n-button>
+                  </template>
+                </n-card>
+              </div>
             </n-tab-pane>
 
             <n-tab-pane name="general" tab="通用">
@@ -1056,32 +1048,29 @@ const handleRemoveResourceFile = async (filename: string) => {
                   通用
                 </n-space>
               </template>
-              <n-grid :cols="2" :x-gap="12" :y-gap="12" style="margin-top: 12px">
-                <n-grid-item
+              <div class="preset-grid">
+                <n-card
                   v-for="preset in GENERAL_PRESETS"
                   :key="preset.name"
+                  size="small"
+                  :bordered="true"
+                  class="preset-card"
                 >
-                  <n-card
-                    size="small"
-                    :bordered="true"
-                    class="preset-card"
-                  >
-                    <div class="preset-name">{{ preset.name }}</div>
-                    <div class="preset-desc">{{ preset.description }}</div>
-                    <template #footer>
-                      <n-button
-                        size="small"
-                        :type="isPresetImported(preset.name) ? 'default' : 'primary'"
-                        :disabled="isPresetImported(preset.name)"
-                        :loading="importingPreset === preset.name"
-                        @click="handleImportPreset(preset)"
-                      >
-                        {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
-                      </n-button>
-                    </template>
-                  </n-card>
-                </n-grid-item>
-              </n-grid>
+                  <div class="preset-name">{{ preset.name }}</div>
+                  <div class="preset-desc">{{ preset.description }}</div>
+                  <template #footer>
+                    <n-button
+                      size="small"
+                      :type="isPresetImported(preset.name) ? 'default' : 'primary'"
+                      :disabled="isPresetImported(preset.name)"
+                      :loading="importingPreset === preset.name"
+                      @click="handleImportPreset(preset)"
+                    >
+                      {{ isPresetImported(preset.name) ? "已导入" : "导入" }}
+                    </n-button>
+                  </template>
+                </n-card>
+              </div>
             </n-tab-pane>
           </n-tabs>
 
@@ -1216,10 +1205,20 @@ const handleRemoveResourceFile = async (filename: string) => {
   height: 100%;
 }
 
+/* 宽屏/超宽屏下分级放宽，配合下面 .preset-grid 的 auto-fill 让预设卡片
+   自动增加列数，而不是永远挤成两列 */
 .skills-container {
   max-width: 900px;
   margin: 0 auto;
   padding: 5rem 2rem 8rem;
+
+  @media (min-width: $bp-wide) {
+    max-width: 1300px;
+  }
+
+  @media (min-width: $bp-ultrawide) {
+    max-width: 1600px;
+  }
 }
 
 .page-header {
@@ -1261,6 +1260,15 @@ const handleRemoveResourceFile = async (filename: string) => {
   .n-button {
     margin-left: auto;
   }
+}
+
+/* 预设卡片网格 —— 原来是 n-grid 固定两列，宽屏下永远只有两列、两侧一堆空白。
+   换成 CSS Grid 的 auto-fill，卡片按可用宽度自动增加列数 */
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .preset-card {
