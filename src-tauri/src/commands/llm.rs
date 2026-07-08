@@ -193,6 +193,12 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("yi", "https://api.lingyiwanwu.com/v1/chat/completions", "bearer"),
     ("local", "", "none"),
     ("custom", "", "bearer"),
+    // OpenClaw 本地网关默认监听 127.0.0.1:18789，/v1/chat/completions 走
+    // OpenAI 兼容格式，但该端点默认是关闭的（需要在 OpenClaw 的
+    // gateway.http.endpoints.chatCompletions.enabled 里手动开启），且网关
+    // auth 默认必须启用 —— 回环地址并不天然免鉴权，用户需要在 OpenClaw 侧
+    // 配置 gateway.auth.token 并在这里填入相同的 Bearer token。
+    ("openclaw", "", "bearer"),
 ];
 
 fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> String {
@@ -231,6 +237,7 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
         }
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         "local" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
+        "openclaw" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         _ => {
             if let Some((_, url, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
                 url.to_string()

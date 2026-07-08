@@ -84,6 +84,10 @@ export const PRESET_PROVIDERS: Record<string, { name: string; baseUrl: string }>
     name: "本地模型 (Ollama)",
     baseUrl: "http://localhost:11434/v1",
   },
+  openclaw: {
+    name: "OpenClaw (本地网关)",
+    baseUrl: "http://127.0.0.1:18789/v1",
+  },
   custom: {
     name: "自定义 (OpenAI 兼容)",
     baseUrl: "http://localhost:11434/v1",
