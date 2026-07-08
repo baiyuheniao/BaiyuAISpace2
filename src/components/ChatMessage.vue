@@ -31,6 +31,10 @@ import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 // 导入 Markdown 解析库
 import { marked } from "marked";
 
+// 导入 LaTeX 公式渲染扩展
+import markedKatex from "marked-katex-extension";
+import "katex/dist/katex.min.css";
+
 // 导入 HTML 净化库
 import DOMPurify from "dompurify";
 
@@ -254,12 +258,25 @@ function escapeRawHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// 不少模型（如 DeepSeek）输出 LaTeX 公式时用的是 \[...\] / \(...\) 定界符而非
+// $$...$$ / $...$。marked-katex-extension 只认后者；更麻烦的是 CommonMark 规则
+// 会把 "\[" "\]" 这类反斜杠+标点解析成转义序列（渲染为去掉反斜杠的纯标点），
+// 定界符在 marked 的分词阶段之前就已经丢失了。所以要在喂给 marked 之前，
+// 先把 \[...\] / \(...\) 正规化成 $$...$$ / $...$。
+function normalizeLatexDelimiters(text: string): string {
+  return text
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expr: string) => `$$${expr}$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expr: string) => `$${expr}$`);
+}
+
 // 使用单例确保 marked.use() 只调用一次（marked 修改全局实例）
 const markedInitPromise = (() => {
   let promise: Promise<void> | null = null;
   return () => {
     if (!promise) {
       promise = new Promise((resolve) => {
+        // 黑白设计系统下不用 KaTeX 默认的红色报错色，退化为普通灰字
+        marked.use(markedKatex({ throwOnError: false, errorColor: "#444444" }));
         marked.use({
           renderer: {
             // 消息正文中的裸 HTML（块级或内联）一律转义为纯文本
@@ -309,7 +326,8 @@ const isAssistant = computed(() => props.message.role === "assistant");
 // iframe/sandbox/srcdoc 是 buildHtmlPreviewBlock 生成的沙箱预览所必需的，显式放行。
 const renderedContent = computed(() => {
   if (!props.message.content) return "";
-  const html = marked.parse(props.message.content, { async: false, breaks: true }) as string;
+  const normalized = normalizeLatexDelimiters(props.message.content);
+  const html = marked.parse(normalized, { async: false, breaks: true }) as string;
   return DOMPurify.sanitize(html, {
     ADD_TAGS: ["iframe"],
     ADD_ATTR: ["sandbox", "srcdoc"],
