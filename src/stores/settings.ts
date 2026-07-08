@@ -224,6 +224,9 @@ export const useSettingsStore = defineStore(
       }
     };
 
+    // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
+    const systemPrompt = ref("");
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -567,6 +570,7 @@ export const useSettingsStore = defineStore(
       showHotkey,
       setShowHotkey,
       syncShowHotkey,
+      systemPrompt,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -602,7 +606,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

@@ -1014,6 +1014,24 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               </n-button>
             </n-space>
           </div>
+
+          <div class="general-setting-item general-setting-item--stack">
+            <div class="general-setting-text">
+              <span class="general-setting-label">全局 System Prompt</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                对之后发送的每条新消息生效，会自动附加到对话的系统消息中，用于统一设定模型的身份、语气或回答规范；留空则不附加。已发送的历史消息不受影响。
+              </n-text>
+            </div>
+            <n-input
+              v-model:value="settings.systemPrompt"
+              type="textarea"
+              placeholder="例如：你是一个简洁、专业的助手，优先给出可执行的建议，避免空泛的客套话。"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+            />
+          </div>
         </n-card>
 
         <!-- 关于卡片 -->
@@ -1653,6 +1671,11 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   margin-top: 20px;
   padding-top: 20px;
   border-top: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.general-setting-item--stack {
+  flex-direction: column;
+  align-items: stretch;
 }
 
 .general-setting-text {
