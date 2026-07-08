@@ -193,9 +193,12 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("yi", "https://api.lingyiwanwu.com/v1/chat/completions", "bearer"),
     ("local", "", "none"),
     ("custom", "", "bearer"),
-    // OpenClaw 本地网关默认监听 127.0.0.1:18789，且 /v1/chat/completions 走
-    // OpenAI 兼容格式；回环地址天然可信，默认不需要 API Key。
-    ("openclaw", "", "none"),
+    // OpenClaw 本地网关默认监听 127.0.0.1:18789，/v1/chat/completions 走
+    // OpenAI 兼容格式，但该端点默认是关闭的（需要在 OpenClaw 的
+    // gateway.http.endpoints.chatCompletions.enabled 里手动开启），且网关
+    // auth 默认必须启用 —— 回环地址并不天然免鉴权，用户需要在 OpenClaw 侧
+    // 配置 gateway.auth.token 并在这里填入相同的 Bearer token。
+    ("openclaw", "", "bearer"),
 ];
 
 fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> String {
@@ -638,9 +641,9 @@ fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
             headers.insert("x-api-key", api_key.parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
         }
-        "local" | "openclaw" => {
-            // Local models (e.g. Ollama, OpenClaw's loopback gateway) don't
-            // require authentication -- no Authorization header needed
+        "local" => {
+            // Local models (e.g. Ollama) don't require authentication
+            // No Authorization header needed
         }
         _ => {
             headers.insert(
@@ -1962,7 +1965,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), LLMError> {
 
 fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
     // Local models don't require API keys
-    if request.provider == "local" || request.provider == "openclaw" {
+    if request.provider == "local" {
         return Ok(String::new());
     }
     if !request.api_key.is_empty() {
