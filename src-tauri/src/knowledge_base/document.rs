@@ -110,18 +110,35 @@ async fn try_pdftotext(file_path: &str) -> Result<String, ()> {
 }
 
 /// 解析 PDF 文件
-/// 优先用外部 pdftotext（精度最高）；不可用时回退到 pdf-extract（纯 Rust）
+/// 外部 pdftotext（版式/表格精度更高）与内置 pdf-extract（纯 Rust）都跑一遍，取字符数明显更多的
+/// 那份。单跑 pdftotext 不够：PATH 上的 `pdftotext.exe` 未必是 poppler——Windows 上常见的是随
+/// Git for Windows 等工具分发的 xpdf 衍生版本，遇到内嵌 CJK 字体会静默丢字（命令正常返回、非空，
+/// 但中文整段消失），不会触发任何错误，也就永远走不到下面的回退分支。
 async fn parse_pdf(file_path: &str) -> Result<String, KnowledgeBaseError> {
-    if let Ok(text) = try_pdftotext(file_path).await {
-        return Ok(text);
-    }
     let path_owned = file_path.to_string();
-    tokio::task::spawn_blocking(move || {
-        pdf_extract::extract_text(&path_owned)
-            .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("PDF 解析失败: {e}")))
-    })
-    .await
-    .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
+    let extract_result = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&path_owned))
+        .await
+        .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+
+    let pdftotext_result = try_pdftotext(file_path).await.ok();
+
+    match (pdftotext_result, extract_result) {
+        (Some(pt), Ok(pe)) => {
+            let pt_chars = pt.chars().filter(|c| !c.is_whitespace()).count();
+            let pe_chars = pe.chars().filter(|c| !c.is_whitespace()).count();
+            // pdf_extract 抽出的非空白字符明显更多（阈值 1.5x），说明 pdftotext 大概率丢字了
+            if pe_chars > pt_chars * 3 / 2 {
+                Ok(pe)
+            } else {
+                Ok(pt)
+            }
+        }
+        (Some(pt), Err(_)) => Ok(pt),
+        (None, Ok(pe)) => Ok(pe),
+        (None, Err(e)) => Err(KnowledgeBaseError::DocumentParseError(format!(
+            "PDF 解析失败: {e}"
+        ))),
+    }
 }
 
 // ============ Word / DOCX ============
