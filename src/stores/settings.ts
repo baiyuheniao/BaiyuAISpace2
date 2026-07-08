@@ -220,6 +220,15 @@ export const useSettingsStore = defineStore(
       }
     };
 
+    // 新建会话的应用内快捷键（纯前端 window keydown 监听，只在应用窗口
+    // 获得焦点时生效——不同于上面 showHotkey 那个要注册进操作系统的
+    // 全局快捷键，这个不需要经后端，直接改本地状态即可）
+    const newSessionHotkey = ref("Ctrl+K");
+
+    const setNewSessionHotkey = (accelerator: string) => {
+      newSessionHotkey.value = accelerator;
+    };
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -563,6 +572,8 @@ export const useSettingsStore = defineStore(
       showHotkey,
       setShowHotkey,
       syncShowHotkey,
+      newSessionHotkey,
+      setNewSessionHotkey,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -598,7 +609,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

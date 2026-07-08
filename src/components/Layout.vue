@@ -17,7 +17,7 @@
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed } from "vue";
+import { computed, onMounted, onBeforeUnmount } from "vue";
 
 // 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
@@ -25,6 +25,9 @@ import { useRoute, useRouter } from "vue-router";
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
+
+// 导入快捷键匹配工具
+import { eventMatchesAccelerator } from "@/utils/hotkey";
 
 // 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
@@ -74,6 +77,23 @@ const handleNewChat = () => {
   chat.createSession(settings.activeConfigId);
   router.push({ name: "Chat" });
 };
+
+// 应用内"新建会话"快捷键（在 Settings 里可改）。只在应用窗口获得焦点时
+// 生效——不同于托盘唤起快捷键那种要注册进操作系统的全局快捷键，这个
+// 纯前端监听即可，逻辑和按钮点击完全一致。
+const handleNewSessionHotkey = (e: KeyboardEvent) => {
+  if (!eventMatchesAccelerator(e, settings.newSessionHotkey)) return;
+  e.preventDefault();
+  handleNewChat();
+};
+
+onMounted(() => {
+  window.addEventListener("keydown", handleNewSessionHotkey);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleNewSessionHotkey);
+});
 </script>
 
 <template>
