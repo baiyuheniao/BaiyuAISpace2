@@ -871,9 +871,10 @@ n. 观察结果
 ### D. 参考文档
 
 - [BaiyuAISpace2 README](../README.md)
-- [LLM API 手册](../docs/api-manuals/)
-- [MCP 集成指南](../docs/mcp-integration-guide.md)
-- [开发日志](../docs/development-log.md)
+- [人工测试清单](./MANUAL_TEST_CHECKLIST.md)
+- [LLM API 手册](./api-manuals/)
+- [MCP 集成指南（历史，已被原生 Function Calling 取代）](./archive/mcp-integration-guide.md)
+- [开发日志（历史，止于 2026-02-15）](./archive/development-log.md)
 
 ---
 

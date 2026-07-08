@@ -1,5 +1,7 @@
 # BaiyuAISpace 开发日志
 
+> **[归档]** 记录 2026-02-10 ~ 2026-02-15 MVP 阶段的开发过程，此后未再更新。当前功能全貌请看 [根目录 README](../../README.md)。
+
 > 记录项目开发过程中的阶段性成果和重要变更
 
 ---
@@ -388,7 +390,7 @@ LLM 返回响应（可能提及工具使用）
 
 ### 📚 文档
 
-新增 `docs/mcp-llm-integration.md`，包含：
+新增 `docs/archive/mcp-llm-integration.md`，包含：
 - 完整实现细节
 - 使用场景示例
 - Python/TypeScript 代码示例
@@ -401,7 +403,7 @@ LLM 返回响应（可能提及工具使用）
 | 文件 | 变更 |
 |------|------|
 | `src/stores/chat.ts` | 导入 MCPStore，新增工具定义构建函数，增强 sendMessage() |
-| `docs/mcp-llm-integration.md` | 新建完整集成指南 |
+| `docs/archive/mcp-llm-integration.md` | 新建完整集成指南 |
 
 ### ⏳ 后续步骤
 
@@ -411,7 +413,7 @@ LLM 返回响应（可能提及工具使用）
 2. **执行 MCP 工具** - 通过 `mcp.callTool()` 调用
 3. **反馈给 LLM** - 将结果发送回 LLM 进行继续推理
 
-详见 `docs/mcp-llm-integration.md` 的「后续步骤」部分。
+详见 `docs/archive/mcp-llm-integration.md` 的「后续步骤」部分。
 
 ---
 

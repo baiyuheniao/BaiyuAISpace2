@@ -177,3 +177,6 @@ visual-code/
 # DingTalk / Feishu MCP servers (contain webhook secrets)
 DingTalk.py
 Feishu.py
+
+# Manual test assets (large binaries, not source)
+test_assets/

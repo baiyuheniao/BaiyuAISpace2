@@ -1,5 +1,7 @@
 # MCP 服务集成开发指南
 
+> **[归档]** 早期规划文档，文中的 TODO（SQLite 持久化、LLM Function Calling 集成）均已实现，实际实现已与本文描述的方案不同。仅作历史参考，不代表当前架构。
+
 ## 概述
 
 本项目支持 **Model Context Protocol (MCP)** 的完整集成，允许用户在聊天中调用来自不同 MCP 服务器的工具和功能。

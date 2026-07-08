@@ -1,5 +1,7 @@
 # MCP 与 LLM 函数调用集成指南
 
+> **[归档]** 记录的是早期基于文本提示词 + 正则解析工具调用的实现方案。当前 `llm.rs` 已改为各 provider 原生 Function Calling（`execute_tool_calls` / `continue_after_tool_calls`），本文不代表当前实现，仅作历史参考。
+
 ## 概述
 
 本文档说明了BaiyuAISpace中MCP（Model Context Protocol）与LLM函数调用的完整集成实现。用户可以在对话中启用MCP工具，AI助手将自动获 access 到这些工具并在适当的时候调用它们。
