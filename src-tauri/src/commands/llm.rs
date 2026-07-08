@@ -193,6 +193,9 @@ const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("yi", "https://api.lingyiwanwu.com/v1/chat/completions", "bearer"),
     ("local", "", "none"),
     ("custom", "", "bearer"),
+    // OpenClaw 本地网关默认监听 127.0.0.1:18789，且 /v1/chat/completions 走
+    // OpenAI 兼容格式；回环地址天然可信，默认不需要 API Key。
+    ("openclaw", "", "none"),
 ];
 
 fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> String {
@@ -231,6 +234,7 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
         }
         "custom" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         "local" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
+        "openclaw" => format!("{}/chat/completions", base_url.trim_end_matches('/')),
         _ => {
             if let Some((_, url, _)) = PROVIDER_CONFIGS.iter().find(|(p, _, _)| *p == provider) {
                 url.to_string()
@@ -634,9 +638,9 @@ fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
             headers.insert("x-api-key", api_key.parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
         }
-        "local" => {
-            // Local models (e.g. Ollama) don't require authentication
-            // No Authorization header needed
+        "local" | "openclaw" => {
+            // Local models (e.g. Ollama, OpenClaw's loopback gateway) don't
+            // require authentication -- no Authorization header needed
         }
         _ => {
             headers.insert(
@@ -1958,7 +1962,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), LLMError> {
 
 fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
     // Local models don't require API keys
-    if request.provider == "local" {
+    if request.provider == "local" || request.provider == "openclaw" {
         return Ok(String::new());
     }
     if !request.api_key.is_empty() {
