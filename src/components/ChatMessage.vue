@@ -23,7 +23,7 @@
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed, ref, watch, onMounted, nextTick } from "vue";
+import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 
 // 导入 NaiveUI 组件
 import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
@@ -117,14 +117,63 @@ onMounted(async () => {
     await nextTick();
     renderMermaidDiagrams();
   }
+  window.addEventListener("message", handleHtmlPreviewMessage);
 });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("message", handleHtmlPreviewMessage);
+});
+
+// 接收 buildHtmlPreviewBlock 注入到 iframe 内的脚本上报的内容高度。
+// 只信任 event.source 确实是本组件渲染出的某个 iframe 的 contentWindow，
+// 不信任消息内容本身（sandbox 去掉 allow-same-origin 后无法直接读高度）。
+function handleHtmlPreviewMessage(event: MessageEvent) {
+  const height = (event.data as { __baiyuHtmlPreviewHeight?: unknown } | null)
+    ?.__baiyuHtmlPreviewHeight;
+  if (typeof height !== "number") return;
+  const frames = contentRef.value?.querySelectorAll<HTMLIFrameElement>(".html-preview-frame");
+  frames?.forEach((frame) => {
+    if (frame.contentWindow === event.source) {
+      frame.style.height = `${Math.min(Math.max(height, 120), 600)}px`;
+    }
+  });
+}
+
+// markdown-content 容器上的点击事件委托：处理 buildHtmlPreviewBlock /
+// buildMermaidPreviewBlock 生成的"预览/源码"切换按钮。这两个按钮曾经用内联
+// onclick 属性实现，但应用的 CSP（script-src 精确哈希白名单，无 unsafe-inline/
+// unsafe-hashes）会静默拦截所有内联事件处理器，导致按钮点了没反应；改成这里
+// 统一用真实的 Vue @click 监听器（编译进打包后的 JS，不受 CSP 内联限制）。
+function handleMarkdownClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+
+  const previewToggle = target.closest<HTMLElement>(".html-preview-toggle");
+  if (previewToggle) {
+    const block = previewToggle.closest(".html-preview-block");
+    if (block) {
+      const showingPreview = block.classList.toggle("show-preview");
+      previewToggle.textContent = showingPreview ? "查看源码" : "预览效果";
+    }
+    return;
+  }
+
+  const mermaidToggle = target.closest<HTMLElement>(".mermaid-toggle");
+  if (mermaidToggle) {
+    const block = mermaidToggle.closest(".mermaid-preview-block");
+    if (block) {
+      const showingDiagram = block.classList.toggle("show-diagram");
+      mermaidToggle.textContent = showingDiagram ? "查看源码" : "查看图表";
+    }
+  }
+}
 
 // ============ HTML 预览块生成 ============
 
 /**
  * 为 HTML 代码块生成"源码 + iframe 预览"双视图结构。
- * iframe 使用 sandbox + srcdoc 隔离执行，toolbar 按钮通过内联
- * onclick 切换 show-preview 类来控制显示哪一侧。
+ * iframe 使用 sandbox + srcdoc 隔离执行，toolbar 按钮的点击由
+ * handleMarkdownClick 事件委托处理（不用内联 onclick，会被 CSP 拦截）。
  */
 function buildHtmlPreviewBlock(code: string): string {
   const highlighted = hljs.highlight(code, { language: "html" }).value;
@@ -135,31 +184,33 @@ function buildHtmlPreviewBlock(code: string): string {
     ? code
     : `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:16px;font-family:system-ui,sans-serif;line-height:1.6}</style></head><body>${code}</body></html>`;
 
+  // sandbox 不含 allow-same-origin（Issue #55：曾允许 iframe 内脚本靠
+  // allow-same-origin 逃出沙箱读父页面 localStorage）。iframe 因此是不透明源，
+  // 父页面无法用 contentDocument 读高度，改为在 iframe 内加载一个外部脚本文件，
+  // 通过 postMessage 主动上报高度（父页面处理见 handleHtmlPreviewMessage）。
+  // 必须是外部文件而不是内联 <script>：应用的 CSP 是精确哈希白名单（不含
+  // unsafe-inline/unsafe-hashes），且 srcdoc 文档会继承父页面 CSP，内联脚本
+  // 一律会被拦截静默失效；同源静态文件走 src= 加载则天然匹配 script-src 'self'。
+  // 闭合标签拆成两段字符串，避免在 .vue 的 <script> 块里出现完整闭合标签字面量。
+  const reporterTag = '<script src="/html-preview-reporter.js"></' + "script>";
+  const docWithReporter = /<\/body>/i.test(docHtml)
+    ? docHtml.replace(/<\/body>/i, `${reporterTag}</body>`)
+    : docHtml + reporterTag;
+
   // srcdoc 属性值内只需转义 & 和 "
-  const srcdoc = docHtml.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  const srcdoc = docWithReporter.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 
-  // onload 尝试按内容高度自适应（不超过 600px），sandbox allow-same-origin
-  // 让父页面能读 contentDocument.scrollHeight
-  const onload =
-    "try{var h=this.contentDocument.documentElement.scrollHeight" +
-    "||this.contentDocument.body.scrollHeight;" +
-    "this.style.height=Math.min(Math.max(h,120),600)+'px'}catch(e){}";
-
-  const onclick =
-    "var b=this.closest('.html-preview-block');" +
-    "b.classList.toggle('show-preview');" +
-    "this.textContent=b.classList.contains('show-preview')?'查看源码':'预览效果'";
-
+  // 按钮不再用内联 onclick（同样会被 CSP 拦截），改为在 handleMarkdownClick 里
+  // 用事件委托处理 .html-preview-toggle 点击。
   return (
     `<div class="html-preview-block">` +
     `<div class="html-preview-toolbar">` +
-    `<button class="html-preview-toggle" onclick="${onclick}">预览效果</button>` +
+    `<button class="html-preview-toggle">预览效果</button>` +
     `<span class="html-lang-badge">HTML</span>` +
     `</div>` +
     `<pre class="html-source-pre"><code class="hljs language-html">${highlighted}</code></pre>` +
     `<iframe class="html-preview-frame" srcdoc="${srcdoc}" ` +
-    `sandbox="allow-scripts allow-same-origin allow-modals allow-forms" ` +
-    `onload="${onload}"></iframe>` +
+    `sandbox="allow-scripts allow-modals allow-forms"></iframe>` +
     `</div>`
   );
 }
@@ -176,15 +227,11 @@ function buildMermaidPreviewBlock(code: string): string {
   // encodeURIComponent 保证特殊字符在 data-* 属性里安全传递
   const encoded = encodeURIComponent(code);
 
-  const onclick =
-    "var b=this.closest('.mermaid-preview-block');" +
-    "b.classList.toggle('show-diagram');" +
-    "this.textContent=b.classList.contains('show-diagram')?'查看源码':'查看图表'";
-
+  // 按钮不再用内联 onclick（CSP 会拦截），改为在 handleMarkdownClick 里事件委托处理。
   return (
     `<div class="mermaid-preview-block show-diagram">` +
     `<div class="mermaid-toolbar">` +
-    `<button class="mermaid-toggle" onclick="${onclick}">查看源码</button>` +
+    `<button class="mermaid-toggle">查看源码</button>` +
     `<span class="mermaid-lang-badge">Mermaid</span>` +
     `</div>` +
     `<pre class="mermaid-source-pre"><code class="hljs">${highlighted}</code></pre>` +
@@ -259,14 +306,13 @@ const isAssistant = computed(() => props.message.role === "assistant");
 
 // 渲染后的 Markdown 内容
 // 二次防线：即便 marked 的转义有疏漏，DOMPurify 仍会按白名单剥离危险标签/属性。
-// iframe/sandbox/srcdoc/onload/onclick 是 buildHtmlPreviewBlock 和
-// buildMermaidPreviewBlock 生成"预览/源码"切换按钮与沙箱预览所必需的，显式放行。
+// iframe/sandbox/srcdoc 是 buildHtmlPreviewBlock 生成的沙箱预览所必需的，显式放行。
 const renderedContent = computed(() => {
   if (!props.message.content) return "";
   const html = marked.parse(props.message.content, { async: false, breaks: true }) as string;
   return DOMPurify.sanitize(html, {
     ADD_TAGS: ["iframe"],
-    ADD_ATTR: ["sandbox", "srcdoc", "onload", "onclick"],
+    ADD_ATTR: ["sandbox", "srcdoc"],
     // srcdoc's value is a full HTML document (it legitimately contains
     // "</style>" etc.), which DOMPurify's SAFE_FOR_XML close-tag probe
     // otherwise treats as an attribute-escape attempt and strips outright.
@@ -335,6 +381,7 @@ const handleCopy = async () => {
           ref="contentRef"
           class="markdown-content"
           v-html="renderedContent"
+          @click="handleMarkdownClick"
         />
         
         <!-- Streaming indicator -->
