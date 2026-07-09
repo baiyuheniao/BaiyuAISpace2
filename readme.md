@@ -42,6 +42,27 @@
 
 ***
 
+## 🚧 Beta 公测须知
+
+当前版本处于 **Beta 公测阶段**：核心功能已完整可用并经过全场景测试，
+但仍可能存在未知问题。以下是已知限制，安装前请了解：
+
+- **Windows 安装包暂未进行代码签名**。首次运行时 SmartScreen 可能弹出
+  "已保护你的电脑" 警告——点击 **"更多信息" → "仍要运行"** 即可。
+  这是独立开发者应用的常见情况，不代表安装包有安全问题（所有构建均由
+  GitHub Actions 从公开源码自动打包，可溯源）。
+- **知识库暂不适合超大规模数据**。当前向量检索为全量扫描，
+  单个知识库建议控制在约 1 万个文本分块以内（约几百份常规文档），
+  超出后搜索会明显变慢。向量索引优化在路线图中（见 [#18](https://github.com/baiyuheniao/BaiyuAISpace2/issues/18)）。
+- **Beta 期间暂无应用内自动更新**，新版本请关注
+  [Releases](https://github.com/baiyuheniao/BaiyuAISpace2/releases) 页面手动下载。
+
+**反馈渠道**：Bug 和功能建议请用 [Issue 模板](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose)提交
+（Bug 请务必附上日志，位置见模板内说明）；使用咨询和开放讨论请走
+[Discussions](https://github.com/baiyuheniao/BaiyuAISpace2/discussions)。
+
+***
+
 ## ✨ 功能特性
 
 ### 对话 & 模型接入
@@ -357,11 +378,12 @@ pnpm tauri build
 
 ## 🤝 贡献指南
 
-欢迎 Issue 和 PR！请确保：
+欢迎 Issue 和 PR！
 
-1. 代码通过 `cargo clippy` 和 `pnpm build`（含 `vue-tsc --noEmit`）检查
-2. 所有新文件包含 MPL-2.0 头注释
-3. 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)
+- 参与开发前请阅读 **[CONTRIBUTING.md](./CONTRIBUTING.md)**——包含环境搭建、
+  构建顺序的坑、代码规范（黑白设计系统、超时策略）和提交约定
+- Bug 报告 / 功能建议请使用 [Issue 模板](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose)
+- 安全漏洞请按 **[SECURITY.md](./SECURITY.md)** 私下报告，不要公开发 Issue
 
 ***
 

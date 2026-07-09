@@ -1,0 +1,91 @@
+name: "\U0001F41B Bug 反馈"
+description: 报告一个使用中遇到的问题（崩溃、报错、功能不符合预期等）
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写完整信息，**特别是日志片段**——这能让定位问题的速度快一个数量级。
+        使用咨询、想法讨论请移步 [Discussions](https://github.com/baiyuheniao/BaiyuAISpace2/discussions)。
+
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本
+      description: 安装包文件名或「关于」页面中可见
+      placeholder: "例如：0.2.0-beta.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及功能模块
+      options:
+        - 聊天 / LLM 调用
+        - Agent Team（多 Agent 工作组）
+        - RAG 知识库
+        - MCP 工具
+        - 本地部署（Ollama / LM Studio / Docker）
+        - Skill
+        - 定时任务
+        - 界面 / 交互
+        - 安装 / 启动
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: 涉及的 LLM 服务商（如与模型调用相关）
+      placeholder: "例如：DeepSeek / Anthropic / Ollama 本地模型"
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量具体到每一步操作，能稳定复现的 Bug 修得最快
+      placeholder: |
+        1. 打开知识库页面
+        2. 导入一个 200 页的 PDF
+        3. 进度条卡在 50% 后报错
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为 vs 实际行为
+      placeholder: "预期：……；实际：……"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志片段
+      description: |
+        日志文件位置（按日期命名，取出问题时间点附近的内容即可）：
+        - Windows：`%APPDATA%\BaiyuAISpace2\logs\app_<日期>.log`（资源管理器地址栏直接粘贴可打开）
+        - macOS / Linux：应用数据目录下的 `BaiyuAISpace2/logs/`
+
+        ⚠️ 粘贴前请检查并抹掉 API Key 等敏感信息。
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图或补充信息
+      description: 界面问题请尽量附截图

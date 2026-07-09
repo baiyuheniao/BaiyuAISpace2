@@ -66,5 +66,6 @@ jobs:
           releaseName: 'BaiyuAISpace ${{ github.ref_name }}'
           releaseBody: '各平台安装包见下方 Assets。Windows 用 .exe（NSIS），macOS 用 .dmg，Linux 用 .AppImage。'
           releaseDraft: true
-          prerelease: false
+          # 带 “-” 的标签（如 v0.2.0-beta.1）自动标为预发布版本
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
