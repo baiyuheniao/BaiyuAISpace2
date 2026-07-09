@@ -21,7 +21,7 @@
   <img src="https://img.shields.io/badge/Vue-3.4+-4FC08D?style=flat-square&logo=vue.js" alt="Vue 3">
   <img src="https://img.shields.io/badge/Tauri-2.0-FFC131?style=flat-square&logo=tauri" alt="Tauri 2">
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/License-MPL_2.0-orange?style=flat-square" alt="MPL-2.0">
+  <img src="https://img.shields.io/badge/License-MPL--2.0_%2B_%E8%A1%A5%E5%85%85%E6%9D%A1%E6%AC%BE-orange?style=flat-square" alt="MPL-2.0 + 补充条款">
 </p>
 
 ***
@@ -363,8 +363,22 @@ pnpm tauri build
 
 ## 📜 许可证
 
-本软件采用 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0) 开源。
-**注意·本项目还有 BaiyuAISpace 许可证补充条款**
+本软件基于 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0)，
+并附有 **[BaiyuAISpace 许可证补充条款](./BaiyuAISpace%20许可证补充条款.md)**（对商业使用附加限制）。
+由于附加了商用限制，本项目属于**源码开放（source-available）、人人免费使用**的模式，
+而非 OSI 严格定义下的开源许可。
+
+**人话版**（以补充条款原文为准）：
+
+| 你想做的事 | 是否可以 |
+|---|---|
+| 个人使用 / 公司内部使用 | ✅ 免费，随便用 |
+| 开发插件、扩展、MCP 工具并商用 | ✅ 免费 |
+| 在本软件基础上做实质性二次开发，作为你自己的产品卖 | ✅ 免费 |
+| 改个名字换个皮就拿去卖，或架在服务器上做 SaaS 卖账号 | ❌ 需要联系作者购买商业授权 |
+
+判断标准一句话：**你卖的东西，价值主要来自你自己的开发，还是来自本软件本身？**
+前者免费，后者需要授权。商业授权联系方式见补充条款第四条。
 
 ***
 
@@ -389,5 +403,5 @@ pnpm tauri build
 
 <p align="center">
   <sub>Built with ❤️ by Baiyu using Vue 3 + Tauri + Rust</sub><br>
-  <sub>Licensed under MPL-2.0 · 核心开源 · 生态开放</sub>
+  <sub>MPL-2.0 + 补充条款 · 源码开放 · 免费使用 · 生态开放</sub>
 </p>
