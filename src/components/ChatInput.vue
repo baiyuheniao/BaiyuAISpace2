@@ -107,7 +107,7 @@ const canSend = computed(() => {
 
 // API 配置下拉选项
 const apiConfigOptions = computed(() => {
-  return settings.apiConfigs.map(config => ({
+  return settings.apiConfigs.map((config) => ({
     label: `${config.name} (${PRESET_PROVIDERS[config.provider]?.name || config.provider})`,
     value: config.id,
   }));
@@ -122,23 +122,23 @@ const currentApiConfig = computed(() => {
 const kbOptions = computed(() => {
   return [
     { label: "不使用知识库", value: "" },
-    ...kbStore.knowledgeBases.map(kb => ({
+    ...kbStore.knowledgeBases.map((kb) => ({
       label: `${kb.name} (${kb.document_count} 文档)`,
       value: kb.id,
-    }))
+    })),
   ];
 });
 
 // 已选中的知识库名称
 const selectedKbName = computed(() => {
   if (!chat.selectedKnowledgeBaseId) return null;
-  const kb = kbStore.knowledgeBases.find(k => k.id === chat.selectedKnowledgeBaseId);
+  const kb = kbStore.knowledgeBases.find((k) => k.id === chat.selectedKnowledgeBaseId);
   return kb?.name;
 });
 
 // 已启用的 MCP 服务器数量
 const enabledMcpServersCount = computed(() => {
-  return mcp.servers.filter(s => s.enabled).length;
+  return mcp.servers.filter((s) => s.enabled).length;
 });
 
 // 可用的 MCP 工具数量
@@ -180,11 +180,14 @@ const readFileAsBase64 = (file: File): Promise<{ data: string; mediaType: string
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUrl = e.target?.result as string;
-      const commaIdx = dataUrl.indexOf(',');
-      if (commaIdx === -1) { reject(new Error("Invalid data URL")); return; }
+      const commaIdx = dataUrl.indexOf(",");
+      if (commaIdx === -1) {
+        reject(new Error("Invalid data URL"));
+        return;
+      }
       const header = dataUrl.slice(0, commaIdx);
       const data = dataUrl.slice(commaIdx + 1);
-      const mediaType = header.split(':')[1]?.split(';')[0] ?? file.type;
+      const mediaType = header.split(":")[1]?.split(";")[0] ?? file.type;
       resolve({ data, mediaType });
     };
     reader.onerror = reject;
@@ -211,27 +214,31 @@ const handleSend = async () => {
   }
 
   // 分类附件文件
-  const imageFiles = attachedFiles.value.filter(f => f.type.startsWith('image/'));
-  const videoFiles = attachedFiles.value.filter(f => f.type.startsWith('video/'));
-  const otherFiles = attachedFiles.value.filter(f => !f.type.startsWith('image/') && !f.type.startsWith('video/'));
+  const imageFiles = attachedFiles.value.filter((f) => f.type.startsWith("image/"));
+  const videoFiles = attachedFiles.value.filter((f) => f.type.startsWith("video/"));
+  const otherFiles = attachedFiles.value.filter(
+    (f) => !f.type.startsWith("image/") && !f.type.startsWith("video/")
+  );
 
   // 读取图片/视频文件为 base64
-  const images = imageFiles.length > 0
-    ? await Promise.all(imageFiles.map(readFileAsBase64))
-    : undefined;
+  const images =
+    imageFiles.length > 0 ? await Promise.all(imageFiles.map(readFileAsBase64)) : undefined;
 
-  const videos = videoFiles.length > 0
-    ? await Promise.all(videoFiles.map(readFileAsBase64))
-    : undefined;
+  const videos =
+    videoFiles.length > 0 ? await Promise.all(videoFiles.map(readFileAsBase64)) : undefined;
 
   // 文件元数据 (用于 UI 显示)
-  const fileInfo = attachedFiles.value.map(f => ({ name: f.name, size: f.size }));
+  const fileInfo = attachedFiles.value.map((f) => ({ name: f.name, size: f.size }));
 
   // 其余文件以文本提及方式加入内容
   let messageContent = content;
-  const mentions = otherFiles.map(f => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`);
+  const mentions = otherFiles.map(
+    (f) => `[文件: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)]`
+  );
   if (mentions.length > 0) {
-    messageContent = messageContent ? `${messageContent}\n${mentions.join(' ')}` : mentions.join(' ');
+    messageContent = messageContent
+      ? `${messageContent}\n${mentions.join(" ")}`
+      : mentions.join(" ");
   }
 
   // 加载附加文档内容（并行读取）
@@ -239,7 +246,7 @@ const handleSend = async () => {
   const documentContents: Array<{ name: string; content: string }> = [];
   for (const doc of docsToLoad) {
     try {
-      const text = await invoke<string>('read_document_for_context', { filePath: doc.path });
+      const text = await invoke<string>("read_document_for_context", { filePath: doc.path });
       documentContents.push({ name: doc.name, content: text });
     } catch (err) {
       console.error(`Failed to read document ${doc.name}:`, err);
@@ -259,7 +266,7 @@ const handleSend = async () => {
       fileInfo.length > 0 ? fileInfo : undefined,
       images,
       videos,
-      documentContents.length > 0 ? documentContents : undefined,
+      documentContents.length > 0 ? documentContents : undefined
     );
   } catch (error) {
     const errorInfo = chat.classifyError(error);
@@ -345,23 +352,31 @@ const handleFileSelect = () => {
 const handleFilesSelected = (event: Event) => {
   const target = event.target as HTMLInputElement;
   const files = target.files;
-  
+
   if (!files) return;
 
-  const supportedFormats = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/mpeg'];
-  
+  const supportedFormats = [
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "video/mp4",
+    "video/webm",
+    "video/mpeg",
+  ];
+
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (supportedFormats.includes(file.type)) {
       // Check if file already attached
-      if (!attachedFiles.value.find(f => f.name === file.name && f.size === file.size)) {
+      if (!attachedFiles.value.find((f) => f.name === file.name && f.size === file.size)) {
         attachedFiles.value.push(file);
       }
     }
   }
-  
+
   // Reset input
-  target.value = '';
+  target.value = "";
 };
 
 const removeAttachedFile = (index: number) => {
@@ -370,25 +385,47 @@ const removeAttachedFile = (index: number) => {
 
 const getFileDisplayName = (file: File): string => {
   const maxLength = 20;
-  return file.name.length > maxLength
-    ? file.name.substring(0, maxLength) + '...'
-    : file.name;
+  return file.name.length > maxLength ? file.name.substring(0, maxLength) + "..." : file.name;
 };
 
 // 打开文件对话框选择文档（直接上下文注入）
 const handleDocumentAttach = async () => {
   const selected = await open({
     multiple: true,
-    filters: [{
-      name: 'Documents',
-      extensions: ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'csv', 'pptx', 'md', 'markdown', 'html', 'htm', 'txt', 'rs', 'js', 'ts', 'py', 'java', 'c', 'cpp', 'h', 'go'],
-    }],
+    filters: [
+      {
+        name: "Documents",
+        extensions: [
+          "pdf",
+          "docx",
+          "doc",
+          "xlsx",
+          "xls",
+          "csv",
+          "pptx",
+          "md",
+          "markdown",
+          "html",
+          "htm",
+          "txt",
+          "rs",
+          "js",
+          "ts",
+          "py",
+          "java",
+          "c",
+          "cpp",
+          "h",
+          "go",
+        ],
+      },
+    ],
   });
   if (!selected) return;
   const paths = Array.isArray(selected) ? selected : [selected];
   for (const path of paths) {
     const name = path.split(/[\\/]/).pop() ?? path;
-    if (!attachedDocuments.value.find(d => d.path === path)) {
+    if (!attachedDocuments.value.find((d) => d.path === path)) {
       attachedDocuments.value.push({ name, path });
     }
   }
@@ -402,7 +439,7 @@ const removeAttachedDocument = (index: number) => {
 // 获取文档显示名称（截断长名称）
 const getDocDisplayName = (name: string): string => {
   const maxLength = 22;
-  return name.length > maxLength ? name.substring(0, maxLength) + '...' : name;
+  return name.length > maxLength ? name.substring(0, maxLength) + "..." : name;
 };
 </script>
 
@@ -413,9 +450,9 @@ const getDocDisplayName = (name: string): string => {
       v-if="currentApiConfig"
       class="api-indicator"
     >
-      <n-tag 
-        type="info" 
-        size="small" 
+      <n-tag
+        type="info"
+        size="small"
         :bordered="false"
         class="api-tag"
         @click="showApiSelector = !showApiSelector"
@@ -512,7 +549,7 @@ const getDocDisplayName = (name: string): string => {
         <template #icon>
           <n-icon><ExtensionPuzzleOutline /></n-icon>
         </template>
-        Skill: {{ activeSkillNames.join('、') }}
+        Skill: {{ activeSkillNames.join("、") }}
       </n-tag>
       <n-tag
         v-if="chat.skillAutonomyEnabled"
@@ -529,11 +566,13 @@ const getDocDisplayName = (name: string): string => {
           ref="inputRef"
           v-model="inputValue"
           class="chat-input"
-          :placeholder="!currentApiConfig 
-            ? '请先前往设置创建 API 配置...'
-            : chat.ragEnabled 
-              ? '输入问题，将基于知识库回答...' 
-              : '输入消息，按 Enter 发送...'"
+          :placeholder="
+            !currentApiConfig
+              ? '请先前往设置创建 API 配置...'
+              : chat.ragEnabled
+                ? '输入问题，将基于知识库回答...'
+                : '输入消息，按 Enter 发送...'
+          "
           rows="1"
           :disabled="chat.isLoading || !currentApiConfig"
           @keydown="handleKeydown"
@@ -605,14 +644,26 @@ const getDocDisplayName = (name: string): string => {
                   >
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <polyline points="14 2 14 8 20 8" />
-                    <line x1="12" y1="18" x2="12" y2="12" />
-                    <line x1="9" y1="15" x2="15" y2="15" />
+                    <line
+                      x1="12"
+                      y1="18"
+                      x2="12"
+                      y2="12"
+                    />
+                    <line
+                      x1="9"
+                      y1="15"
+                      x2="15"
+                      y2="15"
+                    />
                   </svg>
                 </n-icon>
               </template>
             </n-button>
           </template>
-          附加文档（注入上下文）{{ attachedDocuments.length > 0 ? ` (${attachedDocuments.length})` : '' }}
+          附加文档（注入上下文）{{
+            attachedDocuments.length > 0 ? ` (${attachedDocuments.length})` : ""
+          }}
         </n-tooltip>
 
         <!-- MCP Toggle -->
@@ -622,14 +673,14 @@ const getDocDisplayName = (name: string): string => {
               quaternary
               circle
               size="large"
-              :type="chat.mcpEnabled && enabledMcpServersCount > 0 ? 'warning' : 'default'"
+              :type="chat.mcpEnabled && availableMcpToolsCount > 0 ? 'warning' : 'default'"
               class="mcp-btn"
-              :disabled="enabledMcpServersCount === 0"
+              :disabled="availableMcpToolsCount === 0"
               @click="handleMcpToggle"
             >
               <template #icon>
                 <n-badge
-                  v-if="chat.mcpEnabled && enabledMcpServersCount > 0"
+                  v-if="chat.mcpEnabled && availableMcpToolsCount > 0"
                   :value="availableMcpToolsCount"
                   color="#000000"
                 >
@@ -641,7 +692,12 @@ const getDocDisplayName = (name: string): string => {
               </template>
             </n-button>
           </template>
-          {{ chat.mcpEnabled ? '禁用 MCP' : '启用 MCP' }}{{ enabledMcpServersCount > 0 ? ` (${enabledMcpServersCount} 服务)` : '(无可用服务)' }}
+          {{ chat.mcpEnabled ? "禁用 MCP" : "启用 MCP"
+          }}{{
+            availableMcpToolsCount > 0
+              ? ` (${enabledMcpServersCount} 服务/${availableMcpToolsCount} 工具)`
+              : "(无可用工具)"
+          }}
         </n-tooltip>
 
         <!-- RAG Selector -->
@@ -670,7 +726,9 @@ const getDocDisplayName = (name: string): string => {
               </template>
             </n-button>
           </template>
-          {{ availableKbCount === 0 ? '无可用知识库' : chat.ragEnabled ? '更改知识库' : '启用知识库' }}
+          {{
+            availableKbCount === 0 ? "无可用知识库" : chat.ragEnabled ? "更改知识库" : "启用知识库"
+          }}
         </n-tooltip>
 
         <!-- Skill Selector -->
@@ -699,7 +757,7 @@ const getDocDisplayName = (name: string): string => {
               </template>
             </n-button>
           </template>
-          {{ skillsStore.enabledSkills.length === 0 ? '无可用 Skill' : 'Skill' }}
+          {{ skillsStore.enabledSkills.length === 0 ? "无可用 Skill" : "Skill" }}
         </n-tooltip>
 
         <!-- Thinking Mode Toggle -->
@@ -718,7 +776,7 @@ const getDocDisplayName = (name: string): string => {
               </template>
             </n-button>
           </template>
-          {{ chat.thinkingEnabled ? '关闭思考模式' : '开启思考模式' }}
+          {{ chat.thinkingEnabled ? "关闭思考模式" : "开启思考模式" }}
         </n-tooltip>
 
         <!-- Send/Stop Button -->
@@ -752,7 +810,7 @@ const getDocDisplayName = (name: string): string => {
               </template>
             </n-button>
           </template>
-          {{ chat.isLoading ? '停止生成' : '发送消息' }}
+          {{ chat.isLoading ? "停止生成" : "发送消息" }}
         </n-tooltip>
       </div>
     </div>
@@ -779,8 +837,13 @@ const getDocDisplayName = (name: string): string => {
           >
             <template #icon>
               <n-icon :size="14">
-                <svg viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM12 18v-5h1v4h1v-3h1v3h1v-5h-5v5h1zm-3-5h1v5H9v-5zm-3 0h1v2H6v1h1v2H6v-5z"/>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <path
+                    d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM12 18v-5h1v4h1v-3h1v3h1v-5h-5v5h1zm-3-5h1v5H9v-5zm-3 0h1v2H6v1h1v2H6v-5z"
+                  />
                 </svg>
               </n-icon>
             </template>
@@ -804,8 +867,8 @@ const getDocDisplayName = (name: string): string => {
           :key="index"
           class="file-item"
         >
-          <n-tag 
-            closable 
+          <n-tag
+            closable
             class="file-tag"
             @close="removeAttachedFile(index)"
           >
@@ -816,14 +879,18 @@ const getDocDisplayName = (name: string): string => {
                   viewBox="0 0 24 24"
                   fill="currentColor"
                 >
-                  <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" />
+                  <path
+                    d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"
+                  />
                 </svg>
                 <svg
                   v-else-if="file.type.startsWith('video/')"
                   viewBox="0 0 24 24"
                   fill="currentColor"
                 >
-                  <path d="M18 3H6c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 10l-4-3v6l4-3z" />
+                  <path
+                    d="M18 3H6c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 10l-4-3v6l4-3z"
+                  />
                 </svg>
               </n-icon>
             </template>
@@ -924,7 +991,10 @@ const getDocDisplayName = (name: string): string => {
       </div>
 
       <n-checkbox-group v-model:value="chat.activeSkillIds">
-        <n-space vertical :size="8">
+        <n-space
+          vertical
+          :size="8"
+        >
           <n-checkbox
             v-for="option in skillCheckboxOptions"
             :key="option.value"
@@ -941,13 +1011,22 @@ const getDocDisplayName = (name: string): string => {
         暂无已启用的 Skill，请前往 Skill 页面创建
       </n-text>
 
-      <n-divider style="margin: 12px 0;" />
+      <n-divider style="margin: 12px 0" />
 
-      <n-space align="center" justify="space-between">
-        <n-text depth="3" style="font-size: 13px;">
+      <n-space
+        align="center"
+        justify="space-between"
+      >
+        <n-text
+          depth="3"
+          style="font-size: 13px"
+        >
           允许模型自主判断调用其它已启用的 Skill
         </n-text>
-        <n-switch v-model:value="chat.skillAutonomyEnabled" size="small" />
+        <n-switch
+          v-model:value="chat.skillAutonomyEnabled"
+          size="small"
+        />
       </n-space>
     </div>
 
@@ -960,7 +1039,7 @@ const getDocDisplayName = (name: string): string => {
           depth="3"
           class="hint-text"
         >
-          <span style="margin-right: 4px;">⌨️</span>
+          <span style="margin-right: 4px">⌨️</span>
           Enter 发送 · Shift+Enter 换行
         </n-text>
         <template v-if="chat.ragEnabled">
@@ -1251,5 +1330,4 @@ const getDocDisplayName = (name: string): string => {
 .file-btn:hover {
   background: rgba(0, 0, 0, 0.05);
 }
-
 </style>

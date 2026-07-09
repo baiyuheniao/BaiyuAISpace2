@@ -4,13 +4,13 @@
 
 /**
  * MCP Store - 管理 Model Context Protocol (MCP) 服务器和工具
- * 
+ *
  * 功能说明:
  * - MCP 服务器的 CRUD 操作
  * - 服务器类型支持: stdio (标准输入输出), SSE (服务器发送事件), HTTP
  * - 工具列表加载和管理
  * - 工具调用和结果处理
- * 
+ *
  * 使用方式:
  * import { useMCPStore } from "@/stores/mcp";
  * const mcp = useMCPStore();
@@ -27,19 +27,19 @@ import { invoke } from "@tauri-apps/api/core";
  * 定义一个可连接的 MCP 服务器
  */
 export interface MCPServer {
-  id: string;                      // 服务器唯一标识符
-  name: string;                    // 服务器名称
-  description: string;            // 服务器描述
-  server_type: "stdio" | "sse" | "http";  // 服务器连接类型
-  command: string;                // 启动命令 (stdio 类型使用)
-  args: string[];                 // 命令行参数
-  env: Record<string, string>;   // 环境变量
-  port?: number;                  // 端口号 (SSE/HTTP 类型使用)
-  url?: string;                   // 服务器 URL (SSE/HTTP 类型使用)
-  api_key?: string;              // API 密钥 (可选)
-  enabled: boolean;              // 是否启用
-  created_at: number;            // 创建时间戳
-  updated_at: number;            // 更新时间戳
+  id: string; // 服务器唯一标识符
+  name: string; // 服务器名称
+  description: string; // 服务器描述
+  server_type: "stdio" | "sse" | "http"; // 服务器连接类型
+  command: string; // 启动命令 (stdio 类型使用)
+  args: string[]; // 命令行参数
+  env: Record<string, string>; // 环境变量
+  port?: number; // 端口号 (SSE/HTTP 类型使用)
+  url?: string; // 服务器 URL (SSE/HTTP 类型使用)
+  api_key?: string; // API 密钥 (可选)
+  enabled: boolean; // 是否启用
+  created_at: number; // 创建时间戳
+  updated_at: number; // 更新时间戳
 }
 
 /**
@@ -47,49 +47,52 @@ export interface MCPServer {
  * 服务器提供的可调用工具
  */
 export interface MCPTool {
-  server_id: string;             // 所属服务器 ID
-  server_name: string;            // 服务器名称
-  name: string;                  // 工具名称
-  description: string;           // 工具描述
-  input_schema: Record<string, any>;  // 输入参数 schema
+  server_id: string; // 所属服务器 ID
+  server_name: string; // 服务器名称
+  name: string; // 工具名称
+  description: string; // 工具描述
+  input_schema: Record<string, any>; // 输入参数 schema
 }
 
 /**
  * MCP 工具调用结果
  */
 export interface MCPToolResult {
-  tool_name: string;              // 工具名称
-  result: Record<string, any>;   // 调用结果
-  error?: string;                 // 错误信息 (如果有)
+  tool_name: string; // 工具名称
+  result: Record<string, any>; // 调用结果
+  error?: string; // 错误信息 (如果有)
 }
 
 export const useMCPStore = defineStore("mcp", () => {
   // ============ 响应式状态 ============
-  
+
   // MCP 服务器列表
   const servers = ref<MCPServer[]>([]);
-  
+
   // 可用工具列表
   const tools = ref<MCPTool[]>([]);
-  
+
   // 是否正在加载
   const isLoading = ref(false);
-  
+
   // 当前选中的服务器 ID
   const selectedServerId = ref<string | null>(null);
 
   // ============ 计算属性 ============
-  
+
   // 获取所有已启用服务器的工具
+  // "builtin" 是应用内置工具（网络搜索/网页抓取），不对应任何 DB 里的
+  // MCPServer 行，本身始终可用，不受"服务器已启用"这个判断约束
   const availableTools = computed(() => {
     return tools.value.filter((tool) => {
+      if (tool.server_id === "builtin") return true;
       const server = servers.value.find((s) => s.id === tool.server_id);
       return server?.enabled;
     });
   });
 
   // ============ 方法函数 ============
-  
+
   // 获取指定服务器的工具列表
   const getToolsByServer = (serverId: string) => {
     return tools.value.filter((tool) => tool.server_id === serverId);
@@ -101,7 +104,7 @@ export const useMCPStore = defineStore("mcp", () => {
       isLoading.value = true;
       const loadedServers = await invoke<MCPServer[]>("list_mcp_servers");
       servers.value = loadedServers || [];
-      
+
       // Load tools for each server
       if (servers.value.length > 0) {
         await loadAllTools();
@@ -169,10 +172,7 @@ export const useMCPStore = defineStore("mcp", () => {
   };
 
   // 更新 MCP 服务器
-  const updateServer = async (
-    serverId: string,
-    updates: Partial<MCPServer>
-  ): Promise<void> => {
+  const updateServer = async (serverId: string, updates: Partial<MCPServer>): Promise<void> => {
     try {
       const server = servers.value.find((s) => s.id === serverId);
       if (!server) return;
@@ -236,22 +236,25 @@ export const useMCPStore = defineStore("mcp", () => {
   };
 
   // Test MCP server connection
+  // 返回值携带真实失败原因（比如"需要先安装 uv..."），而不是单纯的
+  // true/false —— 否则用户只知道连接失败，不知道该装什么
   const testConnection = async (
     serverType: string,
     command?: string,
     args?: string[],
     url?: string
-  ): Promise<boolean> => {
+  ): Promise<{ success: boolean; error?: string }> => {
     try {
-      return await invoke<boolean>("test_mcp_connection", {
+      const result = await invoke<{ success: boolean; error?: string }>("test_mcp_connection", {
         serverType,
         command,
         args,
         url,
       });
+      return { success: result.success, error: result.error ?? undefined };
     } catch (error) {
       console.error("MCP connection test failed:", error);
-      return false;
+      return { success: false, error: String(error) };
     }
   };
 

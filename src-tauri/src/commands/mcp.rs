@@ -257,6 +257,29 @@ const ALLOWED_MCP_COMMANDS: &[&str] = &[
     "bun", "deno", "go", "cargo", "ruby", "perl", "php",
 ];
 
+/// Translate a bare-runtime "program not found" spawn failure into a message
+/// that actually tells the user what to install, instead of the raw OS
+/// `NotFound` text -- stdio MCP servers are just "run this runtime with these
+/// args", so a missing runtime is by far the most common launch failure and
+/// the least self-explanatory one to a non-developer.
+fn friendly_missing_runtime_message(command: &str) -> String {
+    let cmd_name = Path::new(command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+    match cmd_name {
+        "npx" | "npm" | "node" => "需要先安装 Node.js（https://nodejs.org/），安装后重启软件再试".to_string(),
+        "uvx" | "uv" => "需要先安装 uv（https://docs.astral.sh/uv/），安装后重启软件再试".to_string(),
+        "python" | "python3" | "pip" => "需要先安装 Python（https://www.python.org/downloads/），安装后重启软件再试".to_string(),
+        "bun" => "需要先安装 Bun（https://bun.sh/），安装后重启软件再试".to_string(),
+        "deno" => "需要先安装 Deno（https://deno.com/），安装后重启软件再试".to_string(),
+        "go" => "需要先安装 Go（https://go.dev/dl/），安装后重启软件再试".to_string(),
+        "cargo" => "需要先安装 Rust（https://rustup.rs/），安装后重启软件再试".to_string(),
+        "ruby" => "需要先安装 Ruby（https://www.ruby-lang.org/），安装后重启软件再试".to_string(),
+        _ => format!("系统未找到命令 \"{}\"，请确认已安装并加入系统 PATH", cmd_name),
+    }
+}
+
 fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> {
     let cmd_path = Path::new(command);
     let cmd_name = cmd_path
@@ -379,8 +402,13 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         .stderr(Stdio::piped())
         .envs(&server.env);
     crate::commands::local_model::hide_console_window(&mut cmd);
-    let mut child = cmd.spawn()
-        .map_err(|e| MCPError::LaunchError(e.to_string()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MCPError::LaunchError(friendly_missing_runtime_message(&server.command))
+        } else {
+            MCPError::LaunchError(e.to_string())
+        }
+    })?;
 
     // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stderr".to_string()))?;
@@ -525,6 +553,11 @@ pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<M
         }
     }
 
+    // Built-in tools (web search, page fetch) ship with the app itself --
+    // no external runtime/process required -- so they're always available
+    // regardless of what the user has configured or installed.
+    all_tools.extend(builtin_tool_defs());
+
     log::info!("Total MCP tools available: {}", all_tools.len());
     Ok(all_tools)
 }
@@ -543,6 +576,12 @@ pub async fn call_mcp_tool(
     if tool_name.starts_with("demo_") || tool_name.starts_with("test_") {
         let request_id = Uuid::new_v4().to_string();
         return handle_demo_tool_call(&tool_name, input, &request_id).await;
+    }
+
+    // Built-in web search / page fetch have no corresponding DB server row --
+    // dispatch directly instead of trying (and failing) to look one up.
+    if tool_name.starts_with("builtin__") {
+        return execute_builtin_tool(&tool_name, input).await;
     }
 
     // Load server configurations from database
@@ -659,6 +698,181 @@ async fn handle_demo_tool_call(
     Ok(response)
 }
 
+/// Definitions for the tools the app ships with directly (web search, page
+/// fetch) -- these run in-process via `reqwest`, not as an external stdio/
+/// HTTP MCP server, so they need no `MCPServer` DB row and work regardless
+/// of what's installed on the user's machine. `server_id: "builtin"` is how
+/// `execute_tool_calls` (llm.rs) and `call_mcp_tool` recognize them.
+fn builtin_tool_defs() -> Vec<MCPTool> {
+    vec![
+        MCPTool {
+            server_id: "builtin".to_string(),
+            server_name: "内置工具".to_string(),
+            name: "builtin__web_search".to_string(),
+            description: "通过 DuckDuckGo 搜索网页，返回标题/链接/摘要列表，用于获取实时信息。内置能力，无需安装任何依赖。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "搜索关键词" },
+                    "max_results": { "type": "integer", "description": "返回结果条数，默认 5，最多 10" }
+                },
+                "required": ["query"]
+            }),
+        },
+        MCPTool {
+            server_id: "builtin".to_string(),
+            server_name: "内置工具".to_string(),
+            name: "builtin__fetch_url".to_string(),
+            description: "抓取指定网页并提取正文文本。内置能力，无需安装任何依赖。".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "要抓取的网页 URL" }
+                },
+                "required": ["url"]
+            }),
+        },
+    ]
+}
+
+const BUILTIN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const BUILTIN_FETCH_TEXT_LIMIT: usize = 15_000;
+
+/// Execute one of the built-in tools directly -- no subprocess, no external
+/// MCP transport, just an in-process HTTP call.
+async fn execute_builtin_tool(tool_name: &str, input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
+    match tool_name {
+        "builtin__web_search" => builtin_web_search(input).await,
+        "builtin__fetch_url" => builtin_fetch_url(input).await,
+        _ => Err(MCPError::CommunicationError(format!("Unknown builtin tool: {}", tool_name))),
+    }
+}
+
+async fn builtin_web_search(input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
+    let query = input
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCPError::InvalidConfig("web_search requires a 'query' string".to_string()))?;
+    let max_results = input
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(1, 10) as usize)
+        .unwrap_or(5);
+
+    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding::encode(query));
+
+    let client = reqwest::Client::new();
+    let response = tokio::time::timeout(
+        MCP_HTTP_TIMEOUT,
+        client.get(&url).header("User-Agent", BUILTIN_USER_AGENT).send(),
+    )
+    .await
+    .map_err(|_| MCPError::CommunicationError("搜索请求超时".to_string()))?
+    .map_err(|e| MCPError::CommunicationError(format!("搜索请求失败: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(MCPError::CommunicationError(format!("搜索请求失败: HTTP {}", response.status())));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|e| MCPError::CommunicationError(format!("读取搜索结果失败: {}", e)))?;
+
+    let document = scraper::Html::parse_document(&html);
+    let result_selector = scraper::Selector::parse(".result__body").unwrap();
+    let title_selector = scraper::Selector::parse(".result__title a").unwrap();
+    let snippet_selector = scraper::Selector::parse(".result__snippet").unwrap();
+
+    let mut results = Vec::new();
+    for result_el in document.select(&result_selector) {
+        if results.len() >= max_results {
+            break;
+        }
+        let Some(title_el) = result_el.select(&title_selector).next() else { continue };
+        let title: String = title_el.text().collect::<String>().trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        // DuckDuckGo's HTML results wrap the real target URL in an
+        // `uddg=`-encoded redirect link (`//duckduckgo.com/l/?uddg=...`)
+        // rather than linking to it directly.
+        let raw_href = title_el.value().attr("href").unwrap_or_default();
+        let link = raw_href
+            .split("uddg=")
+            .nth(1)
+            .map(|s| s.split('&').next().unwrap_or(s))
+            .map(|s| urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string()))
+            .unwrap_or_else(|| raw_href.to_string());
+        let snippet: String = result_el
+            .select(&snippet_selector)
+            .next()
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+
+        results.push(serde_json::json!({ "title": title, "url": link, "snippet": snippet }));
+    }
+
+    Ok(serde_json::json!({ "query": query, "results": results }))
+}
+
+async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
+    let url = input
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCPError::InvalidConfig("fetch_url requires a 'url' string".to_string()))?;
+
+    let client = reqwest::Client::new();
+    let response = tokio::time::timeout(
+        MCP_HTTP_TIMEOUT,
+        client.get(url).header("User-Agent", BUILTIN_USER_AGENT).send(),
+    )
+    .await
+    .map_err(|_| MCPError::CommunicationError("网页抓取超时".to_string()))?
+    .map_err(|e| MCPError::CommunicationError(format!("网页抓取失败: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(MCPError::CommunicationError(format!("网页抓取失败: HTTP {}", response.status())));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|e| MCPError::CommunicationError(format!("读取网页内容失败: {}", e)))?;
+
+    let document = scraper::Html::parse_document(&html);
+    // Pull text from block-level content tags rather than the whole document --
+    // real content almost always lives in these, while nav/script/style/footer
+    // chrome doesn't, so this sidesteps needing to explicitly strip them out.
+    let content_selector = scraper::Selector::parse(
+        "h1, h2, h3, h4, h5, h6, p, li, td, th, blockquote, pre, article, dd, dt"
+    ).unwrap();
+
+    let mut text = String::new();
+    for el in document.select(&content_selector) {
+        let line: String = el.text().collect::<String>().trim().to_string();
+        if !line.is_empty() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    }
+
+    if text.trim().is_empty() {
+        // Fallback for pages that don't use semantic block tags: grab the body wholesale.
+        if let Some(body) = document.select(&scraper::Selector::parse("body").unwrap()).next() {
+            text = body.text().collect::<Vec<_>>().join(" ");
+        }
+    }
+
+    let mut text = text.trim().to_string();
+    let truncated = text.chars().count() > BUILTIN_FETCH_TEXT_LIMIT;
+    if truncated {
+        text = text.chars().take(BUILTIN_FETCH_TEXT_LIMIT).collect();
+    }
+
+    Ok(serde_json::json!({ "url": url, "content": text, "truncated": truncated }))
+}
+
 /// Call MCP tool via Stdio (JSON-RPC over stdin/stdout)
 #[allow(dead_code)]
 async fn call_mcp_tool_stdio(
@@ -694,8 +908,13 @@ async fn call_mcp_tool_stdio(
         .stderr(Stdio::piped())
         .envs(&server.env);
     crate::commands::local_model::hide_console_window(&mut cmd);
-    let mut child = cmd.spawn()
-        .map_err(|e| MCPError::LaunchError(e.to_string()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MCPError::LaunchError(friendly_missing_runtime_message(&server.command))
+        } else {
+            MCPError::LaunchError(e.to_string())
+        }
+    })?;
 
     // Read stderr in a background task to prevent pipe blocking
     let stderr = child.stderr.take().ok_or_else(|| {
@@ -826,6 +1045,15 @@ async fn call_mcp_tool_http(
         .unwrap_or(serde_json::json!({"status": "success"})))
 }
 
+/// Result of a connection test -- carries the real failure reason (e.g. "需要
+/// 先安装 uv...") alongside the pass/fail flag, instead of collapsing it down
+/// to a bare boolean and leaving the user to go dig through the log file.
+#[derive(Debug, Clone, Serialize)]
+pub struct MCPConnectionTestResult {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 /// Test MCP server connection
 #[tauri::command]
 pub async fn test_mcp_connection(
@@ -833,7 +1061,7 @@ pub async fn test_mcp_connection(
     command: Option<String>,
     args: Option<Vec<String>>,
     url: Option<String>,
-) -> Result<bool, MCPError> {
+) -> Result<MCPConnectionTestResult, MCPError> {
     match server_type.as_str() {
         "stdio" => {
             if let Some(cmd) = command {
@@ -875,14 +1103,11 @@ pub async fn test_mcp_connection(
                 match call_mcp_tools_stdio(&probe_server).await {
                     Ok(tools) => {
                         log::info!("MCP test connection succeeded for '{} {}': {} tools", executable, probe_server.args.join(" "), tools.len());
-                        Ok(true)
+                        Ok(MCPConnectionTestResult { success: true, error: None })
                     }
                     Err(e) => {
-                        // 测试连接的 UI 只展示一个布尔结果，具体失败原因（启动失败/超时/
-                        // 响应解析失败等）只能从日志里查——这里记录下来，方便排查某个
-                        // 预设连不上时到底卡在哪一步
                         log::warn!("MCP test connection failed for '{} {}': {}", executable, probe_server.args.join(" "), e);
-                        Ok(false)
+                        Ok(MCPConnectionTestResult { success: false, error: Some(e.to_string()) })
                     }
                 }
             } else {
@@ -895,11 +1120,16 @@ pub async fn test_mcp_connection(
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(resp) => {
                         log::info!("MCP test connection to '{}' returned status {}", url, resp.status());
-                        Ok(resp.status().is_success())
+                        let status = resp.status();
+                        if status.is_success() {
+                            Ok(MCPConnectionTestResult { success: true, error: None })
+                        } else {
+                            Ok(MCPConnectionTestResult { success: false, error: Some(format!("HTTP {}", status)) })
+                        }
                     }
                     Err(e) => {
                         log::warn!("MCP test connection failed for '{}': {}", url, e);
-                        Err(MCPError::CommunicationError(e.to_string()))
+                        Ok(MCPConnectionTestResult { success: false, error: Some(e.to_string()) })
                     }
                 }
             } else {

@@ -87,14 +87,6 @@ interface MCPPreset {
 
 const MCP_PRESETS: MCPPreset[] = [
   {
-    id: "web-search",
-    name: "网络搜索",
-    description: "通过 DuckDuckGo 搜索网页并抓取正文内容，让模型获取实时信息，无需 API Key（基于 duckduckgo-mcp-server）",
-    serverType: "stdio",
-    command: "uvx",
-    args: ["duckduckgo-mcp-server"],
-  },
-  {
     id: "filesystem",
     name: "文件系统访问",
     description: "读写指定目录下的本地文件",
@@ -112,17 +104,10 @@ const MCP_PRESETS: MCPPreset[] = [
     args: ["-y", "@modelcontextprotocol/server-memory"],
   },
   {
-    id: "fetch",
-    name: "网页内容抓取",
-    description: "抓取网页并转换为适合模型阅读的 Markdown 格式",
-    serverType: "stdio",
-    command: "uvx",
-    args: ["mcp-server-fetch"],
-  },
-  {
     id: "playwright",
     name: "浏览器自动化",
-    description: "操控真实浏览器：打开网页、点击、填表、截图、读取页面结构等（微软官方 Playwright MCP）",
+    description:
+      "操控真实浏览器：打开网页、点击、填表、截图、读取页面结构等（微软官方 Playwright MCP）",
     serverType: "stdio",
     command: "npx",
     args: ["-y", "@playwright/mcp@latest"],
@@ -156,25 +141,30 @@ const MCP_PRESETS: MCPPreset[] = [
   {
     id: "office-word",
     name: "Word 文档编辑",
-    description: "创建、读取、编辑 .docx 文件：添加段落/标题/表格/图片，设置字体格式，合并文档，导出 PDF（基于 python-docx，2.1k Stars）",
+    description:
+      "创建、读取、编辑 .docx 文件：添加段落/标题/表格/图片，设置字体格式，合并文档，导出 PDF（基于 python-docx，2.1k Stars）",
     serverType: "stdio",
     command: "uvx",
     args: ["--from", "office-word-mcp-server", "word_mcp_server"],
-    needsConfig: "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-word-mcp-server",
+    needsConfig:
+      "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-word-mcp-server",
   },
   {
     id: "office-powerpoint",
     name: "PowerPoint 演示编辑",
-    description: "创建、编辑 .pptx 文件：增删幻灯片、插入文字/图片/表格/图表，应用主题，提取文本（32 个工具，基于 python-pptx，1.8k Stars）",
+    description:
+      "创建、编辑 .pptx 文件：增删幻灯片、插入文字/图片/表格/图表，应用主题，提取文本（32 个工具，基于 python-pptx，1.8k Stars）",
     serverType: "stdio",
     command: "uvx",
     args: ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"],
-    needsConfig: "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-powerpoint-mcp-server",
+    needsConfig:
+      "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-powerpoint-mcp-server",
   },
   {
     id: "office-excel",
     name: "Excel 表格编辑",
-    description: "读写 .xlsx 文件：读取/写入单元格、创建表格、复制 Sheet、设置格式（字体/填充/边框），基于 negokaz/excel-mcp-server（Go 实现，活跃维护）",
+    description:
+      "读写 .xlsx 文件：读取/写入单元格、创建表格、复制 Sheet、设置格式（字体/填充/边框），基于 negokaz/excel-mcp-server（Go 实现，活跃维护）",
     serverType: "stdio",
     command: "npx",
     args: ["--yes", "@negokaz/excel-mcp-server"],
@@ -198,47 +188,50 @@ const testingConnection = ref(false);
 /** 测试结果: true=成功, false=失败, null=未测试 */
 const testResult = ref<boolean | null>(null);
 
+/** 测试失败时的具体原因（比如缺少 uv/Node.js），用于替代笼统的"连接失败" */
+const testErrorMessage = ref<string | null>(null);
+
 // ============ 表单数据 ============
 
 /**
  * 添加服务表单数据
  */
 const formData = ref({
-  name: "",                        // 服务器名称
-  description: "",                 // 服务器描述
-  server_type: "stdio" as "stdio" | "sse" | "http",  // 服务器类型
-  command: "",                     // stdio 类型: 启动命令
-  args: "",                        // stdio 类型: 命令参数 (每行一个)
-  port: "",                        // HTTP/SSE 类型: 端口
-  url: "",                         // HTTP/SSE 类型: 服务 URL
-  api_key: "",                     // HTTP/SSE 类型: API Key
-  enabled: true,                   // 是否启用
+  name: "", // 服务器名称
+  description: "", // 服务器描述
+  server_type: "stdio" as "stdio" | "sse" | "http", // 服务器类型
+  command: "", // stdio 类型: 启动命令
+  args: "", // stdio 类型: 命令参数 (每行一个)
+  port: "", // HTTP/SSE 类型: 端口
+  url: "", // HTTP/SSE 类型: 服务 URL
+  api_key: "", // HTTP/SSE 类型: API Key
+  enabled: true, // 是否启用
 });
 
 // ============ 辅助函数 ============
 
 /**
  * 获取服务器类型对应的图标组件
- * 
+ *
  * @param type - 服务器类型 ("stdio" | "sse" | "http")
  * @returns 对应的图标组件
  */
 const getServerIcon = (type: string) => {
   switch (type) {
     case "stdio":
-      return Terminal;     // 终端图标
+      return Terminal; // 终端图标
     case "sse":
-      return Code;        // 代码图标
+      return Code; // 代码图标
     case "http":
-      return Globe;        // 网络图标
+      return Globe; // 网络图标
     default:
-      return Cube;        // 默认立方体图标
+      return Cube; // 默认立方体图标
   }
 };
 
 /**
  * 获取服务器类型的中文标签
- * 
+ *
  * @param type - 服务器类型
  * @returns 中文标签
  */
@@ -286,6 +279,7 @@ const resetForm = () => {
     enabled: true,
   };
   testResult.value = null;
+  testErrorMessage.value = null;
 };
 
 /**
@@ -306,6 +300,7 @@ const openCreateModal = () => {
 const handleServerTypeChange = (type: string) => {
   formData.value.server_type = type as "stdio" | "sse" | "http";
   testResult.value = null;
+  testErrorMessage.value = null;
 };
 
 /**
@@ -327,6 +322,7 @@ const applyPreset = (preset: MCPPreset) => {
     enabled: true,
   };
   testResult.value = null;
+  testErrorMessage.value = null;
   showCreateModal.value = true;
   if (preset.needsConfig) {
     message.info(preset.needsConfig);
@@ -373,12 +369,18 @@ const handleTestConnection = async () => {
       formData.value.url || undefined
     );
 
-    testResult.value = result;
-    console.debug("[MCP] test connection", { command: formData.value.command, args: argsArray, url: formData.value.url, result });
-    if (result) {
+    testResult.value = result.success;
+    testErrorMessage.value = result.error ?? null;
+    console.debug("[MCP] test connection", {
+      command: formData.value.command,
+      args: argsArray,
+      url: formData.value.url,
+      result,
+    });
+    if (result.success) {
       message.success("连接成功");
     } else {
-      message.error("连接失败");
+      message.error(result.error || "连接失败");
     }
   } finally {
     testingConnection.value = false;
@@ -435,6 +437,7 @@ const handleCreate = async () => {
       showCreateModal.value = false;
       resetForm();
       testResult.value = null;
+      testErrorMessage.value = null;
     }
   } catch (error) {
     message.error("添加失败：" + String(error));
@@ -443,7 +446,7 @@ const handleCreate = async () => {
 
 /**
  * 删除 MCP 服务器
- * 
+ *
  * @param serverId - 要删除的服务器 ID
  */
 const handleDelete = async (serverId: string) => {
@@ -457,7 +460,7 @@ const handleDelete = async (serverId: string) => {
 
 /**
  * 切换服务器启用/禁用状态
- * 
+ *
  * @param serverId - 服务器 ID
  */
 const handleToggle = async (serverId: string) => {
@@ -487,10 +490,10 @@ const handleTestSavedServer = async (server: MCPServer) => {
       server.url || undefined
     );
     console.debug("[MCP] test saved server", { id: server.id, name: server.name, result });
-    if (result) {
+    if (result.success) {
       message.success(`「${server.name}」连接成功`);
     } else {
-      message.error(`「${server.name}」连接失败`);
+      message.error(`「${server.name}」${result.error || "连接失败"}`);
     }
   } finally {
     testingServerId.value = null;
@@ -513,6 +516,53 @@ const handleTestSavedServer = async (server: MCPServer) => {
             MCP 服务管理
           </h1>
         </header>
+
+        <!-- 内置能力说明卡片 -->
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
+          <template #header>
+            <div class="card-header">
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <CheckmarkCircle />
+              </n-icon>
+              <span>内置能力（开箱即用）</span>
+            </div>
+          </template>
+
+          <n-list hoverable>
+            <n-list-item>
+              <n-thing>
+                <template #header>
+                  网络搜索
+                </template>
+                <template #description>
+                  <n-text depth="3">
+                    通过 DuckDuckGo 搜索网页，获取实时信息。应用内置实现，无需安装 uv/Node.js
+                    等任何依赖，随对话页的"启用 MCP"开关一起生效
+                  </n-text>
+                </template>
+              </n-thing>
+            </n-list-item>
+            <n-list-item>
+              <n-thing>
+                <template #header>
+                  网页内容抓取
+                </template>
+                <template #description>
+                  <n-text depth="3">
+                    抓取网页并提取正文文本。应用内置实现，无需安装任何依赖，随对话页的"启用
+                    MCP"开关一起生效
+                  </n-text>
+                </template>
+              </n-thing>
+            </n-list-item>
+          </n-list>
+        </n-card>
 
         <!-- 推荐服务预设卡片 -->
         <n-card
@@ -655,7 +705,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
                       v-if="server.server_type === 'stdio'"
                       depth="3"
                     >
-                      命令: <n-text code>
+                      命令:
+                      <n-text code>
                         {{ server.command }}
                       </n-text>
                     </n-text>
@@ -664,7 +715,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
                       v-if="server.url"
                       depth="3"
                     >
-                      地址: <n-text code>
+                      地址:
+                      <n-text code>
                         {{ server.url }}
                       </n-text>
                     </n-text>
@@ -790,7 +842,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
                       {{ tool.description }}
                     </n-text>
                     <n-text depth="3">
-                      来自: <n-text strong>
+                      来自:
+                      <n-text strong>
                         {{ tool.server_name }}
                       </n-text>
                     </n-text>
@@ -821,7 +874,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
           <div class="section-title">
             基本信息
           </div>
-          
+
           <!-- 服务名称 -->
           <n-form-item
             label="服务名称"
@@ -849,7 +902,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
           <div class="section-title">
             服务类型
           </div>
-          
+
           <!-- 类型选择 -->
           <n-form-item
             label="类型"
@@ -879,7 +932,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
                   depth="3"
                   style="font-size: 12px"
                 >
-                  只填可执行文件本身（如 npx、python、/path/to/binary），不要包含参数或脚本名 -- 脚本名和其余参数请填到下面的"命令参数"里
+                  只填可执行文件本身（如 npx、python、/path/to/binary），不要包含参数或脚本名 --
+                  脚本名和其余参数请填到下面的"命令参数"里
                 </n-text>
               </template>
             </n-form-item>
@@ -965,9 +1019,23 @@ const handleTestSavedServer = async (server: MCPServer) => {
               :type="testResult === true ? 'success' : testResult === false ? 'error' : 'default'"
               @click="handleTestConnection"
             >
-              {{ testResult === true ? "✓ 连接成功" : testResult === false ? "✗ 连接失败" : "测试连接" }}
+              {{
+                testResult === true
+                  ? "✓ 连接成功"
+                  : testResult === false
+                    ? "✗ 连接失败"
+                    : "测试连接"
+              }}
             </n-button>
             <n-text
+              v-if="testResult === false && testErrorMessage"
+              depth="1"
+              style="font-size: 12px; margin-left: 12px"
+            >
+              {{ testErrorMessage }}
+            </n-text>
+            <n-text
+              v-else
               depth="3"
               style="font-size: 12px; margin-left: 12px"
             >
