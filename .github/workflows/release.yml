@@ -1,4 +1,5 @@
 # CD：推送 v* 标签时，自动在三个平台打安装包并创建 GitHub Release（草稿）
+# Windows 额外附带一份便携版单文件 exe（未打包的原始二进制，免安装双击运行）
 # 用法：git tag v0.1.0 && git push origin v0.1.0
 # 打完后到 GitHub Releases 页面检查草稿，确认没问题再手动发布
 name: Release
@@ -64,7 +65,18 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'BaiyuAISpace ${{ github.ref_name }}'
-          releaseBody: '各平台安装包见下方 Assets。Windows 用 .exe（NSIS），macOS 用 .dmg，Linux 用 .AppImage。'
+          releaseBody: '各平台安装包见下方 Assets。Windows 提供 .exe 安装包（NSIS）和便携版单文件 exe（免安装，双击运行），macOS 用 .dmg，Linux 用 .AppImage。'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # tauri-action 打包前会先编译出未打包的原始二进制（前端资源已编译期嵌入，
+      # 单文件即可运行，仅依赖系统自带的 WebView2 Runtime）；这里改名后追加上传到同一个 Release
+      - name: Upload portable exe (Windows only)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Copy-Item "src-tauri/target/release/BaiyuAISpace2.exe" "BaiyuAISpace-${{ github.ref_name }}-portable.exe"
+          gh release upload ${{ github.ref_name }} "BaiyuAISpace-${{ github.ref_name }}-portable.exe" --clobber
