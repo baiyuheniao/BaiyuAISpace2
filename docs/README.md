@@ -12,6 +12,7 @@
 | [SOFTWARE_TESTING_PLAN.md](./SOFTWARE_TESTING_PLAN.md) | 测试策略、环境准备与流程规范 |
 | [api-manuals/](./api-manuals/) | 15 个 LLM 提供商的官方 API 技术手册 |
 | [AgentTeamMode/](./AgentTeamMode/) | Agent Team（多 Agent 协作）设计文档（md/docx/pdf） |
+| [wiki/](./wiki/) | GitHub Wiki 页面源文件（每个 .md 对应一个 Wiki 页面，整体推送到 `BaiyuAISpace2.wiki.git` 即可发布） |
 
 ## 历史归档（仅供追溯，不代表当前实现）
 
