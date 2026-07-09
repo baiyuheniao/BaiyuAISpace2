@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "BaiyuAISpace",
-  "version": "0.2.0-beta.2",
+  "version": "0.2.0-beta.3",
   "identifier": "com.baiyu.aispace",
   "build": {
     "frontendDist": "../dist",
@@ -32,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "dmg", "appimage"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,5 +46,15 @@
       "timestampUrl": ""
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVENUI3RkQ3MjAwQjQ4MkEKUldRcVNBc2cxMzliWFRpYVYwUU85UHpWNFV4OTJHd29uTUptMjRRak9Eam1TYkNLTWpsM1E4SHkK",
+      "endpoints": [
+        "https://github.com/baiyuheniao/BaiyuAISpace2/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

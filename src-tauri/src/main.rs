@@ -145,6 +145,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         // 注册对话框插件 (用于文件选择)
         .plugin(tauri_plugin_dialog::init())
+        // 注册自动更新插件 (启动时检测 GitHub Releases 上的新版本)
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // 注册进程插件 (更新安装完成后重启应用)
+        .plugin(tauri_plugin_process::init())
         // 注册全局快捷键插件：用于从托盘唤起主窗口
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()

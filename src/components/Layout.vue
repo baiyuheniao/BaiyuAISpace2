@@ -22,12 +22,18 @@ import { computed, onMounted, onBeforeUnmount } from "vue";
 // 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
 
+// 导入 NaiveUI 通知 API (左下角统一弹窗机制)
+import { useNotification } from "naive-ui";
+
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
 
 // 导入快捷键匹配工具
 import { eventMatchesAccelerator } from "@/utils/hotkey";
+
+// 导入自动更新检测
+import { checkForAppUpdate } from "@/utils/updater";
 
 // 导入 Logo 图片
 import logoImg from "../../assets/logo.png";
@@ -87,8 +93,15 @@ const handleNewSessionHotkey = (e: KeyboardEvent) => {
   handleNewChat();
 };
 
+// 通知 API (供更新提示弹窗使用)
+const notification = useNotification();
+
 onMounted(() => {
   window.addEventListener("keydown", handleNewSessionHotkey);
+  // 延迟几秒再检测更新，避免和启动初始化抢时间
+  setTimeout(() => {
+    void checkForAppUpdate(notification);
+  }, 3000);
 });
 
 onBeforeUnmount(() => {
