@@ -2,21 +2,13 @@
 # Windows 是主力平台，Ubuntu 用来验证跨平台编译是否被改坏
 name: CI
 
+# 注意：不要给这里加 paths-ignore——main 分支保护要求这两个 check 必须通过，
+# 如果纯文档 PR 触发不了 CI，会永远卡在 “等待检查” 无法合并
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.claude/**'
-      - '.gitignore'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.claude/**'
-      - '.gitignore'
 
 jobs:
   check:

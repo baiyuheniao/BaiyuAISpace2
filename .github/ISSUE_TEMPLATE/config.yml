@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "\U0001F4AC 使用咨询 / 想法讨论"
+    url: https://github.com/baiyuheniao/BaiyuAISpace2/discussions
+    about: 使用问题、配置求助、开放性讨论请走 Discussions，Bug 和明确的功能建议请用左侧模板
+  - name: "\U0001F512 安全漏洞报告"
+    url: https://github.com/baiyuheniao/BaiyuAISpace2/blob/main/SECURITY.md
+    about: 涉及 API 密钥泄露等安全问题请勿公开发 Issue，按 SECURITY.md 的方式私下报告

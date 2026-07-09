@@ -23,5 +23,7 @@
 | [archive/pr-review-report.md](./archive/pr-review-report.md) | 2026-05-23 | 某次 PR 批量审核的快照报告，涉及 PR 均已处理完毕 |
 | [archive/mcp-integration-guide.md](./archive/mcp-integration-guide.md) | 早期 | MCP 集成规划文档，TODO 项（SQLite 持久化、Function Calling）均已实现 |
 | [archive/mcp-llm-integration.md](./archive/mcp-llm-integration.md) | 早期 | 早期基于文本提示词+正则解析的工具调用方案，已被原生 Function Calling 取代 |
+| [archive/debug-message-disappear.md](./archive/debug-message-disappear.md) | 2026-06 | 「消息消失」问题的排障记录，问题已修复 |
+| [archive/Claude_Code_超详细全功能使用说明书.md](./archive/Claude_Code_超详细全功能使用说明书.md) | — | 开发工具（Claude Code）使用笔记，与本项目功能无关 |
 
 需要了解当前功能全貌，请看[根目录 README](../README.md)。
