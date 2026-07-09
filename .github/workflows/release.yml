@@ -67,7 +67,8 @@ jobs:
           releaseName: 'BaiyuAISpace ${{ github.ref_name }}'
           releaseBody: '各平台安装包见下方 Assets。Windows 提供 .exe 安装包（NSIS）和便携版单文件 exe（免安装，双击运行），macOS 用 .dmg，Linux 用 .AppImage。'
           releaseDraft: true
-          prerelease: false
+          # 带 “-” 的标签（如 v0.2.0-beta.1）自动标为预发布版本
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
 
       # tauri-action 打包前会先编译出未打包的原始二进制（前端资源已编译期嵌入，

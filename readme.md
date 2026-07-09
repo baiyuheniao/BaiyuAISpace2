@@ -21,7 +21,7 @@
   <img src="https://img.shields.io/badge/Vue-3.4+-4FC08D?style=flat-square&logo=vue.js" alt="Vue 3">
   <img src="https://img.shields.io/badge/Tauri-2.0-FFC131?style=flat-square&logo=tauri" alt="Tauri 2">
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/License-MPL_2.0-orange?style=flat-square" alt="MPL-2.0">
+  <img src="https://img.shields.io/badge/License-MPL--2.0_%2B_%E8%A1%A5%E5%85%85%E6%9D%A1%E6%AC%BE-orange?style=flat-square" alt="MPL-2.0 + 补充条款">
 </p>
 
 ***
@@ -39,6 +39,27 @@
 - 🔒 **隐私优先**：API 密钥本地加密存储，数据不出设备
 - ⚡ **极速响应**：Rust 原生后端，毫秒级延迟
 - 🤖 **Agent 原生**：内置多 Agent 协作工作组、MCP 工具调用、RAG 知识库、定时任务
+
+***
+
+## 🚧 Beta 公测须知
+
+当前版本处于 **Beta 公测阶段**：核心功能已完整可用并经过全场景测试，
+但仍可能存在未知问题。以下是已知限制，安装前请了解：
+
+- **Windows 安装包暂未进行代码签名**。首次运行时 SmartScreen 可能弹出
+  "已保护你的电脑" 警告——点击 **"更多信息" → "仍要运行"** 即可。
+  这是独立开发者应用的常见情况，不代表安装包有安全问题（所有构建均由
+  GitHub Actions 从公开源码自动打包，可溯源）。
+- **知识库暂不适合超大规模数据**。当前向量检索为全量扫描，
+  单个知识库建议控制在约 1 万个文本分块以内（约几百份常规文档），
+  超出后搜索会明显变慢。向量索引优化在路线图中（见 [#18](https://github.com/baiyuheniao/BaiyuAISpace2/issues/18)）。
+- **Beta 期间暂无应用内自动更新**，新版本请关注
+  [Releases](https://github.com/baiyuheniao/BaiyuAISpace2/releases) 页面手动下载。
+
+**反馈渠道**：Bug 和功能建议请用 [Issue 模板](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose)提交
+（Bug 请务必附上日志，位置见模板内说明）；使用咨询和开放讨论请走
+[Discussions](https://github.com/baiyuheniao/BaiyuAISpace2/discussions)。
 
 ***
 
@@ -342,8 +363,22 @@ pnpm tauri build
 
 ## 📜 许可证
 
-本软件采用 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0) 开源。
-**注意·本项目还有 BaiyuAISpace 许可证补充条款**
+本软件基于 **[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/)** (MPL-2.0)，
+并附有 **[BaiyuAISpace 许可证补充条款](./BaiyuAISpace%20许可证补充条款.md)**（对商业使用附加限制）。
+由于附加了商用限制，本项目属于**源码开放（source-available）、人人免费使用**的模式，
+而非 OSI 严格定义下的开源许可。
+
+**人话版**（以补充条款原文为准）：
+
+| 你想做的事 | 是否可以 |
+|---|---|
+| 个人使用 / 公司内部使用 | ✅ 免费，随便用 |
+| 开发插件、扩展、MCP 工具并商用 | ✅ 免费 |
+| 在本软件基础上做实质性二次开发，作为你自己的产品卖 | ✅ 免费 |
+| 改个名字换个皮就拿去卖，或架在服务器上做 SaaS 卖账号 | ❌ 需要联系作者购买商业授权 |
+
+判断标准一句话：**你卖的东西，价值主要来自你自己的开发，还是来自本软件本身？**
+前者免费，后者需要授权。商业授权联系方式见补充条款第四条。
 
 ***
 
@@ -357,15 +392,16 @@ pnpm tauri build
 
 ## 🤝 贡献指南
 
-欢迎 Issue 和 PR！请确保：
+欢迎 Issue 和 PR！
 
-1. 代码通过 `cargo clippy` 和 `pnpm build`（含 `vue-tsc --noEmit`）检查
-2. 所有新文件包含 MPL-2.0 头注释
-3. 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)
+- 参与开发前请阅读 **[CONTRIBUTING.md](./CONTRIBUTING.md)**——包含环境搭建、
+  构建顺序的坑、代码规范（黑白设计系统、超时策略）和提交约定
+- Bug 报告 / 功能建议请使用 [Issue 模板](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose)
+- 安全漏洞请按 **[SECURITY.md](./SECURITY.md)** 私下报告，不要公开发 Issue
 
 ***
 
 <p align="center">
   <sub>Built with ❤️ by Baiyu using Vue 3 + Tauri + Rust</sub><br>
-  <sub>Licensed under MPL-2.0 · 核心开源 · 生态开放</sub>
+  <sub>MPL-2.0 + 补充条款 · 源码开放 · 免费使用 · 生态开放</sub>
 </p>
