@@ -1,17 +1,16 @@
 # BaiyuAISpace Wiki
 
-<p align="center"><strong>轻量级跨平台 AI Agent 开发环境</strong></p>
+<p align="center"><strong>桌面 AI 工作台：LLM 客户端 + Agent 编排 + 本地模型托管</strong></p>
 
-**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的 LLM 客户端与 Agent 开发环境，基于 **Tauri 2 + Vue 3 + Rust** 构建。支持调用主流云端大模型 API，也支持通过 Ollama / LM Studio 运行本地模型——上手门槛低、自由度高、成本低廉。
+**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的桌面 AI 工作台，基于 **Tauri 2 + Vue 3 + Rust** 构建。既是接入 15+ 家云端服务商与 Ollama / LM Studio 本地模型的 LLM 客户端，也内置多 Agent 协作、MCP 工具、RAG 知识库与定时任务等 Agent 编排能力——自带 API Key、用多少付多少，自由度与成本都由你自己掌控。
 
 > 当前版本：**v0.2.0-beta.3**（Beta 公测阶段）。核心功能已完整可用并经过全场景测试，但仍可能存在未知问题，欢迎[提交 Issue](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose) 反馈。
 
 ## 核心设计理念
 
-- 🪶 **极轻量级**：Tauri 2 原生窗口，安装包比 Electron 方案小约 80%，低配置设备也能流畅运行
+- 🪶 **原生轻快**：Tauri 2 原生窗口，安装包比 Electron 方案小约 80%，秒级启动，低配置设备也能流畅运行——轻在壳，功能不缩水
 - 🖥️ **真跨平台**：一套代码同时支持 Windows、macOS、Linux（当前以 Windows 为主力平台）
-- 🔒 **隐私优先**：API 密钥加密存入系统密钥链，对话数据存本地 SQLite，不出设备
-- ⚡ **极速响应**：Rust 原生后端 + Tokio 异步运行时，毫秒级延迟
+- 🔒 **本地优先**：API 密钥加密存入系统密钥链，会话与知识库全存本地 SQLite；搭配 Ollama / LM Studio 可完全离线使用
 - 🤖 **Agent 原生**：内置多 Agent 协作工作组、MCP 工具调用、RAG 知识库、Skill 技能、定时任务
 
 ## 应用一览

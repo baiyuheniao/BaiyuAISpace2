@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>轻量级跨平台 AI Agent 开发环境</strong><br>
-  <em>Lightweight Cross-Platform AI Agent Development Environment</em>
+  <strong>桌面 AI 工作台：LLM 客户端 + Agent 编排 + 本地模型托管</strong><br>
+  <em>Desktop AI Workspace — LLM Client · Agent Orchestration · Local Models</em>
 </p>
 
 <p align="center">
@@ -28,16 +28,15 @@
 
 ## 🎯 项目简介
 
-**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的 LLM 客户端与 Agent 开发环境。支持调用主流云端大模型 API，以及通过 Ollama / LM Studio 运行本地模型，提供比大多数同类工具更低的上手门槛、更高的自由度和更低廉的成本。
+**BaiyuAISpace** 是一个专为开发者和 AI 爱好者打造的桌面 AI 工作台：既是接入 15+ 家云端服务商与 Ollama / LM Studio 本地模型的 LLM 客户端，也内置多 Agent 协作、MCP 工具、RAG 知识库与定时任务等 Agent 编排能力。自带 API Key、用多少付多少，自由度与成本都由你自己掌控。
 
 （别问1去哪里了，1废了 :( ）
 
 **核心设计理念：**
 
-- 🪶 **极轻量级**：低资源平台也能有不错的性能表现，启动超快
-- 🖥️ **真跨平台**：一套代码同时支持 Windows、macOS、Linux
-- 🔒 **隐私优先**：API 密钥本地加密存储，数据不出设备
-- ⚡ **极速响应**：Rust 原生后端，毫秒级延迟
+- 🪶 **原生轻快**：Tauri 2 + Rust 原生后端，安装包比 Electron 方案小约 80%，秒级启动——轻在壳，功能不缩水
+- 🖥️ **真跨平台**：一套代码同时支持 Windows、macOS、Linux（当前以 Windows 为主力平台）
+- 🔒 **本地优先**：API 密钥加密存入系统密钥链，会话与知识库全存本地 SQLite；搭配 Ollama / LM Studio 可完全离线使用
 - 🤖 **Agent 原生**：内置多 Agent 协作工作组、MCP 工具调用、RAG 知识库、定时任务
 
 ***
@@ -54,8 +53,9 @@
 - **知识库暂不适合超大规模数据**。当前向量检索为全量扫描，
   单个知识库建议控制在约 1 万个文本分块以内（约几百份常规文档），
   超出后搜索会明显变慢。向量索引优化在路线图中（见 [#18](https://github.com/baiyuheniao/BaiyuAISpace2/issues/18)）。
-- **Beta 期间暂无应用内自动更新**，新版本请关注
-  [Releases](https://github.com/baiyuheniao/BaiyuAISpace2/releases) 页面手动下载。
+- **应用内自动更新已于 0.2.0-beta.3 上线**：启动时后台检测新版本，左下角弹窗提示，
+  确认后自动下载安装并重启。更早的 Beta 版本请到
+  [Releases](https://github.com/baiyuheniao/BaiyuAISpace2/releases) 页面手动下载升级一次。
 
 **反馈渠道**：Bug 和功能建议请用 [Issue 模板](https://github.com/baiyuheniao/BaiyuAISpace2/issues/new/choose)提交
 （Bug 请务必附上日志，位置见模板内说明）；使用咨询和开放讨论请走
