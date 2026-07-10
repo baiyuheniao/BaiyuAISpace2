@@ -620,21 +620,39 @@ fn append_skill_tools(body: &mut serde_json::Value, provider: &str, autonomous_s
     }
 }
 
-fn create_http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+/// 目标是否回环地址 (localhost/127.0.0.1/::1) —— 本地部署的模型服务
+/// (Ollama/LM Studio 等经由 "local"/"custom"/"openclaw" provider 走到这里)
+/// 走这条路径时应绕开系统代理，否则用户为访问境外服务商而开启的全局代理
+/// 会把本该直连本机的请求也绕出去一圈，白白拖慢 TTFT。
+fn is_loopback_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .map(|host| host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127."))
+        .unwrap_or(false)
+}
+
+fn create_http_client(url: &str) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
         .timeout(LLM_REQUEST_TIMEOUT)
-        .connect_timeout(LLM_CONNECT_TIMEOUT)
-        .build()
+        .connect_timeout(LLM_CONNECT_TIMEOUT);
+    if is_loopback_url(url) {
+        builder = builder.no_proxy();
+    }
+    builder.build()
 }
 
 /// 流式请求专用：`timeout()` 是含读完整个响应体的总时长，SSE 长回复会被
 /// 中途掐断（表现为 "Stream error: error decoding response body"），
 /// 因此这里只设读间隔超时，流只要还在吐数据就不会被断开。
-fn create_streaming_http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+fn create_streaming_http_client(url: &str) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
         .read_timeout(LLM_STREAM_READ_TIMEOUT)
-        .connect_timeout(LLM_CONNECT_TIMEOUT)
-        .build()
+        .connect_timeout(LLM_CONNECT_TIMEOUT);
+    if is_loopback_url(url) {
+        builder = builder.no_proxy();
+    }
+    builder.build()
 }
 
 fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
@@ -1004,7 +1022,7 @@ pub async fn stream_message(
         return Err(LLMError::ApiError("Invalid target URL".to_string()));
     }
 
-    let client = create_streaming_http_client()?;
+    let client = create_streaming_http_client(&url)?;
     let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking, request.max_tokens);
     append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);
@@ -1322,7 +1340,7 @@ async fn continue_after_tool_calls(
     max_tokens: Option<u32>,
 ) -> Result<ContinuationResult, LLMError> {
     let url = build_url(provider, base_url, model, false);
-    let client = create_http_client()?;
+    let client = create_http_client(&url)?;
 
     // Same empty-message guard as `build_stream_request_body`: a message left
     // contentless by a stream cancelled before any token arrived must not be
@@ -1829,7 +1847,7 @@ pub async fn run_turn(
     tools: &[MCPTool],
 ) -> Result<TurnOutcome, LLMError> {
     let url = build_url(provider, base_url, model, false);
-    let client = create_http_client()?;
+    let client = create_http_client(&url)?;
 
     let body = match provider {
         "anthropic" => {

@@ -50,8 +50,10 @@ export const useLMStudioStore = defineStore(
   () => {
     // ============ 响应式状态 ============
 
-    /** LM Studio 服务器地址 (不含 /v1，由各命令自行拼接路径) */
-    const baseUrl = ref("http://localhost:1234");
+    /** LM Studio 服务器地址 (不含 /v1，由各命令自行拼接路径)
+     *  用 127.0.0.1 而非 localhost：部分 Windows 网络环境 (装了 VPN 虚拟
+     *  网卡、IPv6 配置异常等) 解析 "localhost" 会有明显额外延迟。 */
+    const baseUrl = ref("http://127.0.0.1:1234");
 
     /** 可选的 API Key (仅当用户在 LM Studio 中开启了 "Require API key" 时需要) */
     const apiKey = ref("");

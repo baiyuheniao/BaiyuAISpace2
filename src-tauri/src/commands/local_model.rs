@@ -171,20 +171,26 @@ pub fn get_model_sources() -> Vec<ModelSource> {
 
 // ============ Helper functions ============
 
-/// Create HTTP client for Ollama API calls
+/// Create HTTP client for Ollama API calls. This always targets the user's
+/// own Ollama server (local or LAN), never a remote SaaS endpoint, so it's
+/// exempted from the system proxy -- otherwise a global-mode proxy set up
+/// for reaching overseas providers would also detour this local traffic.
 fn create_ollama_client(_base_url: &str) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
 }
 
 /// 流式下载专用（模型拉取等）：总超时会在下载超过设定时长时把还在
-/// 正常传输的连接掐断，因此只设读间隔超时——断流才算失败。
+/// 正常传输的连接掐断，因此只设读间隔超时——断流才算失败。同样只连
+/// 本地 Ollama 的 /api/pull，绕开系统代理。
 fn create_download_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .read_timeout(crate::commands::constants::DOWNLOAD_READ_TIMEOUT)
         .connect_timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
 }
 
@@ -675,6 +681,7 @@ pub async fn start_ollama_service(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
+        .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -718,6 +725,7 @@ pub async fn start_ollama_service(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
+        .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -796,6 +804,7 @@ pub async fn get_ollama_service_status(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
+        .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 

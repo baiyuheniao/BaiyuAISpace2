@@ -19,15 +19,32 @@
 
 use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT, MCP_TOOL_CALL_TIMEOUT};
 use crate::db::DbState;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+/// `stream_message` calls `get_all_mcp_tools` on every single chat turn
+/// (needed even when MCP is off, since a manually-activated Skill can still
+/// bind a server) -- without a cache that means re-running `tools/list`
+/// against every enabled server before the LLM request can even be sent.
+/// For stdio servers that's a fresh child process (e.g. `npx ...`) spawned
+/// and torn down per message, which can cost anywhere from hundreds of ms to
+/// the full `MCP_STDIO_TIMEOUT`/`MCP_HTTP_TIMEOUT` ceiling if the server is
+/// slow to start or briefly unreachable -- directly inflating TTFT. Cache
+/// successful lookups for a short TTL; failures are never cached so a
+/// misbehaving server keeps surfacing instead of silently vanishing.
+static MCP_TOOLS_CACHE: Lazy<Mutex<HashMap<String, (Vec<MCPTool>, Instant)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+const MCP_TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// MCP 错误类型
 #[derive(Error, Debug)]
@@ -213,6 +230,11 @@ pub async fn create_mcp_server(
     let db = state.0.lock().await;
     db.save_mcp_server(&config)
         .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
+    drop(db);
+
+    // The server's command/args/url may have just changed -- drop any cached
+    // tool list so the next lookup re-discovers instead of serving stale data.
+    MCP_TOOLS_CACHE.lock().await.remove(&config.id);
 
     log::info!(
         "MCP server configured: {} (type: {}) [ID: {}]",
@@ -248,6 +270,8 @@ pub async fn delete_mcp_server(
     let db = state.0.lock().await;
     db.delete_mcp_server(&server_id)
         .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
+    drop(db);
+    MCP_TOOLS_CACHE.lock().await.remove(&server_id);
     log::info!("MCP server deleted: {}", server_id);
     Ok(())
 }
@@ -533,10 +557,7 @@ pub async fn get_mcp_tools(
 pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<MCPTool>, MCPError> {
     log::info!("Fetching all available MCP tools");
 
-    // Scoped so the DB lock is released before the loop below calls
-    // get_mcp_tools, which re-locks the same (non-reentrant) tokio Mutex --
-    // holding it across that await would deadlock the whole app the moment
-    // there's at least one enabled server.
+    // Scoped so the DB lock is released before the concurrent fetches below.
     let enabled_servers: Vec<_> = {
         let db = state.0.lock().await;
         let servers = db
@@ -545,11 +566,36 @@ pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<M
         servers.into_iter().filter(|s| s.enabled).collect()
     };
 
+    // Fetch every server concurrently instead of one-at-a-time -- a serial
+    // loop means N servers each pay their own worst-case latency back to
+    // back, which compounds fast once there's more than one.
+    let fetches = enabled_servers.into_iter().map(|server| async move {
+        if let Some((tools, cached_at)) = MCP_TOOLS_CACHE.lock().await.get(&server.id) {
+            if cached_at.elapsed() < MCP_TOOLS_CACHE_TTL {
+                return (server.id, Ok(tools.clone()));
+            }
+        }
+
+        let result = match server.server_type {
+            MCPServerType::Stdio => call_mcp_tools_stdio(&server).await,
+            MCPServerType::HTTP | MCPServerType::SSE => call_mcp_tools_http(&server).await,
+        };
+
+        if let Ok(ref tools) = result {
+            MCP_TOOLS_CACHE
+                .lock()
+                .await
+                .insert(server.id.clone(), (tools.clone(), Instant::now()));
+        }
+
+        (server.id, result)
+    });
+
     let mut all_tools = Vec::new();
-    for server in enabled_servers {
-        match get_mcp_tools(state.clone(), server.id.clone()).await {
+    for (server_id, result) in futures::future::join_all(fetches).await {
+        match result {
             Ok(tools) => all_tools.extend(tools),
-            Err(e) => log::warn!("Failed to get tools from server {}: {}", server.id, e),
+            Err(e) => log::warn!("Failed to get tools from server {}: {}", server_id, e),
         }
     }
 
