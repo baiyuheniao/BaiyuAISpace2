@@ -71,6 +71,11 @@ fn create_lmstudio_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
+        // This client only ever talks to the user's own already-running LM
+        // Studio server, never a remote host -- routing it through a system
+        // proxy (as reqwest does by default) can add seconds of detour when
+        // the user has a global-mode proxy running for other providers.
+        .no_proxy()
         .build()
 }
 
