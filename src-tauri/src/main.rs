@@ -141,6 +141,14 @@ fn main() {
 
     // 构建 Tauri 应用
     tauri::Builder::default()
+        // 单实例插件：必须最先注册。重复启动时不新开进程，而是唤醒已运行窗口
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         // 注册 Shell 插件 (用于打开外部链接)
         .plugin(tauri_plugin_shell::init())
         // 注册对话框插件 (用于文件选择)
