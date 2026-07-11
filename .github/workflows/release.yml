@@ -2,6 +2,7 @@
 # Windows 额外附带一份便携版单文件 exe（未打包的原始二进制，免安装双击运行）
 # 用法：git tag v0.1.0 && git push origin v0.1.0
 # 打完后到 GitHub Releases 页面检查草稿，确认没问题再手动发布
+# 手动发布后会触发 publish-update-manifest.yml，把 latest.json 同步到应用内自动更新用的固定端点
 name: Release
 
 on:

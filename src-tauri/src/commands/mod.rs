@@ -15,6 +15,7 @@
  * - skills: Skill (技能) 管理命令
  */
 
+pub mod app_update;
 pub mod auth;
 pub mod constants;
 pub mod docker;

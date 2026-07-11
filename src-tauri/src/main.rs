@@ -194,6 +194,8 @@ fn main() {
             commands::llm::cancel_stream,
             // Auth commands
             commands::auth::get_baidu_access_token,
+            // 检测最新版本(设置页手动检测按钮)
+            commands::app_update::check_latest_releases,
             // 数据库相关命令
             save_session_cmd,
             save_message_cmd,
