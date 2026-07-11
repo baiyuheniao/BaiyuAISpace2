@@ -673,7 +673,7 @@ pub async fn call_mcp_tool(
 }
 
 /// Handle demo/test tool calls (for development/testing)
-async fn handle_demo_tool_call(
+pub(crate) async fn handle_demo_tool_call(
     tool_name: &str,
     input: serde_json::Value,
     request_id: &str,
