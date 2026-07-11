@@ -2340,4 +2340,209 @@ mod provider_tool_calling_tests {
         assert_eq!(native[0]["role"], "assistant");
         assert_eq!(native[0]["content"], "done");
     }
+
+    // -----------------------------------------------------------------
+    // `continue_after_tool_calls` is what the *regular chat flow* (not the
+    // Workspace Agent loop, which uses `append_tool_round` above) sends to
+    // the model after an MCP tool call. Nothing above exercises it. These
+    // tests run it against a real local HTTP server standing in for the
+    // provider, using a real MCP tool result (not a hand-typed fixture), to
+    // prove a tool's output actually reaches the wire in the shape the
+    // model expects and that the model's final reply flows back out.
+    // -----------------------------------------------------------------
+
+    /// Bare-bones HTTP/1.1 server standing in for an OpenAI-compatible
+    /// endpoint. Accepts `responses.len()` sequential connections, captures
+    /// each request's parsed JSON body, and replies with the matching canned
+    /// JSON response.
+    async fn mock_llm_server(responses: Vec<serde_json::Value>) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+        let addr = listener.local_addr().expect("local_addr");
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let headers_end = loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(pos);
+                    }
+                };
+                let Some(headers_end) = headers_end else { continue };
+
+                let header_str = String::from_utf8_lossy(&buf[..headers_end]).to_string();
+                let content_length: usize = header_str
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            v.trim().parse().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+
+                let mut body = buf[headers_end + 4..].to_vec();
+                while body.len() < content_length {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+
+                if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) {
+                    captured_clone.lock().await.push(parsed);
+                }
+
+                let resp_str = response.to_string();
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_str.as_bytes().len(),
+                    resp_str
+                );
+                let _ = socket.write_all(http_response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (format!("http://{}", addr), captured)
+    }
+
+    #[tokio::test]
+    async fn continue_after_tool_calls_embeds_real_mcp_result_and_returns_final_text() {
+        // Use the actual production tool-execution path (not a hand-typed
+        // fixture) so this test catches drift in what MCP tools really hand
+        // back, not just what we imagine they hand back.
+        let real_result = crate::commands::mcp::handle_demo_tool_call(
+            "demo_calculator",
+            serde_json::json!({ "a": 3, "b": 4, "operation": "add" }),
+            "test-request",
+        )
+        .await
+        .expect("demo tool should succeed");
+        assert_eq!(real_result["result"], 7.0, "sanity: demo_calculator actually computed 3+4");
+
+        let (base_url, captured) = mock_llm_server(vec![
+            serde_json::json!({ "choices": [{ "message": { "content": "3加4等于7。" } }] }),
+        ])
+        .await;
+
+        let original_messages = vec![
+            msg("system", "你是一个助手"),
+            msg("user", "3加4等于多少？用计算器工具算一下"),
+        ];
+        let calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            function: ToolFunction {
+                name: "demo_calculator".to_string(),
+                arguments: serde_json::json!({ "a": 3, "b": 4, "operation": "add" }).to_string(),
+            },
+        }];
+        let rounds = vec![(calls, vec![real_result.clone()])];
+
+        let outcome = continue_after_tool_calls(
+            "custom", "test-model", "test-key", &base_url,
+            &original_messages, &rounds, &[], &[], None,
+        ).await.expect("continuation call should succeed");
+
+        match outcome {
+            ContinuationResult::Text(text) => assert_eq!(text, "3加4等于7。"),
+            ContinuationResult::ToolCalls(_) => panic!("expected final text, got another tool-call request"),
+        }
+
+        // Inspect exactly what was sent over the wire for the second-round
+        // request -- this is the proof that the tool's real output reached
+        // the model's context, not just that our code believes it did.
+        let sent = captured.lock().await;
+        let sent_messages = sent[0]["messages"].as_array().expect("messages array");
+
+        let assistant_msg = sent_messages
+            .iter()
+            .find(|m| m["role"] == "assistant" && m["tool_calls"].is_array())
+            .expect("assistant tool_calls message present");
+        assert_eq!(assistant_msg["tool_calls"][0]["id"], "call_1");
+        assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "demo_calculator");
+
+        let tool_msg = sent_messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool result message present");
+        assert_eq!(tool_msg["tool_call_id"], "call_1");
+        let embedded_result: serde_json::Value = serde_json::from_str(
+            tool_msg["content"].as_str().expect("tool content must be a string for OpenAI-shape providers"),
+        ).expect("tool content must be valid JSON");
+        assert_eq!(embedded_result, real_result, "the exact MCP tool result must round-trip into the model context untouched");
+    }
+
+    #[tokio::test]
+    async fn continue_after_tool_calls_supports_a_second_round_after_more_tool_calls() {
+        // The model can legitimately ask for another tool after seeing the
+        // first result (finalize_turn loops up to MAX_TOOL_ROUNDS); verify
+        // the second follow-up request correctly stacks both rounds.
+        let result_1 = crate::commands::mcp::handle_demo_tool_call(
+            "demo_calculator", serde_json::json!({"a": 3, "b": 4, "operation": "add"}), "r1",
+        ).await.unwrap();
+        let result_2 = crate::commands::mcp::handle_demo_tool_call(
+            "demo_calculator", serde_json::json!({"a": 7, "b": 5, "operation": "multiply"}), "r2",
+        ).await.unwrap();
+
+        let (base_url, captured) = mock_llm_server(vec![
+            serde_json::json!({
+                "choices": [{ "message": { "content": null, "tool_calls": [
+                    { "id": "call_2", "type": "function", "function": { "name": "demo_calculator", "arguments": "{\"a\":7,\"b\":5,\"operation\":\"multiply\"}" } }
+                ] } }]
+            }),
+            serde_json::json!({ "choices": [{ "message": { "content": "3+4=7，再乘以5等于35。" } }] }),
+        ])
+        .await;
+
+        let original_messages = vec![msg("user", "先加后乘")];
+        let call_1 = ToolCall {
+            id: "call_1".into(),
+            function: ToolFunction { name: "demo_calculator".into(), arguments: "{\"a\":3,\"b\":4,\"operation\":\"add\"}".into() },
+        };
+        let mut rounds = vec![(vec![call_1], vec![result_1])];
+
+        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None)
+            .await
+            .expect("round 1 continuation");
+        let next_calls = match outcome {
+            ContinuationResult::ToolCalls(calls) => calls,
+            ContinuationResult::Text(_) => panic!("expected another tool call round"),
+        };
+        assert_eq!(next_calls[0].id, "call_2");
+
+        rounds.push((next_calls, vec![result_2]));
+        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None)
+            .await
+            .expect("round 2 continuation");
+        match outcome_2 {
+            ContinuationResult::Text(text) => assert_eq!(text, "3+4=7，再乘以5等于35。"),
+            ContinuationResult::ToolCalls(_) => panic!("expected final text after 2 rounds"),
+        }
+
+        let sent = captured.lock().await;
+        let second_request_messages = sent[1]["messages"].as_array().expect("messages array");
+        let tool_msgs: Vec<_> = second_request_messages.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 2, "both rounds' tool results must both be present in the second follow-up request");
+        assert_eq!(tool_msgs[0]["tool_call_id"], "call_1");
+        assert_eq!(tool_msgs[1]["tool_call_id"], "call_2");
+    }
 }
