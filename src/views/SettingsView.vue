@@ -20,9 +20,13 @@
 -->
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount } from "vue";
+import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { save } from "@tauri-apps/plugin-dialog";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 import { 
   NLayout, 
   NLayoutContent, 
@@ -93,6 +97,63 @@ const exportLogs = async () => {
   } catch (error) {
     message.error("导出日志失败: " + error);
   }
+};
+
+// ============ 检测最新版本 ============
+
+interface ReleaseInfo {
+  version: string;
+  name: string;
+  body: string;
+  htmlUrl: string;
+  publishedAt: string | null;
+}
+
+interface LatestReleasesResult {
+  currentVersion: string;
+  stable: ReleaseInfo | null;
+  beta: ReleaseInfo | null;
+}
+
+/** 当前运行的应用版本号，启动时读取一次用于展示和比对 */
+const currentAppVersion = ref("");
+
+onMounted(async () => {
+  try {
+    currentAppVersion.value = await getVersion();
+  } catch {
+    // 读取失败不影响其他功能，留空即可
+  }
+});
+
+const checkingUpdate = ref(false);
+const showUpdateModal = ref(false);
+const latestReleases = ref<LatestReleasesResult | null>(null);
+
+/** 更新内容以对应 GitHub Release 页面的原文为准，用 marked 渲染成 HTML 再净化 */
+const renderReleaseNotes = (body: string): string => {
+  const html = marked.parse(body.trim() || "暂无更新说明。", { async: false, breaks: true }) as string;
+  return DOMPurify.sanitize(html);
+};
+
+const checkLatestVersion = async () => {
+  checkingUpdate.value = true;
+  try {
+    latestReleases.value = await invoke<LatestReleasesResult>("check_latest_releases");
+    if (!latestReleases.value.stable && !latestReleases.value.beta) {
+      message.warning("未能获取到任何已发布的版本信息");
+      return;
+    }
+    showUpdateModal.value = true;
+  } catch (error) {
+    message.error("检测最新版本失败: " + error);
+  } finally {
+    checkingUpdate.value = false;
+  }
+};
+
+const openReleasePage = (url: string) => {
+  void openExternalUrl(url);
 };
 
 // ============ 弹窗状态 ============
@@ -1071,7 +1132,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 type="success"
                 size="small"
               >
-                v0.1.0
+                v{{ currentAppVersion || "…" }}
               </n-tag>
             </div>
             <div class="about-item">
@@ -1097,13 +1158,23 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               class="about-item"
               style="margin-top: 16px;"
             >
-              <n-button 
-                type="primary" 
-                size="small"
-                @click="exportLogs"
-              >
-                导出日志
-              </n-button>
+              <n-space>
+                <n-button
+                  type="primary"
+                  size="small"
+                  :loading="checkingUpdate"
+                  @click="checkLatestVersion"
+                >
+                  检测最新版本
+                </n-button>
+                <n-button
+                  type="primary"
+                  size="small"
+                  @click="exportLogs"
+                >
+                  导出日志
+                </n-button>
+              </n-space>
             </div>
           </div>
         </n-card>
@@ -1595,6 +1666,62 @@ const providerOptions = computed(() => settings.presetProviderOptions);
       </template>
     </n-modal>
 
+    <!-- 检测最新版本弹窗 -->
+    <n-modal
+      v-model:show="showUpdateModal"
+      title="版本检测结果"
+      preset="card"
+      style="width: 640px; max-width: 90vw;"
+    >
+      <div class="version-check-body">
+        <div class="version-check-current">
+          当前版本：<n-tag size="small">v{{ currentAppVersion }}</n-tag>
+        </div>
+
+        <template
+          v-for="section in [
+            { label: '最新正式版', info: latestReleases?.stable },
+            { label: '最新 Beta 版', info: latestReleases?.beta },
+          ]"
+          :key="section.label"
+        >
+          <div class="version-check-section">
+            <div class="version-check-section-header">
+              <span class="version-check-section-label">{{ section.label }}</span>
+              <template v-if="section.info">
+                <n-tag size="small">v{{ section.info.version }}</n-tag>
+                <n-tag
+                  size="small"
+                  :type="section.info.version === currentAppVersion ? 'default' : 'success'"
+                >
+                  {{ section.info.version === currentAppVersion ? "已是最新" : "有新版本" }}
+                </n-tag>
+                <n-button
+                  text
+                  size="small"
+                  class="version-check-link"
+                  @click="openReleasePage(section.info.htmlUrl)"
+                >
+                  在 GitHub 中查看
+                </n-button>
+              </template>
+            </div>
+
+            <n-empty
+              v-if="!section.info"
+              description="GitHub 上暂无对应版本发布"
+              size="small"
+            />
+            <div
+              v-else
+              class="version-check-notes"
+              v-html="renderReleaseNotes(section.info.body)"
+            />
+          </div>
+        </template>
+      </div>
+    </n-modal>
+
   </n-layout>
 </template>
 
@@ -1700,4 +1827,70 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   font-weight: 600;
 }
 
+/* 检测最新版本弹窗 */
+.version-check-body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.version-check-current {
+  font-size: 14px;
+  color: $ink-soft;
+}
+
+.version-check-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: $border-faint;
+}
+
+.version-check-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.version-check-section-label {
+  font-weight: 600;
+}
+
+.version-check-link {
+  margin-left: auto;
+}
+
+.version-check-notes {
+  font-size: 13px;
+  line-height: $leading-body;
+  color: $ink-soft;
+  max-height: 260px;
+  overflow-y: auto;
+
+  :deep(h1),
+  :deep(h2),
+  :deep(h3) {
+    font-size: 14px;
+    font-weight: 600;
+    color: $ink;
+    margin: 8px 0 4px;
+  }
+
+  :deep(ul),
+  :deep(ol) {
+    padding-left: 20px;
+  }
+
+  :deep(a) {
+    color: $ink;
+  }
+
+  :deep(code) {
+    font-family: $font-mono;
+    background: $surface;
+    padding: 1px 4px;
+  }
+}
 </style>
