@@ -136,6 +136,52 @@ const renderReleaseNotes = (body: string): string => {
   return DOMPurify.sanitize(html);
 };
 
+/**
+ * 简化版 semver 比较：核心版本号（major.minor.patch）逐段比较；核心相同时，
+ * 不带 -beta.N 后缀的正式版视为比任何 beta 都新，两边都有后缀则逐段比较
+ * （数字段按数值比，否则按字典序）。返回值同 Array.sort 的比较器语义。
+ * 用于判断 GitHub 上查到的版本是否比本地正在运行的版本更新——不能简单用
+ * 字符串不等于判断，否则本地跑着尚未发布的开发版（比如 beta.5）时，
+ * 会把已发布的旧版本（beta.4）误判成"有新版本"。
+ */
+const compareVersions = (a: string, b: string): number => {
+  const parse = (v: string) => {
+    const dashIndex = v.indexOf("-");
+    const core = dashIndex === -1 ? v : v.slice(0, dashIndex);
+    const pre = dashIndex === -1 ? null : v.slice(dashIndex + 1).split(".");
+    return { core: core.split(".").map((n) => Number.parseInt(n, 10) || 0), pre };
+  };
+  const va = parse(a);
+  const vb = parse(b);
+
+  for (let i = 0; i < Math.max(va.core.length, vb.core.length); i++) {
+    const diff = (va.core[i] ?? 0) - (vb.core[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  if (va.pre === null && vb.pre === null) return 0;
+  if (va.pre === null) return 1;
+  if (vb.pre === null) return -1;
+
+  for (let i = 0; i < Math.max(va.pre.length, vb.pre.length); i++) {
+    const sa = va.pre[i];
+    const sb = vb.pre[i];
+    if (sa === undefined) return -1;
+    if (sb === undefined) return 1;
+    const na = Number(sa);
+    const nb = Number(sb);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) {
+      if (na !== nb) return na - nb;
+    } else if (sa !== sb) {
+      return sa < sb ? -1 : 1;
+    }
+  }
+  return 0;
+};
+
+const isNewerVersion = (remoteVersion: string): boolean =>
+  compareVersions(remoteVersion, currentAppVersion.value) > 0;
+
 const checkLatestVersion = async () => {
   checkingUpdate.value = true;
   try {
@@ -1692,9 +1738,9 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 <n-tag size="small">v{{ section.info.version }}</n-tag>
                 <n-tag
                   size="small"
-                  :type="section.info.version === currentAppVersion ? 'default' : 'success'"
+                  :type="isNewerVersion(section.info.version) ? 'success' : 'default'"
                 >
-                  {{ section.info.version === currentAppVersion ? "已是最新" : "有新版本" }}
+                  {{ isNewerVersion(section.info.version) ? "有新版本" : "已是最新" }}
                 </n-tag>
                 <n-button
                   text
