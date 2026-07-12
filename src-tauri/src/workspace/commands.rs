@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::db;
+use super::meeting::{self, MeetingCheckIn, MeetingConfig, MeetingHandle, MeetingsState};
 use super::types::*;
 use crate::commands::llm::{
     append_text_reply, append_tool_round, build_native_messages, build_skill_context, run_turn,
@@ -20,12 +21,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const PROPOSAL_TIMEOUT_SECS: u64 = 600;
 const MAX_ROUNDS_PER_WAKE: u32 = 8;
+/// 会议轮次（屏障式签到）不计入 `MAX_ROUNDS_PER_WAKE`，否则长会议会被正常
+/// 工具轮上限拦腰截断；这个总轮数是防失控的兜底保险丝。
+const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
 const MAX_HISTORY_MESSAGES: i64 = 40;
 
 /// One running agent's wake signal + stop switch. Lives only in memory --
@@ -67,14 +71,6 @@ pub struct PendingSleepRequests(pub Arc<Mutex<HashMap<String, oneshot::Sender<bo
 /// Resolved by the user answering via `workspace_resolve_question`.
 #[derive(Default)]
 pub struct PendingQuestions(pub Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>);
-
-/// Per-agent meeting-turn completion signals, keyed by agent id. When the
-/// meeting coordinator (`run_meeting`) is waiting for a specific agent's
-/// speech, it inserts a sender here. After `process_agent_wake` produces the
-/// agent's text output, it removes the entry and fires the signal, unblocking
-/// the coordinator so it can move on to the next speaker.
-#[derive(Default)]
-pub struct PendingMeetingTurns(pub Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 
 pub fn init_workspace_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     db::init_workspace_tables(conn)
@@ -119,6 +115,7 @@ pub async fn workspace_delete(
     workspace_id: String,
     db_state: State<'_, DbState>,
     workspace_state: State<'_, WorkspaceState>,
+    meetings: State<'_, MeetingsState>,
 ) -> Result<(), WorkspaceError> {
     let agent_ids: Vec<String> = {
         let db = db_state.0.lock().await;
@@ -133,6 +130,13 @@ pub async fn workspace_delete(
                 handle.cancel.cancel();
             }
         }
+    }
+
+    // 注销进行中的会议：丢掉注册表里的 sender，阻止新的签到进来；协调器
+    // 会在集合超时后因所有人缺席而自行收场。
+    {
+        let mut map = meetings.0.lock().unwrap();
+        map.remove(&workspace_id);
     }
 
     let db = db_state.0.lock().await;
@@ -324,7 +328,7 @@ pub async fn workspace_resolve_question(
 // Internal helpers shared by both creation paths and the agent loop
 // ---------------------------------------------------------------------------
 
-async fn load_agent(app_handle: &AppHandle, agent_id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
+pub(crate) async fn load_agent(app_handle: &AppHandle, agent_id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
     let db_state = app_handle.state::<DbState>();
     let db = db_state.0.lock().await;
     let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
@@ -338,7 +342,7 @@ async fn load_workspace(app_handle: &AppHandle, workspace_id: &str) -> Result<Op
     db::get_workspace(&conn, workspace_id)
 }
 
-async fn set_agent_status(app_handle: &AppHandle, agent_id: &str, status: AgentStatus) {
+pub(crate) async fn set_agent_status(app_handle: &AppHandle, agent_id: &str, status: AgentStatus) {
     let db_state = app_handle.state::<DbState>();
     {
         let db = db_state.0.lock().await;
@@ -390,6 +394,30 @@ pub async fn send_workspace_message(
     to_agent_id: &str,
     content: &str,
 ) {
+    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, true).await
+}
+
+/// 静默变体：照常落库 + 发前端事件，但不唤醒任何 Agent。会议发言用它存档——
+/// 与会者正挂在会议签到上，发言已经通过工具结果送达它们了，再 notify 只会
+/// 在散会后多触发一轮毫无新内容的唤醒。
+pub async fn send_workspace_message_silent(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    from_agent_id: &str,
+    to_agent_id: &str,
+    content: &str,
+) {
+    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, false).await
+}
+
+async fn send_workspace_message_impl(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    from_agent_id: &str,
+    to_agent_id: &str,
+    content: &str,
+    wake: bool,
+) {
     log::info!(
         "[workspace] 消息路由: {} → {} | {}...",
         from_agent_id,
@@ -414,6 +442,9 @@ pub async fn send_workspace_message(
     }
     let _ = app_handle.emit("workspace://message", &msg);
 
+    if !wake {
+        return;
+    }
     let workspace_state = app_handle.state::<WorkspaceState>();
     let handles = workspace_state.0.lock().unwrap();
     if to_agent_id == "all" {
@@ -670,12 +701,20 @@ async fn process_agent_wake(
         agent.name, chat_history.len(), tools.len()
     );
     let mut produced_final_text = false;
-    for round in 0..MAX_ROUNDS_PER_WAKE {
+    // 会议轮次（全部工具调用都是会议签到且没出错的轮）不占用普通工具轮
+    // 配额，让屏障式会议能开满自己的发言上限；MAX_TOTAL_ROUNDS_PER_WAKE 兜底。
+    let mut counted_rounds: u32 = 0;
+    let mut total_rounds: u32 = 0;
+    loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
+        if counted_rounds >= MAX_ROUNDS_PER_WAKE || total_rounds >= MAX_TOTAL_ROUNDS_PER_WAKE {
+            break;
+        }
+        total_rounds += 1;
 
-        log::debug!("[workspace] Agent「{}」第 {} 轮推理", agent.name, round + 1);
+        log::debug!("[workspace] Agent「{}」第 {} 轮推理", agent.name, total_rounds);
         let outcome = run_turn(
             &agent.provider,
             &agent.model,
@@ -697,12 +736,6 @@ async fn process_agent_wake(
                 append_text_reply(&agent.provider, &mut native_messages, &text);
                 if !text.trim().is_empty() {
                     send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
-                }
-                // Signal the meeting coordinator that this agent's turn is done
-                // (fires only when this agent was a meeting participant waiting in run_meeting)
-                let meeting_tx = app_handle.state::<PendingMeetingTurns>().0.lock().unwrap().remove(agent_id);
-                if let Some(tx) = meeting_tx {
-                    let _ = tx.send(());
                 }
                 produced_final_text = true;
                 break;
@@ -731,6 +764,13 @@ async fn process_agent_wake(
                     );
                     results.push(result);
                 }
+                let meeting_round = calls
+                    .iter()
+                    .all(|c| matches!(c.name.as_str(), "workspace_meeting" | "workspace_meeting_checkin"))
+                    && results.iter().all(|r| r.get("error").is_none());
+                if !meeting_round {
+                    counted_rounds += 1;
+                }
                 append_tool_round(&agent.provider, &mut native_messages, &calls, &results);
             }
         }
@@ -738,14 +778,15 @@ async fn process_agent_wake(
 
     if !produced_final_text {
         log::warn!(
-            "Workspace agent {} 在 {} 轮内没有给出最终回复，提前结束本次唤醒",
+            "Workspace agent {} 在轮数上限内没有给出最终回复，提前结束本次唤醒（计数 {} 轮 / 总 {} 轮）",
             agent_id,
-            MAX_ROUNDS_PER_WAKE
+            counted_rounds,
+            total_rounds
         );
     }
 
     // Don't stomp over Sleeping (set by workspace_sleep) or Meeting (managed
-    // by run_meeting which resets participants to Idle after the meeting ends).
+    // by the meeting coordinator, which resets participants to Idle at the end).
     let blocking = matches!(
         load_agent(app_handle, agent_id).await,
         Ok(Some(WorkspaceAgent { status: AgentStatus::Sleeping | AgentStatus::Meeting, .. }))
@@ -916,11 +957,36 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         server_id: "workspace".to_string(),
         server_name: "workspace".to_string(),
         name: "workspace_meeting".to_string(),
-        description: "发起一次工作组会议，组内其他 Agent 会按创建先后顺序轮流就议题发言一次，全部发言完毕后返回给你做总结。".to_string(),
+        description: "发起一次工作组会议（每个工作组同时只能有一场）。组内其他 Agent 会被邀请参会，\
+            大家轮流发言，每条发言都会实时同步给所有与会者。你是本场会议的主持人：想散会时，\
+            在签到（workspace_meeting_checkin）时把 end_meeting 设为 true。"
+            .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
-            "properties": { "topic": { "type": "string", "description": "会议议题" } },
-            "required": ["topic"]
+            "properties": {
+                "topic": { "type": "string", "description": "会议议题" },
+                "content": { "type": "string", "description": "你的开场发言" },
+                "max_speeches": { "type": "integer", "description": "发言总数上限（可选，默认 30，最大 200），达到后主持人须总结散会" }
+            },
+            "required": ["topic", "content"]
+        }),
+    });
+    tools.push(MCPTool {
+        server_id: "workspace".to_string(),
+        server_name: "workspace".to_string(),
+        name: "workspace_meeting_checkin".to_string(),
+        description: "会议签到/发言工具。收到会议邀请后立即调用它签到（content 留空）；之后每次收到\
+            本工具的结果，都按结果里的 instruction 再次调用：轮到你发言时把发言写进 content。\
+            主持人可以在任意一次签到时把 end_meeting 设为 true 结束会议。"
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "meeting_id": { "type": "string", "description": "会议 id（会议邀请里给出）" },
+                "content": { "type": "string", "description": "轮到你发言时的发言内容；未轮到时留空" },
+                "end_meeting": { "type": "boolean", "description": "仅主持人有效：结束会议" }
+            },
+            "required": ["meeting_id"]
         }),
     });
 
@@ -1110,11 +1176,136 @@ async fn dispatch_tool_call(
             serde_json::json!({ "status": "logged" })
         }
         "workspace_meeting" => {
-            let topic = call.arguments.get("topic").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if topic.trim().is_empty() {
+            let topic = call.arguments.get("topic").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if topic.is_empty() {
                 return serde_json::json!({ "error": "topic 不能为空" });
             }
-            run_meeting(app_handle, workspace, agent, topic).await
+            let opening = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if opening.is_empty() {
+                return serde_json::json!({ "error": "content（开场发言）不能为空" });
+            }
+            let max_speeches = call
+                .arguments
+                .get("max_speeches")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(meeting::DEFAULT_MAX_SPEECHES)
+                .clamp(1, meeting::MAX_MAX_SPEECHES);
+
+            let all_agents = list_agents_for_workspace(app_handle, &workspace.id).await;
+            let others: Vec<_> = all_agents.iter().filter(|a| a.id != agent.id).collect();
+            if others.is_empty() {
+                return serde_json::json!({ "error": "工作组内没有其他 Agent，无法召开会议" });
+            }
+
+            let meeting_id = Uuid::new_v4().to_string();
+            let (tx, event_rx) = mpsc::channel::<MeetingCheckIn>(64);
+            {
+                let meetings = app_handle.state::<MeetingsState>();
+                let mut map = meetings.0.lock().unwrap();
+                if map.contains_key(&workspace.id) {
+                    return serde_json::json!({ "error": "本工作组已有一场会议正在进行，请等它结束后再发起" });
+                }
+                map.insert(workspace.id.clone(), MeetingHandle { meeting_id: meeting_id.clone(), tx: tx.clone() });
+            }
+
+            // 发言顺序：主持人在前，其余按创建顺序（list_agents 已按 created_at 排序）。
+            let participants: Vec<(String, String)> = std::iter::once((agent.id.clone(), agent.name.clone()))
+                .chain(others.iter().map(|a| (a.id.clone(), a.name.clone())))
+                .collect();
+            let order_display = participants.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" → ");
+
+            for (id, _) in &participants {
+                set_agent_status(app_handle, id, AgentStatus::Meeting).await;
+            }
+            insert_workspace_log(
+                app_handle,
+                &workspace.id,
+                Some(agent.id.clone()),
+                "meeting",
+                format!(
+                    "会议开始，议题：「{}」，主持人：{}，发言顺序：{}，发言上限 {} 条",
+                    topic, agent.name, order_display, max_speeches
+                ),
+            )
+            .await;
+
+            for a in &others {
+                send_workspace_message(
+                    app_handle,
+                    &workspace.id,
+                    "system",
+                    &a.id,
+                    &format!(
+                        "【会议邀请】「{}」发起了会议，议题：「{}」。请立即调用 workspace_meeting_checkin \
+                         工具签到参会：meeting_id 填 \"{}\"，content 留空。之后每次收到该工具的结果，都按\
+                         结果里的 instruction 再次调用；轮到你发言时，把发言写进 content 参数。",
+                        agent.name, topic, meeting_id
+                    ),
+                )
+                .await;
+            }
+
+            let cfg = MeetingConfig {
+                meeting_id: meeting_id.clone(),
+                workspace_id: workspace.id.clone(),
+                topic,
+                initiator_id: agent.id.clone(),
+                participants,
+                max_speeches,
+            };
+            let coordinator_app = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                meeting::run_coordinator(coordinator_app, cfg, event_rx).await;
+            });
+
+            // 主持人自己的首次签到，开场发言随之入场。
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if tx
+                .send(MeetingCheckIn { agent_id: agent.id.clone(), content: Some(opening), end_meeting: false, reply: reply_tx })
+                .await
+                .is_err()
+            {
+                return serde_json::json!({ "error": "会议协调器启动失败" });
+            }
+            match reply_rx.await {
+                Ok(v) => v,
+                Err(_) => serde_json::json!({ "error": "会议已终止" }),
+            }
+        }
+        "workspace_meeting_checkin" => {
+            let meeting_id = match call.arguments.get("meeting_id").and_then(|v| v.as_str()).map(str::trim) {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => return serde_json::json!({ "error": "缺少 meeting_id" }),
+            };
+            let tx = {
+                let meetings = app_handle.state::<MeetingsState>();
+                let map = meetings.0.lock().unwrap();
+                match map.get(&workspace.id) {
+                    Some(h) if h.meeting_id == meeting_id => h.tx.clone(),
+                    Some(_) => return serde_json::json!({ "error": "meeting_id 不匹配，这场会议可能已经结束" }),
+                    None => return serde_json::json!({ "error": "当前没有正在进行的会议" }),
+                }
+            };
+            let content = call
+                .arguments
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let end_meeting = call.arguments.get("end_meeting").and_then(|v| v.as_bool()).unwrap_or(false);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if tx
+                .send(MeetingCheckIn { agent_id: agent.id.clone(), content, end_meeting, reply: reply_tx })
+                .await
+                .is_err()
+            {
+                return serde_json::json!({ "error": "会议已结束" });
+            }
+            match reply_rx.await {
+                Ok(v) => v,
+                Err(_) => serde_json::json!({ "error": "会议已终止" }),
+            }
         }
         _ => {
             let db_state = app_handle.state::<DbState>();
@@ -1231,109 +1422,6 @@ async fn request_sleep_approval(app_handle: &AppHandle, workspace_id: &str, agen
             false
         }
     }
-}
-
-/// Drives a round-robin meeting: sets each non-initiator agent to Meeting
-/// status, sends them a "your turn" system message in creation order, and
-/// waits up to 3 minutes for each to produce their speech (signalled via
-/// `PendingMeetingTurns`). After all have spoken, resets them to Idle and
-/// returns control to the initiator, who then produces the closing summary.
-async fn run_meeting(
-    app_handle: &AppHandle,
-    workspace: &Workspace,
-    initiator: &WorkspaceAgent,
-    topic: String,
-) -> serde_json::Value {
-    let all_agents = list_agents_for_workspace(app_handle, &workspace.id).await;
-    let mut speakers: Vec<_> = all_agents.into_iter().filter(|a| a.id != initiator.id).collect();
-    speakers.sort_by_key(|a| a.created_at);
-
-    if speakers.is_empty() {
-        return serde_json::json!({ "error": "工作组内没有其他 Agent，无法召开会议" });
-    }
-
-    let order_display = std::iter::once(initiator.name.as_str())
-        .chain(speakers.iter().map(|a| a.name.as_str()))
-        .collect::<Vec<_>>()
-        .join(" → ");
-
-    insert_workspace_log(
-        app_handle,
-        &workspace.id,
-        Some(initiator.id.clone()),
-        "meeting",
-        format!("会议开始，议题：「{}」；发言顺序：{}", topic, order_display),
-    )
-    .await;
-
-    for speaker in &speakers {
-        set_agent_status(app_handle, &speaker.id, AgentStatus::Meeting).await;
-    }
-
-    let meeting_state = app_handle.state::<PendingMeetingTurns>();
-
-    for (i, speaker) in speakers.iter().enumerate() {
-        let (tx, rx) = oneshot::channel::<()>();
-        meeting_state.0.lock().unwrap().insert(speaker.id.clone(), tx);
-
-        let context = if i == 0 {
-            format!("会议由「{}」发起", initiator.name)
-        } else {
-            format!("前面已有 {} 位参与者发言", i)
-        };
-
-        send_workspace_message(
-            app_handle,
-            &workspace.id,
-            "system",
-            &speaker.id,
-            &format!(
-                "【会议通知】议题「{}」——{} - 轮到你发言了。\
-                 请就该议题简短说明你的看法，用普通文字回复即可，无需调用工具。",
-                topic, context
-            ),
-        )
-        .await;
-
-        match tokio::time::timeout(Duration::from_secs(180), rx).await {
-            Ok(Ok(())) => {}
-            _ => {
-                meeting_state.0.lock().unwrap().remove(&speaker.id);
-                insert_workspace_log(
-                    app_handle,
-                    &workspace.id,
-                    Some(speaker.id.clone()),
-                    "meeting",
-                    format!("「{}」在会议中发言超时，已跳过", speaker.name),
-                )
-                .await;
-            }
-        }
-    }
-
-    for speaker in &speakers {
-        if matches!(
-            load_agent(app_handle, &speaker.id).await,
-            Ok(Some(WorkspaceAgent { status: AgentStatus::Meeting, .. }))
-        ) {
-            set_agent_status(app_handle, &speaker.id, AgentStatus::Idle).await;
-        }
-    }
-
-    insert_workspace_log(
-        app_handle,
-        &workspace.id,
-        Some(initiator.id.clone()),
-        "meeting",
-        format!("会议结束，共 {} 位 Agent 参与发言，请做总结", speakers.len()),
-    )
-    .await;
-
-    serde_json::json!({
-        "status": "meeting_completed",
-        "topic": topic,
-        "participants_spoke": speakers.len(),
-    })
 }
 
 /// Registers a pending question, notifies the frontend to pop up an answer

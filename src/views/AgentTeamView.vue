@@ -24,7 +24,10 @@ import {
 import { Add, TrashOutline, EnterOutline, AlarmOutline } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
-import { useWorkspaceStore, type AgentProposalEvent, type AgentStatus, type CreateAgentRequest, type WorkspaceLogEntry } from "@/stores/workspace";
+import {
+  useWorkspaceStore, AGENT_GUIDELINES_BASE, AGENT_GUIDELINES_SUB,
+  type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest, type WorkspaceLogEntry,
+} from "@/stores/workspace";
 import { useSettingsStore } from "@/stores/settings";
 import { useMCPStore } from "@/stores/mcp";
 import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
@@ -87,6 +90,12 @@ const selectedAgentId = ref<string | null>(null);
 const selectedAgent = computed(() => workspace.agents.find((a) => a.id === selectedAgentId.value) ?? null);
 
 const showCreateAgentModal = ref(false);
+// 系统提示词预填默认协作行为准则（防止 Agent 间无意义互相唤醒刷 API 调用），
+// 用户可见、可改、可删。主管/子 Agent 的准则略有差异（休眠条目子 Agent 才有）。
+const roleGuidelines: Record<AgentRole, string> = {
+  main: AGENT_GUIDELINES_BASE,
+  sub: AGENT_GUIDELINES_SUB,
+};
 const emptyAgentForm = (): CreateAgentRequest => ({
   workspaceId: workspace.currentWorkspaceId ?? "",
   name: "",
@@ -95,12 +104,23 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   model: "",
   baseUrl: "",
   apiConfigId: "",
-  systemPrompt: "",
+  systemPrompt: AGENT_GUIDELINES_SUB,
   mcpServerIds: [],
   knowledgeBaseIds: [],
   activeSkillIds: [],
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
+
+// 切换角色时，如果提示词还是另一个角色的默认准则（用户没改过），跟着换成
+// 当前角色的版本；用户已经自己写过内容就不动。
+watch(
+  () => agentForm.value.role,
+  (role, prev) => {
+    if (prev && agentForm.value.systemPrompt === roleGuidelines[prev]) {
+      agentForm.value.systemPrompt = roleGuidelines[role];
+    }
+  }
+);
 
 const openCreateAgentModal = () => {
   agentForm.value = emptyAgentForm();
@@ -193,6 +213,8 @@ const logKindLabels: Record<string, string> = {
   question: "提问",
   acceptance_review: "验收唤醒",
   scheduled_trigger: "⏰ 定时触发",
+  meeting: "会议",
+  agent_note: "Agent 备注",
   error: "错误",
 };
 
@@ -263,7 +285,14 @@ watch(
   (list) => {
     for (const p of list) {
       if (!proposalEdits[p.proposalId]) {
-        proposalEdits[p.proposalId] = { ...p.draft };
+        // 主 Agent 起草的职责说明后面附加默认协作行为准则（新 Agent 都是子
+        // Agent），和手动创建路径保持一致；用户在卡片里仍然可改可删。
+        proposalEdits[p.proposalId] = {
+          ...p.draft,
+          systemPrompt: p.draft.systemPrompt
+            ? `${p.draft.systemPrompt}\n\n${AGENT_GUIDELINES_SUB}`
+            : AGENT_GUIDELINES_SUB,
+        };
       }
     }
   },
