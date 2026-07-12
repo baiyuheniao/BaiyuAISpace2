@@ -42,7 +42,8 @@ jobs:
           gh release view updater-manifest --repo ${{ github.repository }} || \
           gh release create updater-manifest --repo ${{ github.repository }} \
             --title "自动更新清单（请勿删除）" \
-            --notes "仅供应用内自动更新读取 latest.json，不代表实际版本发布，安装包请在正式版本 Release 里下载。"
+            --notes "仅供应用内自动更新读取 latest.json，不代表实际版本发布，安装包请在正式版本 Release 里下载。" \
+            --prerelease --latest=false
 
       - name: Publish latest.json to the fixed release
         run: gh release upload updater-manifest manifest/latest.json --repo ${{ github.repository }} --clobber
