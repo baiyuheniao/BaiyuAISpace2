@@ -56,6 +56,8 @@ pub async fn run(app_handle: AppHandle) {
             mcp_server_ids: vec![],
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
+            rag_top_k: 5,
+            rag_retrieval_mode: "hybrid".to_string(),
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -84,6 +86,8 @@ pub async fn run(app_handle: AppHandle) {
             mcp_server_ids: vec![],
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
+            rag_top_k: 5,
+            rag_retrieval_mode: "hybrid".to_string(),
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -136,7 +140,7 @@ pub async fn run(app_handle: AppHandle) {
         }
     }
 
-    match crate::workspace::commands::workspace_list_messages(workspace.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_messages(workspace.id.clone(), None, db_state.clone()).await {
         Ok(messages) => {
             log::info!("[smoke_test] ===== 消息记录 ({} 条) =====", messages.len());
             for m in &messages {
@@ -146,7 +150,7 @@ pub async fn run(app_handle: AppHandle) {
         Err(e) => log::error!("[smoke_test] 查询消息失败: {}", e),
     }
 
-    match crate::workspace::commands::workspace_list_logs(workspace.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_logs(workspace.id.clone(), None, db_state.clone()).await {
         Ok(logs) => {
             log::info!("[smoke_test] ===== 日志记录 ({} 条) =====", logs.len());
             for l in &logs {
@@ -169,10 +173,12 @@ pub async fn run(app_handle: AppHandle) {
             let Some(question_id) = value.get("questionId").and_then(|v| v.as_str()) else { return };
             log::info!("[smoke_test] 监听到提问事件，自动代用户回答: {}", question_id);
             let pending = handle.state::<PendingQuestions>();
+            let db_state = handle.state::<DbState>();
             if let Err(e) = crate::workspace::commands::workspace_resolve_question(
                 question_id.to_string(),
                 "可以，辛苦了，批准休息。".to_string(),
                 pending,
+                db_state,
             )
             .await
             {
@@ -196,7 +202,8 @@ pub async fn run(app_handle: AppHandle) {
             log::info!("[smoke_test] 监听到休眠申请事件: {}，给主 Agent 30s 自行批准的机会", request_id);
             tokio::time::sleep(Duration::from_secs(30)).await;
             let pending = handle.state::<PendingSleepRequests>();
-            match crate::workspace::commands::workspace_resolve_sleep_request(request_id.clone(), true, pending).await {
+            let db_state = handle.state::<DbState>();
+            match crate::workspace::commands::workspace_resolve_sleep_request(request_id.clone(), true, pending, db_state).await {
                 Ok(()) => log::info!("[smoke_test] 主 Agent 30s 内没批准，已通过用户代为批准覆盖: {}", request_id),
                 Err(_) => log::info!("[smoke_test] 主 Agent 已经自己处理过这个休眠申请: {}", request_id),
             }
@@ -259,7 +266,7 @@ pub async fn run(app_handle: AppHandle) {
         }
     }
 
-    match crate::workspace::commands::workspace_list_messages(workspace.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_messages(workspace.id.clone(), None, db_state.clone()).await {
         Ok(messages) => {
             log::info!("[smoke_test] ===== Phase 2 后完整消息记录 ({} 条) =====", messages.len());
             for m in &messages {
@@ -269,7 +276,7 @@ pub async fn run(app_handle: AppHandle) {
         Err(e) => log::error!("[smoke_test] 查询消息失败: {}", e),
     }
 
-    match crate::workspace::commands::workspace_list_logs(workspace.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_logs(workspace.id.clone(), None, db_state.clone()).await {
         Ok(logs) => {
             log::info!("[smoke_test] ===== Phase 2 后完整日志记录 ({} 条) =====", logs.len());
             for l in &logs {
@@ -315,6 +322,8 @@ pub async fn run(app_handle: AppHandle) {
             mcp_server_ids: vec![],
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
+            rag_top_k: 5,
+            rag_retrieval_mode: "hybrid".to_string(),
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -344,6 +353,8 @@ pub async fn run(app_handle: AppHandle) {
             mcp_server_ids: vec![],
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
+            rag_top_k: 5,
+            rag_retrieval_mode: "hybrid".to_string(),
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -402,7 +413,7 @@ pub async fn run(app_handle: AppHandle) {
         }
     }
 
-    match crate::workspace::commands::workspace_list_messages(meeting_ws.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_messages(meeting_ws.id.clone(), None, db_state.clone()).await {
         Ok(messages) => {
             log::info!("[smoke_test] ===== Phase 3 消息记录 ({} 条) =====", messages.len());
             for m in &messages {
@@ -412,7 +423,7 @@ pub async fn run(app_handle: AppHandle) {
         Err(e) => log::error!("[smoke_test] Phase 3 查询消息失败: {}", e),
     }
 
-    match crate::workspace::commands::workspace_list_logs(meeting_ws.id.clone(), db_state.clone()).await {
+    match crate::workspace::commands::workspace_list_logs(meeting_ws.id.clone(), None, db_state.clone()).await {
         Ok(logs) => {
             log::info!("[smoke_test] ===== Phase 3 日志记录 ({} 条) =====", logs.len());
             for l in &logs {

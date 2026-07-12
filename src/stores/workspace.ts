@@ -56,8 +56,28 @@ export interface WorkspaceAgent {
   knowledgeBaseIds: string[];
   activeSkillIds: string[];
   status: AgentStatus;
+  ragTopK: number;
+  ragRetrievalMode: string;
+  scratchpad: string;
+  /** 非 null 表示已被删除（软删除），仍保留用于历史消息里解析发送者名字。 */
+  deletedAt: number | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface UpdateAgentRequest {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  apiConfigId: string;
+  systemPrompt: string;
+  mcpServerIds: string[];
+  knowledgeBaseIds: string[];
+  activeSkillIds: string[];
+  ragTopK: number;
+  ragRetrievalMode: string;
 }
 
 export interface WorkspaceMessage {
@@ -90,6 +110,8 @@ export interface CreateAgentRequest {
   mcpServerIds: string[];
   knowledgeBaseIds: string[];
   activeSkillIds: string[];
+  ragTopK: number;
+  ragRetrievalMode: string;
 }
 
 export interface AgentProposalEvent {
@@ -119,6 +141,18 @@ export interface QuestionEvent {
 interface AgentStatusEvent {
   agentId: string;
   status: AgentStatus;
+}
+
+/** 持久化的待处理事项，用于补齐"页面没开着 / App 重启前发生"而错过的一次性事件。 */
+export interface PendingEvent {
+  id: string;
+  workspaceId: string;
+  agentId: string;
+  agentName: string;
+  kind: "proposal" | "sleep" | "question";
+  payload: Record<string, unknown>;
+  createdAt: number;
+  resolvedAt: number | null;
 }
 
 /** 目标 Agent 没有存活的后台任务（多半是重启过应用），消息发了但不会有人处理。 */
@@ -225,19 +259,60 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     agents.value = await invoke<WorkspaceAgent[]>("workspace_list_agents", { workspaceId: currentWorkspaceId.value });
   };
 
+  const DEFAULT_HISTORY_LIMIT = 500;
+  const messagesLimit = ref(DEFAULT_HISTORY_LIMIT);
+  const logsLimit = ref(DEFAULT_HISTORY_LIMIT);
+  // 到没到底部（还有没有更早的记录）由"这次拉回来的条数是不是刚好等于
+  // 请求的 limit"来判断——等于就说明可能还有更早的被截掉了。
+  const hasMoreMessages = ref(false);
+  const hasMoreLogs = ref(false);
+
   const loadMessages = async () => {
     if (!currentWorkspaceId.value) return;
-    messages.value = await invoke<WorkspaceMessage[]>("workspace_list_messages", { workspaceId: currentWorkspaceId.value });
+    const result = await invoke<WorkspaceMessage[]>("workspace_list_messages", { workspaceId: currentWorkspaceId.value, limit: messagesLimit.value });
+    messages.value = result;
+    hasMoreMessages.value = result.length >= messagesLimit.value;
+  };
+
+  const loadMoreMessages = async () => {
+    messagesLimit.value += DEFAULT_HISTORY_LIMIT;
+    await loadMessages();
   };
 
   const loadLogs = async () => {
     if (!currentWorkspaceId.value) return;
-    logs.value = await invoke<WorkspaceLogEntry[]>("workspace_list_logs", { workspaceId: currentWorkspaceId.value });
+    const result = await invoke<WorkspaceLogEntry[]>("workspace_list_logs", { workspaceId: currentWorkspaceId.value, limit: logsLimit.value });
+    logs.value = result;
+    hasMoreLogs.value = result.length >= logsLimit.value;
+  };
+
+  const loadMoreLogs = async () => {
+    logsLimit.value += DEFAULT_HISTORY_LIMIT;
+    await loadLogs();
+  };
+
+  /** 补齐"页面没开着 / App 重启前发生"而错过的一次性提议/休眠/提问事件 --
+   *  按 id 去重，已经在内存队列里的（事件监听器实时推进来的）不重复添加。 */
+  const loadPendingEvents = async () => {
+    if (!currentWorkspaceId.value) return;
+    const events = await invoke<PendingEvent[]>("workspace_list_pending_events", { workspaceId: currentWorkspaceId.value });
+    for (const e of events) {
+      if (e.kind === "proposal" && !proposals.value.some((p) => p.proposalId === e.id)) {
+        const draft = e.payload.draft as CreateAgentRequest;
+        proposals.value.push({ proposalId: e.id, workspaceId: e.workspaceId, proposedByAgentId: e.agentId, proposedByAgentName: e.agentName, draft });
+      } else if (e.kind === "sleep" && !sleepRequests.value.some((r) => r.requestId === e.id)) {
+        sleepRequests.value.push({ requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, reason: (e.payload.reason as string) ?? "" });
+      } else if (e.kind === "question" && !questions.value.some((q) => q.questionId === e.id)) {
+        questions.value.push({ questionId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, question: (e.payload.question as string) ?? "" });
+      }
+    }
   };
 
   const selectWorkspace = async (workspaceId: string) => {
     currentWorkspaceId.value = workspaceId;
-    await Promise.all([loadAgents(), loadMessages(), loadLogs()]);
+    messagesLimit.value = DEFAULT_HISTORY_LIMIT;
+    logsLimit.value = DEFAULT_HISTORY_LIMIT;
+    await Promise.all([loadAgents(), loadMessages(), loadLogs(), loadPendingEvents()]);
   };
 
   const createAgent = async (request: CreateAgentRequest): Promise<WorkspaceAgent> => {
@@ -248,9 +323,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     return agent;
   };
 
+  const updateAgent = async (request: UpdateAgentRequest) => {
+    console.log(`[Workspace] 更新 Agent: id=${request.id} name=${request.name}`);
+    await invoke("workspace_update_agent", { request });
+    await loadAgents();
+  };
+
   const deleteAgent = async (agentId: string) => {
     await invoke("workspace_delete_agent", { agentId });
-    agents.value = agents.value.filter((a) => a.id !== agentId);
+    // 软删除：保留在数组里（打上 deletedAt），历史消息/时间线才能继续解析出
+    // 它的名字而不是显示裸 UUID；界面上的花名册/下拉列表自己按 deletedAt 过滤。
+    const agent = agents.value.find((a) => a.id === agentId);
+    if (agent) agent.deletedAt = Date.now();
   };
 
   const sendUserMessage = async (toAgentId: string, content: string) => {
@@ -276,19 +360,27 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     questions.value = questions.value.filter((q) => q.questionId !== questionId);
   };
 
-  /** 把一个 Agent id（或 "user"/"all"/"system"）解析成显示用的名字。 */
+  /** 把一个 Agent id（或 "user"/"all"/"system"）解析成显示用的名字。
+   *  `agents` 里包含软删除的 Agent（后端 workspace_list_agents 特意不过滤），
+   *  所以已删除 Agent 发过的历史消息仍能显示真实名字，而不是裸 UUID。 */
   const agentName = (agentId: string): string => {
     if (agentId === "user") return "用户";
     if (agentId === "all") return "所有人";
     if (agentId === "system") return "系统";
-    return agents.value.find((a) => a.id === agentId)?.name ?? agentId;
+    const agent = agents.value.find((a) => a.id === agentId);
+    if (!agent) return agentId;
+    return agent.deletedAt ? `${agent.name}（已删除）` : agent.name;
   };
+
+  /** 花名册/下拉列表等只应展示当前存活的 Agent。 */
+  const activeAgents = computed(() => agents.value.filter((a) => !a.deletedAt));
 
   return {
     workspaces,
     currentWorkspaceId,
     currentWorkspace,
     agents,
+    activeAgents,
     messages,
     logs,
     proposals,
@@ -303,8 +395,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     selectWorkspace,
     loadAgents,
     loadMessages,
+    loadMoreMessages,
+    hasMoreMessages,
     loadLogs,
+    loadMoreLogs,
+    hasMoreLogs,
+    loadPendingEvents,
     createAgent,
+    updateAgent,
     deleteAgent,
     sendUserMessage,
     resolveProposal,
