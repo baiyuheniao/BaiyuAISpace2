@@ -36,7 +36,8 @@ use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
-use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingMeetingTurns, init_workspace_tables};
+use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, init_workspace_tables};
+use workspace::meeting::MeetingsState;
 use scheduler::init_scheduler_tables;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -356,7 +357,7 @@ fn main() {
             app.manage(PendingProposals::default());
             app.manage(PendingSleepRequests::default());
             app.manage(PendingQuestions::default());
-            app.manage(PendingMeetingTurns::default());
+            app.manage(MeetingsState::default());
             app.manage(CloseToTrayState(Arc::new(AtomicBool::new(true))));
             log::info!("Database and vector store initialized");
 
