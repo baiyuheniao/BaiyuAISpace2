@@ -270,6 +270,7 @@ fn main() {
             workspace::commands::workspace_delete,
             workspace::commands::workspace_create_agent_manual,
             workspace::commands::workspace_list_agents,
+            workspace::commands::workspace_update_agent,
             workspace::commands::workspace_delete_agent,
             workspace::commands::workspace_send_user_message,
             workspace::commands::workspace_list_messages,
@@ -277,6 +278,7 @@ fn main() {
             workspace::commands::workspace_resolve_proposal,
             workspace::commands::workspace_resolve_sleep_request,
             workspace::commands::workspace_resolve_question,
+            workspace::commands::workspace_list_pending_events,
             // 定时任务命令
             scheduler::commands::schedule_create,
             scheduler::commands::schedule_list,
@@ -353,7 +355,44 @@ fn main() {
                 vector_store: Arc::new(vector_store),
                 db_path,
             });
-            app.manage(WorkspaceState::default());
+            // Agent 循环只存在于内存里，之前重启应用后永远拿不回来，用户只能
+            // 删了重建。这里把每个工作组里所有存活（未软删除）的 Agent 重新
+            // 挂回一个新的后台循环——Running/WaitingApproval/WaitingAnswer/
+            // Meeting 这几个状态绑定的 oneshot/会议协调器都是旧进程里的东西，
+            // 已经无法恢复，重置为 Idle；Sleeping 是稳定的持久状态，不用动，
+            // 新消息来了新循环自然会唤醒它。
+            let workspace_state = WorkspaceState::default();
+            {
+                use workspace::db as ws_db;
+                use workspace::types::AgentStatus;
+                match ws_db::list_workspaces(&conn) {
+                    Ok(workspaces) => {
+                        let mut resumed = 0;
+                        for ws in workspaces {
+                            let agents = ws_db::list_agents(&conn, &ws.id).unwrap_or_default();
+                            for mut agent in agents {
+                                if matches!(
+                                    agent.status,
+                                    AgentStatus::Running
+                                        | AgentStatus::WaitingApproval
+                                        | AgentStatus::WaitingAnswer
+                                        | AgentStatus::Meeting
+                                ) {
+                                    if let Err(e) = ws_db::update_agent_status(&conn, &agent.id, AgentStatus::Idle) {
+                                        log::error!("恢复 Agent 循环时重置状态失败: {}", e);
+                                    }
+                                    agent.status = AgentStatus::Idle;
+                                }
+                                workspace::commands::start_agent_loop(app.handle().clone(), workspace_state.0.clone(), agent);
+                                resumed += 1;
+                            }
+                        }
+                        log::info!("应用启动：已恢复 {} 个 Agent 的后台循环", resumed);
+                    }
+                    Err(e) => log::error!("恢复 Agent 循环失败（列出工作组）: {}", e),
+                }
+            }
+            app.manage(workspace_state);
             app.manage(PendingProposals::default());
             app.manage(PendingSleepRequests::default());
             app.manage(PendingQuestions::default());

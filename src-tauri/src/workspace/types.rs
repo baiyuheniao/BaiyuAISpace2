@@ -143,6 +143,18 @@ pub struct WorkspaceAgent {
     pub knowledge_base_ids: Vec<String>,
     pub active_skill_ids: Vec<String>,
     pub status: AgentStatus,
+    /// RAG 检索的 top_k，之前在 build_agent_system_prompt 里硬编码为 5。
+    pub rag_top_k: i32,
+    /// RAG 检索模式，之前硬编码为 "hybrid"；取值 "vector"/"keyword"/"hybrid"。
+    pub rag_retrieval_mode: String,
+    /// 跨唤醒保留的私有备忘（由 workspace_scratchpad 工具读写），每次唤醒都会
+    /// 拼进系统提示词，弥补"每次醒来只记得群聊记录"的工作记忆缺失。
+    #[serde(default)]
+    pub scratchpad: String,
+    /// 软删除时间戳；非 None 表示这个 Agent 已被用户删除，但消息/日志历史里
+    /// 引用它的记录仍需要能正确显示名字，所以不做物理删除。
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -204,6 +216,69 @@ pub struct CreateAgentRequest {
     pub knowledge_base_ids: Vec<String>,
     #[serde(default)]
     pub active_skill_ids: Vec<String>,
+    #[serde(default = "default_rag_top_k")]
+    pub rag_top_k: i32,
+    #[serde(default = "default_rag_retrieval_mode")]
+    pub rag_retrieval_mode: String,
+}
+
+pub fn default_rag_top_k() -> i32 {
+    5
+}
+
+pub fn default_rag_retrieval_mode() -> String {
+    "hybrid".to_string()
+}
+
+/// Editable fields for an existing agent (`workspace_update_agent`). Deliberately
+/// omits `role`/`workspace_id` -- switching a running agent between main/sub
+/// makes its already-issued tool-availability assumptions stale, and moving it
+/// to another workspace has no defined semantics; delete-and-recreate covers
+/// those rare cases. Everything else here is safe to change live because
+/// `process_agent_wake` reloads the agent's row fresh from the DB every wake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAgentRequest {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub api_config_id: String,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
+    #[serde(default)]
+    pub knowledge_base_ids: Vec<String>,
+    #[serde(default)]
+    pub active_skill_ids: Vec<String>,
+    #[serde(default = "default_rag_top_k")]
+    pub rag_top_k: i32,
+    #[serde(default = "default_rag_retrieval_mode")]
+    pub rag_retrieval_mode: String,
+}
+
+/// A `workspace_create_agent` proposal / `workspace_sleep` request /
+/// `workspace_asks` question that's waiting on a human decision, persisted so
+/// it survives an app restart or a user simply not having the page open when
+/// it fired (previously these lived only as in-memory oneshot channels plus a
+/// fire-and-forget frontend event -- miss the event and the request was gone
+/// for good even though the agent was still blocked waiting on it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePendingEvent {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    /// "proposal" | "sleep" | "question"
+    pub kind: String,
+    /// Type-specific fields as JSON: proposal carries `draft`; sleep carries
+    /// `reason`; question carries `question`.
+    pub payload: serde_json::Value,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
 }
 
 pub const DEFAULT_MAX_AGENTS: i32 = 5;

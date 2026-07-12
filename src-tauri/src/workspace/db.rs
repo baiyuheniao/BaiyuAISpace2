@@ -5,10 +5,21 @@
 use super::types::*;
 use rusqlite::Connection;
 
-/// Create the Workspace tables if they don't already exist. Meeting-specific
-/// tables are deliberately not here yet -- the meeting mechanism (Phase 3)
-/// is still basic round-robin only and doesn't need persisted state beyond
-/// `workspace_logs`.
+/// Opens a connection with a busy-timeout set, so a write that lands while
+/// another connection briefly holds the write lock retries for up to 5s
+/// instead of failing immediately with `SQLITE_BUSY` -- every business
+/// operation in this module opens its own short-lived connection (see
+/// `delete_workspace`'s doc comment), so concurrent writes from two agents'
+/// loops firing at once is a real, not theoretical, scenario.
+pub fn open_conn(path: &str) -> Result<Connection, WorkspaceError> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// Create the Workspace tables if they don't already exist, and additively
+/// migrate older installs (`ALTER TABLE ... ADD COLUMN`, guarded by checking
+/// `PRAGMA table_info` first) up to the current schema.
 pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         r#"
@@ -76,6 +87,22 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
 
     conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspace_pending_events (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            resolved_at INTEGER
+        )
+        "#,
+        [],
+    )?;
+
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace ON workspace_agents(workspace_id)",
         [],
     )?;
@@ -91,6 +118,32 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         "CREATE INDEX IF NOT EXISTS idx_workspace_logs_workspace ON workspace_logs(workspace_id, created_at)",
         [],
     )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspace_pending_events_open ON workspace_pending_events(workspace_id, resolved_at)",
+        [],
+    )?;
+
+    // Additive migrations for installs created before this column set existed.
+    let agent_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(workspace_agents)")?
+        .query_map([], |row| row.get(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !agent_columns.contains(&"deleted_at".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN deleted_at INTEGER", [])?;
+    }
+    if !agent_columns.contains(&"rag_top_k".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN rag_top_k INTEGER NOT NULL DEFAULT 5", [])?;
+    }
+    if !agent_columns.contains(&"rag_retrieval_mode".to_string()) {
+        conn.execute(
+            "ALTER TABLE workspace_agents ADD COLUMN rag_retrieval_mode TEXT NOT NULL DEFAULT 'hybrid'",
+            [],
+        )?;
+    }
+    if !agent_columns.contains(&"scratchpad".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN scratchpad TEXT NOT NULL DEFAULT ''", [])?;
+    }
 
     log::info!("Workspace SQLite tables initialized");
     Ok(())
@@ -148,14 +201,17 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Option<Workspace>, W
 pub fn delete_workspace(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
     conn.execute("DELETE FROM workspace_messages WHERE workspace_id = ?1", [id])?;
     conn.execute("DELETE FROM workspace_logs WHERE workspace_id = ?1", [id])?;
+    conn.execute("DELETE FROM workspace_pending_events WHERE workspace_id = ?1", [id])?;
     conn.execute("DELETE FROM workspace_agents WHERE workspace_id = ?1", [id])?;
     conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
     Ok(())
 }
 
+/// Active (non-soft-deleted) agent count, used for the `max_agents` safety
+/// cap -- a deleted agent shouldn't hold a seat open.
 pub fn count_agents(conn: &Connection, workspace_id: &str) -> Result<i64, WorkspaceError> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workspace_agents WHERE workspace_id = ?1",
+        "SELECT COUNT(*) FROM workspace_agents WHERE workspace_id = ?1 AND deleted_at IS NULL",
         [workspace_id],
         |row| row.get(0),
     )?;
@@ -182,20 +238,26 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
         knowledge_base_ids: serde_json::from_str(&knowledge_base_ids).unwrap_or_default(),
         active_skill_ids: serde_json::from_str(&active_skill_ids).unwrap_or_default(),
         status: AgentStatus::from_str(&status),
+        rag_top_k: row.get(15)?,
+        rag_retrieval_mode: row.get(16)?,
+        scratchpad: row.get(17)?,
+        deleted_at: row.get(18)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
 }
 
 const AGENT_SELECT_COLUMNS: &str = "id, workspace_id, name, role, provider, model, base_url, api_config_id, \
-     mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at";
+     mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at, \
+     rag_top_k, rag_retrieval_mode, scratchpad, deleted_at";
 
 pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), WorkspaceError> {
     conn.execute(
         "INSERT INTO workspace_agents
          (id, workspace_id, name, role, provider, model, base_url, api_config_id,
-          system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+          system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at,
+          rag_top_k, rag_retrieval_mode, scratchpad, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         rusqlite::params![
             agent.id,
             agent.workspace_id,
@@ -212,11 +274,19 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
             agent.status.as_str(),
             agent.created_at,
             agent.updated_at,
+            agent.rag_top_k,
+            agent.rag_retrieval_mode,
+            agent.scratchpad,
+            agent.deleted_at,
         ],
     )?;
     Ok(())
 }
 
+/// Looks up an agent by id regardless of soft-delete status -- used both for
+/// the live agent-loop path (which only ever holds ids of active agents
+/// anyway) and to backfill display names for historical messages/logs sent
+/// by an agent that has since been deleted.
 pub fn get_agent(conn: &Connection, id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
     let sql = format!("SELECT {} FROM workspace_agents WHERE id = ?1", AGENT_SELECT_COLUMNS);
     let result = conn.query_row(&sql, [id], row_to_agent);
@@ -227,7 +297,24 @@ pub fn get_agent(conn: &Connection, id: &str) -> Result<Option<WorkspaceAgent>, 
     }
 }
 
+/// Active agents only (excludes soft-deleted) -- what every existing caller
+/// (agent roster, meeting participants, max-agents count, main-agent lookup)
+/// actually wants. Use `get_agent` directly when a deleted agent's row still
+/// needs to be resolvable (e.g. historical message sender names).
 pub fn list_agents(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspaceAgent>, WorkspaceError> {
+    let sql = format!(
+        "SELECT {} FROM workspace_agents WHERE workspace_id = ?1 AND deleted_at IS NULL ORDER BY created_at ASC",
+        AGENT_SELECT_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([workspace_id], row_to_agent)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// All agents including soft-deleted ones -- used only where a deleted
+/// agent's name still needs to resolve (rendering historical messages/logs
+/// that reference it). Everything else should use `list_agents`.
+pub fn list_agents_including_deleted(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspaceAgent>, WorkspaceError> {
     let sql = format!(
         "SELECT {} FROM workspace_agents WHERE workspace_id = ?1 ORDER BY created_at ASC",
         AGENT_SELECT_COLUMNS
@@ -245,8 +332,67 @@ pub fn update_agent_status(conn: &Connection, id: &str, status: AgentStatus) -> 
     Ok(())
 }
 
+/// Applies user edits to an existing agent's config. Deliberately doesn't
+/// touch `status` -- the live loop reloads the row fresh every wake, so a
+/// plain field update takes effect on the agent's next turn without needing
+/// to restart its background task.
+pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), WorkspaceError> {
+    let rows = conn.execute(
+        "UPDATE workspace_agents SET name = ?1, provider = ?2, model = ?3, base_url = ?4, api_config_id = ?5, \
+         system_prompt = ?6, mcp_server_ids = ?7, knowledge_base_ids = ?8, active_skill_ids = ?9, \
+         rag_top_k = ?10, rag_retrieval_mode = ?11, updated_at = ?12 \
+         WHERE id = ?13 AND deleted_at IS NULL",
+        rusqlite::params![
+            req.name,
+            req.provider,
+            req.model,
+            req.base_url,
+            req.api_config_id,
+            req.system_prompt,
+            serde_json::to_string(&req.mcp_server_ids).unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(&req.knowledge_base_ids).unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(&req.active_skill_ids).unwrap_or_else(|_| "[]".to_string()),
+            req.rag_top_k,
+            req.rag_retrieval_mode,
+            chrono::Utc::now().timestamp_millis(),
+            req.id,
+        ],
+    )?;
+    if rows == 0 {
+        return Err(WorkspaceError::AgentNotFound(req.id.clone()));
+    }
+    Ok(())
+}
+
+pub fn get_scratchpad(conn: &Connection, agent_id: &str) -> Result<String, WorkspaceError> {
+    let result = conn.query_row(
+        "SELECT scratchpad FROM workspace_agents WHERE id = ?1",
+        [agent_id],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(s) => Ok(s),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn set_scratchpad(conn: &Connection, agent_id: &str, content: &str) -> Result<(), WorkspaceError> {
+    conn.execute(
+        "UPDATE workspace_agents SET scratchpad = ?1 WHERE id = ?2",
+        rusqlite::params![content, agent_id],
+    )?;
+    Ok(())
+}
+
+/// Soft delete: keeps the row (with `deleted_at` set) so historical
+/// messages/logs referencing this agent id can still resolve its name,
+/// instead of falling back to a raw UUID in the timeline.
 pub fn delete_agent(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
-    conn.execute("DELETE FROM workspace_agents WHERE id = ?1", [id])?;
+    conn.execute(
+        "UPDATE workspace_agents SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![chrono::Utc::now().timestamp_millis(), id],
+    )?;
     Ok(())
 }
 
@@ -336,6 +482,62 @@ pub fn list_logs(conn: &Connection, workspace_id: &str, limit: i64) -> Result<Ve
     Ok(logs)
 }
 
+fn row_to_pending_event(row: &rusqlite::Row) -> rusqlite::Result<WorkspacePendingEvent> {
+    let payload: String = row.get(5)?;
+    Ok(WorkspacePendingEvent {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        agent_name: row.get(3)?,
+        kind: row.get(4)?,
+        payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
+        created_at: row.get(6)?,
+        resolved_at: row.get(7)?,
+    })
+}
+
+/// Records a proposal/sleep-request/question the moment it's raised, so it
+/// survives a restart or a user who wasn't looking at this page when the
+/// one-shot frontend event fired. `id` must match the id used to resolve it
+/// (`proposal_id`/`request_id`/`question_id`) so `resolve_pending_event` can
+/// find it again.
+pub fn insert_pending_event(conn: &Connection, event: &WorkspacePendingEvent) -> Result<(), WorkspaceError> {
+    conn.execute(
+        "INSERT INTO workspace_pending_events (id, workspace_id, agent_id, agent_name, kind, payload, created_at, resolved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+        rusqlite::params![
+            event.id,
+            event.workspace_id,
+            event.agent_id,
+            event.agent_name,
+            event.kind,
+            serde_json::to_string(&event.payload).unwrap_or_else(|_| "null".to_string()),
+            event.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn resolve_pending_event(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
+    conn.execute(
+        "UPDATE workspace_pending_events SET resolved_at = ?1 WHERE id = ?2",
+        rusqlite::params![chrono::Utc::now().timestamp_millis(), id],
+    )?;
+    Ok(())
+}
+
+/// Everything still awaiting a human decision in this workspace, oldest
+/// first -- what the frontend fetches on selecting a workspace to backfill
+/// anything it missed while the page (or the app) wasn't open.
+pub fn list_unresolved_pending_events(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspacePendingEvent>, WorkspaceError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, agent_id, agent_name, kind, payload, created_at, resolved_at
+         FROM workspace_pending_events WHERE workspace_id = ?1 AND resolved_at IS NULL ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([workspace_id], row_to_pending_event)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +563,10 @@ mod tests {
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
             status: AgentStatus::Idle,
+            rag_top_k: 5,
+            rag_retrieval_mode: "hybrid".to_string(),
+            scratchpad: String::new(),
+            deleted_at: None,
             created_at: 1000,
             updated_at: 1000,
         }
@@ -500,5 +706,134 @@ mod tests {
         assert!(list_agents(&conn, "ws-1").unwrap().is_empty());
         assert!(list_messages(&conn, "ws-1", 10).unwrap().is_empty());
         assert!(list_logs(&conn, "ws-1", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleted_agent_is_excluded_from_list_and_count_but_still_resolvable_by_id() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+        let agent = sample_agent("ws-1", AgentRole::Sub, "A");
+        insert_agent(&conn, &agent).unwrap();
+        assert_eq!(count_agents(&conn, "ws-1").unwrap(), 1);
+
+        delete_agent(&conn, &agent.id).unwrap();
+
+        assert_eq!(count_agents(&conn, "ws-1").unwrap(), 0);
+        assert!(list_agents(&conn, "ws-1").unwrap().is_empty());
+        // Still resolvable by id -- historical messages/logs need the name.
+        let fetched = get_agent(&conn, &agent.id).unwrap().expect("soft-deleted agent should still be gettable by id");
+        assert!(fetched.deleted_at.is_some());
+        assert_eq!(fetched.name, "A");
+    }
+
+    #[test]
+    fn update_agent_persists_edits_without_touching_status() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+        let agent = sample_agent("ws-1", AgentRole::Sub, "A");
+        insert_agent(&conn, &agent).unwrap();
+        update_agent_status(&conn, &agent.id, AgentStatus::Running).unwrap();
+
+        update_agent(
+            &conn,
+            &UpdateAgentRequest {
+                id: agent.id.clone(),
+                name: "A-renamed".to_string(),
+                provider: "deepseek".to_string(),
+                model: "deepseek-v4".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                api_config_id: "cfg-2".to_string(),
+                system_prompt: "be terse".to_string(),
+                mcp_server_ids: vec![],
+                knowledge_base_ids: vec!["kb-1".to_string()],
+                active_skill_ids: vec![],
+                rag_top_k: 8,
+                rag_retrieval_mode: "vector".to_string(),
+            },
+        )
+        .unwrap();
+
+        let fetched = get_agent(&conn, &agent.id).unwrap().unwrap();
+        assert_eq!(fetched.name, "A-renamed");
+        assert_eq!(fetched.provider, "deepseek");
+        assert_eq!(fetched.rag_top_k, 8);
+        assert_eq!(fetched.rag_retrieval_mode, "vector");
+        assert_eq!(fetched.knowledge_base_ids, vec!["kb-1".to_string()]);
+        // Status untouched by an edit -- the live loop reloads config, not status.
+        assert_eq!(fetched.status, AgentStatus::Running);
+
+        assert!(matches!(
+            update_agent(
+                &conn,
+                &UpdateAgentRequest {
+                    id: "missing".to_string(),
+                    name: "x".to_string(),
+                    provider: "x".to_string(),
+                    model: "x".to_string(),
+                    base_url: "".to_string(),
+                    api_config_id: "".to_string(),
+                    system_prompt: "".to_string(),
+                    mcp_server_ids: vec![],
+                    knowledge_base_ids: vec![],
+                    active_skill_ids: vec![],
+                    rag_top_k: 5,
+                    rag_retrieval_mode: "hybrid".to_string(),
+                },
+            ),
+            Err(WorkspaceError::AgentNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn scratchpad_round_trips_and_defaults_to_empty() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+        let agent = sample_agent("ws-1", AgentRole::Sub, "A");
+        insert_agent(&conn, &agent).unwrap();
+
+        assert_eq!(get_scratchpad(&conn, &agent.id).unwrap(), "");
+        set_scratchpad(&conn, &agent.id, "已联系客户，等回复").unwrap();
+        assert_eq!(get_scratchpad(&conn, &agent.id).unwrap(), "已联系客户，等回复");
+    }
+
+    #[test]
+    fn pending_events_round_trip_and_resolve_excludes_from_unresolved_list() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+
+        let event = WorkspacePendingEvent {
+            id: "evt-1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            agent_id: "agent-a".to_string(),
+            agent_name: "A".to_string(),
+            kind: "sleep".to_string(),
+            payload: serde_json::json!({ "reason": "done for now" }),
+            created_at: 100,
+            resolved_at: None,
+        };
+        insert_pending_event(&conn, &event).unwrap();
+
+        let unresolved = list_unresolved_pending_events(&conn, "ws-1").unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].payload["reason"], "done for now");
+
+        resolve_pending_event(&conn, "evt-1").unwrap();
+        assert!(list_unresolved_pending_events(&conn, "ws-1").unwrap().is_empty());
     }
 }

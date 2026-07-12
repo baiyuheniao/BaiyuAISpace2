@@ -32,10 +32,10 @@ const MAX_ROUNDS_PER_WAKE: u32 = 8;
 const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
 const MAX_HISTORY_MESSAGES: i64 = 40;
 
-/// One running agent's wake signal + stop switch. Lives only in memory --
-/// restarting the app currently does not resume agent loops, only their
-/// persisted DB state (Phase 1 scope; auto-resume on launch is not yet
-/// implemented).
+/// One running agent's wake signal + stop switch. Lives only in memory, but
+/// `main.rs`'s `setup()` calls `start_agent_loop` again for every active
+/// agent on launch (via this same function), so a restart resumes every
+/// workspace's agents rather than leaving them permanently dormant.
 pub struct AgentHandle {
     pub notify: Arc<Notify>,
     pub cancel: CancellationToken,
@@ -98,7 +98,7 @@ pub async fn workspace_create(
         updated_at: now,
     };
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::insert_workspace(&conn, &workspace)?;
     Ok(workspace)
 }
@@ -106,7 +106,7 @@ pub async fn workspace_create(
 #[tauri::command]
 pub async fn workspace_list(db_state: State<'_, DbState>) -> Result<Vec<Workspace>, WorkspaceError> {
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::list_workspaces(&conn)
 }
 
@@ -119,7 +119,7 @@ pub async fn workspace_delete(
 ) -> Result<(), WorkspaceError> {
     let agent_ids: Vec<String> = {
         let db = db_state.0.lock().await;
-        let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+        let conn = db::open_conn(&db.path)?;
         db::list_agents(&conn, &workspace_id)?.into_iter().map(|a| a.id).collect()
     };
 
@@ -140,7 +140,7 @@ pub async fn workspace_delete(
     }
 
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::delete_workspace(&conn, &workspace_id)?;
     Ok(())
 }
@@ -159,14 +159,36 @@ pub async fn workspace_create_agent_manual(
     spawn_agent_internal(&app_handle, workspace_state.0.clone(), request).await
 }
 
+/// Returns every agent including soft-deleted ones -- the frontend needs the
+/// deleted ones too, to resolve sender names in historical messages/logs
+/// instead of showing a raw UUID; it filters them back out of the active
+/// roster/dropdowns itself using `deletedAt`.
 #[tauri::command]
 pub async fn workspace_list_agents(
     workspace_id: String,
     db_state: State<'_, DbState>,
 ) -> Result<Vec<WorkspaceAgent>, WorkspaceError> {
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
-    db::list_agents(&conn, &workspace_id)
+    let conn = db::open_conn(&db.path)?;
+    db::list_agents_including_deleted(&conn, &workspace_id)
+}
+
+/// Applies user edits to an existing agent (name/model/prompt/tool access/RAG
+/// config). Deliberately doesn't restart the agent's background loop --
+/// `process_agent_wake` reloads the agent row from the DB at the start of
+/// every wake, so a plain config update takes effect on its very next turn.
+#[tauri::command]
+pub async fn workspace_update_agent(
+    request: UpdateAgentRequest,
+    db_state: State<'_, DbState>,
+) -> Result<WorkspaceAgent, WorkspaceError> {
+    if request.name.trim().is_empty() || request.provider.trim().is_empty() || request.model.trim().is_empty() {
+        return Err(WorkspaceError::InvalidConfig("name/provider/model 不能为空".to_string()));
+    }
+    let db = db_state.0.lock().await;
+    let conn = db::open_conn(&db.path)?;
+    db::update_agent(&conn, &request)?;
+    db::get_agent(&conn, &request.id)?.ok_or_else(|| WorkspaceError::AgentNotFound(request.id.clone()))
 }
 
 #[tauri::command]
@@ -182,7 +204,7 @@ pub async fn workspace_delete_agent(
         }
     }
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::delete_agent(&conn, &agent_id)?;
     Ok(())
 }
@@ -229,21 +251,23 @@ pub async fn workspace_send_user_message(
 #[tauri::command]
 pub async fn workspace_list_messages(
     workspace_id: String,
+    limit: Option<i64>,
     db_state: State<'_, DbState>,
 ) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
-    db::list_messages(&conn, &workspace_id, 500)
+    let conn = db::open_conn(&db.path)?;
+    db::list_messages(&conn, &workspace_id, limit.unwrap_or(500))
 }
 
 #[tauri::command]
 pub async fn workspace_list_logs(
     workspace_id: String,
+    limit: Option<i64>,
     db_state: State<'_, DbState>,
 ) -> Result<Vec<WorkspaceLogEntry>, WorkspaceError> {
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
-    db::list_logs(&conn, &workspace_id, 500)
+    let conn = db::open_conn(&db.path)?;
+    db::list_logs(&conn, &workspace_id, limit.unwrap_or(500))
 }
 
 /// The frontend calls this in response to a `workspace://agent-proposal`
@@ -257,6 +281,7 @@ pub async fn workspace_resolve_proposal(
     approved: bool,
     request: Option<CreateAgentRequest>,
     pending: State<'_, PendingProposals>,
+    db_state: State<'_, DbState>,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
@@ -280,6 +305,7 @@ pub async fn workspace_resolve_proposal(
     };
 
     let _ = sender.send(decision);
+    mark_pending_event_resolved(&db_state, &proposal_id).await;
     Ok(())
 }
 
@@ -293,6 +319,7 @@ pub async fn workspace_resolve_sleep_request(
     request_id: String,
     approved: bool,
     pending: State<'_, PendingSleepRequests>,
+    db_state: State<'_, DbState>,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
@@ -302,6 +329,7 @@ pub async fn workspace_resolve_sleep_request(
         WorkspaceError::NotFound(format!("休眠请求 {} 不存在或已被处理/超时", request_id))
     })?;
     let _ = sender.send(approved);
+    mark_pending_event_resolved(&db_state, &request_id).await;
     Ok(())
 }
 
@@ -312,6 +340,7 @@ pub async fn workspace_resolve_question(
     question_id: String,
     answer: String,
     pending: State<'_, PendingQuestions>,
+    db_state: State<'_, DbState>,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
@@ -321,7 +350,69 @@ pub async fn workspace_resolve_question(
         WorkspaceError::NotFound(format!("问题 {} 不存在或已被处理/超时", question_id))
     })?;
     let _ = sender.send(answer);
+    mark_pending_event_resolved(&db_state, &question_id).await;
     Ok(())
+}
+
+/// Lists everything in this workspace still awaiting a human decision -- the
+/// frontend fetches this on selecting a workspace so a proposal/sleep
+/// request/question raised while the page wasn't open (or the app wasn't
+/// running) isn't lost, unlike the one-shot events these are paired with.
+#[tauri::command]
+pub async fn workspace_list_pending_events(
+    workspace_id: String,
+    db_state: State<'_, DbState>,
+) -> Result<Vec<WorkspacePendingEvent>, WorkspaceError> {
+    let db = db_state.0.lock().await;
+    let conn = db::open_conn(&db.path)?;
+    db::list_unresolved_pending_events(&conn, &workspace_id)
+}
+
+async fn mark_pending_event_resolved(db_state: &DbState, id: &str) {
+    let db = db_state.0.lock().await;
+    match db::open_conn(&db.path) {
+        Ok(conn) => {
+            if let Err(e) = db::resolve_pending_event(&conn, id) {
+                log::error!("[workspace] 标记待处理事项已解决失败: {}", e);
+            }
+        }
+        Err(e) => log::error!("[workspace] 打开数据库连接失败（标记待处理事项）: {}", e),
+    }
+}
+
+async fn mark_pending_event_resolved_via_handle(app_handle: &AppHandle, id: &str) {
+    mark_pending_event_resolved(&app_handle.state::<DbState>(), id).await;
+}
+
+async fn record_pending_event(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent_id: &str,
+    agent_name: &str,
+    kind: &str,
+    payload: serde_json::Value,
+    id: &str,
+) {
+    let event = WorkspacePendingEvent {
+        id: id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        agent_id: agent_id.to_string(),
+        agent_name: agent_name.to_string(),
+        kind: kind.to_string(),
+        payload,
+        created_at: Utc::now().timestamp_millis(),
+        resolved_at: None,
+    };
+    let db_state = app_handle.state::<DbState>();
+    let db = db_state.0.lock().await;
+    match db::open_conn(&db.path) {
+        Ok(conn) => {
+            if let Err(e) = db::insert_pending_event(&conn, &event) {
+                log::error!("[workspace] 持久化待处理事项失败: {}", e);
+            }
+        }
+        Err(e) => log::error!("[workspace] 打开数据库连接失败（持久化待处理事项）: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,14 +422,14 @@ pub async fn workspace_resolve_question(
 pub(crate) async fn load_agent(app_handle: &AppHandle, agent_id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
     let db_state = app_handle.state::<DbState>();
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::get_agent(&conn, agent_id)
 }
 
 async fn load_workspace(app_handle: &AppHandle, workspace_id: &str) -> Result<Option<Workspace>, WorkspaceError> {
     let db_state = app_handle.state::<DbState>();
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+    let conn = db::open_conn(&db.path)?;
     db::get_workspace(&conn, workspace_id)
 }
 
@@ -346,8 +437,13 @@ pub(crate) async fn set_agent_status(app_handle: &AppHandle, agent_id: &str, sta
     let db_state = app_handle.state::<DbState>();
     {
         let db = db_state.0.lock().await;
-        if let Ok(conn) = rusqlite::Connection::open(&db.path) {
-            let _ = db::update_agent_status(&conn, agent_id, status);
+        match db::open_conn(&db.path) {
+            Ok(conn) => {
+                if let Err(e) = db::update_agent_status(&conn, agent_id, status) {
+                    log::error!("[workspace] 更新 Agent 状态失败: {}", e);
+                }
+            }
+            Err(e) => log::error!("[workspace] 打开数据库连接失败（更新状态）: {}", e),
         }
     }
     let _ = app_handle.emit(
@@ -374,8 +470,13 @@ pub async fn insert_workspace_log(
     let db_state = app_handle.state::<DbState>();
     {
         let db = db_state.0.lock().await;
-        if let Ok(conn) = rusqlite::Connection::open(&db.path) {
-            let _ = db::insert_log(&conn, &entry);
+        match db::open_conn(&db.path) {
+            Ok(conn) => {
+                if let Err(e) = db::insert_log(&conn, &entry) {
+                    log::error!("[workspace] 写入活动日志失败: {}", e);
+                }
+            }
+            Err(e) => log::error!("[workspace] 打开数据库连接失败（写日志）: {}", e),
         }
     }
     let _ = app_handle.emit("workspace://log", &entry);
@@ -436,8 +537,13 @@ async fn send_workspace_message_impl(
     let db_state = app_handle.state::<DbState>();
     {
         let db = db_state.0.lock().await;
-        if let Ok(conn) = rusqlite::Connection::open(&db.path) {
-            let _ = db::insert_message(&conn, &msg);
+        match db::open_conn(&db.path) {
+            Ok(conn) => {
+                if let Err(e) = db::insert_message(&conn, &msg) {
+                    log::error!("[workspace] 写入消息失败: {}", e);
+                }
+            }
+            Err(e) => log::error!("[workspace] 打开数据库连接失败（写消息）: {}", e),
         }
     }
     let _ = app_handle.emit("workspace://message", &msg);
@@ -461,7 +567,7 @@ async fn send_workspace_message_impl(
 async fn list_agents_for_workspace(app_handle: &AppHandle, workspace_id: &str) -> Vec<WorkspaceAgent> {
     let db_state = app_handle.state::<DbState>();
     let db = db_state.0.lock().await;
-    match rusqlite::Connection::open(&db.path) {
+    match db::open_conn(&db.path) {
         Ok(conn) => db::list_agents(&conn, workspace_id).unwrap_or_default(),
         Err(_) => vec![],
     }
@@ -528,7 +634,7 @@ async fn spawn_agent_internal(
     let now = Utc::now().timestamp_millis();
     let agent = {
         let db = db_state.0.lock().await;
-        let conn = rusqlite::Connection::open(&db.path).map_err(|e| WorkspaceError::DatabaseError(e.to_string()))?;
+        let conn = db::open_conn(&db.path)?;
 
         let current_count = db::count_agents(&conn, &workspace.id)?;
         if current_count >= workspace.max_agents as i64 {
@@ -552,6 +658,10 @@ async fn spawn_agent_internal(
             knowledge_base_ids: request.knowledge_base_ids.clone(),
             active_skill_ids: request.active_skill_ids.clone(),
             status: AgentStatus::Idle,
+            rag_top_k: request.rag_top_k,
+            rag_retrieval_mode: request.rag_retrieval_mode.clone(),
+            scratchpad: String::new(),
+            deleted_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -587,7 +697,7 @@ async fn spawn_agent_internal(
 /// `propose_agent_creation` -> `spawn_agent_internal` when a main agent's
 /// proposal gets approved, and an `async fn` here would make that chain
 /// self-referential.
-fn start_agent_loop(app_handle: AppHandle, agent_handles: Arc<Mutex<HashMap<String, AgentHandle>>>, agent: WorkspaceAgent) {
+pub(crate) fn start_agent_loop(app_handle: AppHandle, agent_handles: Arc<Mutex<HashMap<String, AgentHandle>>>, agent: WorkspaceAgent) {
     let notify = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
 
@@ -663,6 +773,15 @@ async fn process_agent_wake(
     let chat_history = build_chat_history(app_handle, workspace_id, &agent).await;
     if chat_history.is_empty() {
         log::debug!("[workspace] Agent「{}」历史消息为空，跳过本次唤醒", agent.name);
+        set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
+        return Ok(());
+    }
+    // 虚假唤醒去重：`Notify` 的 permit 语义下，处理期间收到的通知会在处理结束
+    // 后再触发一轮唤醒；如果这时最新一条相关消息就是自己上次发的回复，说明
+    // 没有任何人在这之后说过话，没有新内容可回应，直接跳过，避免对着同一段
+    // 历史重新推理一遍、很可能又重复回复一次。
+    if chat_history.last().map(|m| m.role.as_str()) == Some("assistant") {
+        log::debug!("[workspace] Agent「{}」自上次发言后没有新消息，跳过本次唤醒", agent.name);
         set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
         return Ok(());
     }
@@ -756,7 +875,7 @@ async fn process_agent_wake(
                         format!("调用工具 {} 参数: {}", call.name, call.arguments),
                     )
                     .await;
-                    let result = dispatch_tool_call(app_handle, &workspace, &agent, call).await;
+                    let result = dispatch_tool_call(app_handle, &workspace, &agent, call, cancel).await;
                     log::debug!(
                         "[workspace] 工具 {} 返回: {}",
                         call.name,
@@ -806,13 +925,16 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
     let db_state = app_handle.state::<DbState>();
     let (messages, agents) = {
         let db = db_state.0.lock().await;
-        let conn = match rusqlite::Connection::open(&db.path) {
+        let conn = match db::open_conn(&db.path) {
             Ok(c) => c,
             Err(_) => return vec![],
         };
         let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, MAX_HISTORY_MESSAGES)
             .unwrap_or_default();
-        let agents = db::list_agents(&conn, workspace_id).unwrap_or_default();
+        // Include soft-deleted agents here -- a deleted agent's past messages
+        // are still in this history window and need their sender name
+        // resolved, not shown as a raw id to the model.
+        let agents = db::list_agents_including_deleted(&conn, workspace_id).unwrap_or_default();
         (messages, agents)
     };
 
@@ -822,6 +944,9 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
         }
         if id == "all" {
             return "所有人".to_string();
+        }
+        if id == "system" {
+            return "系统".to_string();
         }
         agents.iter().find(|a| a.id == id).map(|a| a.name.clone()).unwrap_or_else(|| id.to_string())
     };
@@ -853,6 +978,16 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
 async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgent, latest_query: &str) -> String {
     let mut sections = vec![agent.system_prompt.clone()];
 
+    // 工作记忆：每次唤醒的上下文只由最近 40 条消息重建，工具调用轮次的中间
+    // 结果醒来就丢——scratchpad 是这个空白之外唯一跨唤醒保留的私有存储，靠
+    // workspace_scratchpad 工具自己读写维护，内容原样拼进系统提示词。
+    if !agent.scratchpad.trim().is_empty() {
+        sections.push(format!(
+            "【你的工作备忘（可用 workspace_scratchpad 工具更新）】\n{}",
+            agent.scratchpad
+        ));
+    }
+
     if !agent.active_skill_ids.is_empty() {
         let db_state = app_handle.state::<DbState>();
         let all_skills = {
@@ -877,8 +1012,12 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
             let request = RetrievalRequest {
                 kb_id: kb_id.clone(),
                 query: latest_query.to_string(),
-                top_k: 5,
-                retrieval_mode: RetrievalMode::Hybrid,
+                top_k: agent.rag_top_k,
+                retrieval_mode: match agent.rag_retrieval_mode.as_str() {
+                    "vector" => RetrievalMode::Vector,
+                    "keyword" => RetrievalMode::Keyword,
+                    _ => RetrievalMode::Hybrid,
+                },
                 similarity_threshold: 0.0,
                 window_size: 1,
                 reranker_config_id: None,
@@ -942,6 +1081,24 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         },
     ];
 
+    tools.push(MCPTool {
+        server_id: "workspace".to_string(),
+        server_name: "workspace".to_string(),
+        name: "workspace_scratchpad".to_string(),
+        description: "读写你的私人工作备忘。这是唯一跨越「唤醒」持续保留的私有存储（普通对话历史只保留最近\
+            几十条消息，工具调用的中间结果醒来就丢）——用它记录任务清单、已查到的资料、下一步打算做什么，\
+            避免每次醒来都要重新摸索状态。action 为 replace 时整体覆盖，append 时追加一行，clear 清空；\
+            省略 content 直接读出当前内容。"
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["read", "replace", "append", "clear"], "description": "read 只读取；replace 整体覆盖；append 追加一行；clear 清空" },
+                "content": { "type": "string", "description": "replace/append 时要写入的内容" }
+            },
+            "required": ["action"]
+        }),
+    });
     tools.push(MCPTool {
         server_id: "workspace".to_string(),
         server_name: "workspace".to_string(),
@@ -1050,6 +1207,7 @@ async fn dispatch_tool_call(
     workspace: &Workspace,
     agent: &WorkspaceAgent,
     call: &PendingToolCall,
+    cancel: &CancellationToken,
 ) -> serde_json::Value {
     match call.name.as_str() {
         "workspace_message" => {
@@ -1068,7 +1226,7 @@ async fn dispatch_tool_call(
             let db_state = app_handle.state::<DbState>();
             let agents = {
                 let db = db_state.0.lock().await;
-                match rusqlite::Connection::open(&db.path) {
+                match db::open_conn(&db.path) {
                     Ok(conn) => db::list_agents(&conn, &workspace.id).unwrap_or_default(),
                     Err(_) => vec![],
                 }
@@ -1093,7 +1251,7 @@ async fn dispatch_tool_call(
             let current_count = {
                 let db_state = app_handle.state::<DbState>();
                 let db = db_state.0.lock().await;
-                rusqlite::Connection::open(&db.path)
+                db::open_conn(&db.path)
                     .ok()
                     .and_then(|conn| db::count_agents(&conn, &workspace.id).ok())
                     .unwrap_or(0)
@@ -1116,10 +1274,12 @@ async fn dispatch_tool_call(
                 mcp_server_ids: vec![],
                 knowledge_base_ids: vec![],
                 active_skill_ids: vec![],
+                rag_top_k: default_rag_top_k(),
+                rag_retrieval_mode: default_rag_retrieval_mode(),
             };
 
             let pending = app_handle.state::<PendingProposals>();
-            propose_agent_creation(app_handle, &pending, &workspace.id, agent, draft).await
+            propose_agent_creation(app_handle, &pending, &workspace.id, agent, draft, cancel).await
         }
         "workspace_sleep" => {
             if agent.role == AgentRole::Main {
@@ -1128,7 +1288,7 @@ async fn dispatch_tool_call(
             let reason = call.arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("未说明").to_string();
 
             set_agent_status(app_handle, &agent.id, AgentStatus::WaitingApproval).await;
-            let approved = request_sleep_approval(app_handle, &workspace.id, agent, &reason).await;
+            let approved = request_sleep_approval(app_handle, &workspace.id, agent, &reason, cancel).await;
             if approved {
                 set_agent_status(app_handle, &agent.id, AgentStatus::Sleeping).await;
                 maybe_trigger_main_agent_review(app_handle, &workspace.id).await;
@@ -1152,6 +1312,8 @@ async fn dispatch_tool_call(
             match sender {
                 Some(tx) => {
                     let _ = tx.send(approved);
+                    let db_state = app_handle.state::<DbState>();
+                    mark_pending_event_resolved(&db_state, &request_id).await;
                     serde_json::json!({ "status": "ok" })
                 }
                 None => serde_json::json!({ "error": format!("休眠请求 {} 不存在或已被处理/超时", request_id) }),
@@ -1163,9 +1325,52 @@ async fn dispatch_tool_call(
                 return serde_json::json!({ "error": "question 不能为空" });
             }
             set_agent_status(app_handle, &agent.id, AgentStatus::WaitingAnswer).await;
-            let answer = request_user_answer(app_handle, &workspace.id, agent, &question).await;
+            let answer = request_user_answer(app_handle, &workspace.id, agent, &question, cancel).await;
             set_agent_status(app_handle, &agent.id, AgentStatus::Running).await;
             serde_json::json!({ "answer": answer })
+        }
+        "workspace_scratchpad" => {
+            let action = call.arguments.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+            let db_state = app_handle.state::<DbState>();
+            let new_content = match action {
+                "clear" => Some(String::new()),
+                "replace" => Some(call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                "append" => {
+                    let line = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                    if line.is_empty() {
+                        return serde_json::json!({ "error": "append 需要非空 content" });
+                    }
+                    let current = agent.scratchpad.clone();
+                    Some(if current.is_empty() { line } else { format!("{}\n{}", current, line) })
+                }
+                "read" => None,
+                other => return serde_json::json!({ "error": format!("未知 action: {}", other) }),
+            };
+            if let Some(content) = &new_content {
+                let db = db_state.0.lock().await;
+                match db::open_conn(&db.path) {
+                    Ok(conn) => {
+                        if let Err(e) = db::set_scratchpad(&conn, &agent.id, content) {
+                            return serde_json::json!({ "error": format!("写入失败: {}", e) });
+                        }
+                    }
+                    Err(e) => return serde_json::json!({ "error": format!("打开数据库连接失败: {}", e) }),
+                }
+            }
+            let current = match &new_content {
+                Some(c) => c.clone(),
+                None => {
+                    // 读操作现查一次库，而不是用调用这个工具时已经在内存里的
+                    // agent 快照——万一同一次唤醒里工具轮之间有过其他写入
+                    // （目前不会，但语义上"读"就该读最新值）。
+                    let db = db_state.0.lock().await;
+                    match db::open_conn(&db.path) {
+                        Ok(conn) => db::get_scratchpad(&conn, &agent.id).unwrap_or_else(|_| agent.scratchpad.clone()),
+                        Err(_) => agent.scratchpad.clone(),
+                    }
+                }
+            };
+            serde_json::json!({ "scratchpad": current })
         }
         "workspace_log" => {
             let content = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1268,9 +1473,12 @@ async fn dispatch_tool_call(
             {
                 return serde_json::json!({ "error": "会议协调器启动失败" });
             }
-            match reply_rx.await {
-                Ok(v) => v,
-                Err(_) => serde_json::json!({ "error": "会议已终止" }),
+            tokio::select! {
+                _ = cancel.cancelled() => serde_json::json!({ "error": "工作组已被删除" }),
+                result = reply_rx => match result {
+                    Ok(v) => v,
+                    Err(_) => serde_json::json!({ "error": "会议已终止" }),
+                },
             }
         }
         "workspace_meeting_checkin" => {
@@ -1302,14 +1510,36 @@ async fn dispatch_tool_call(
             {
                 return serde_json::json!({ "error": "会议已结束" });
             }
-            match reply_rx.await {
-                Ok(v) => v,
-                Err(_) => serde_json::json!({ "error": "会议已终止" }),
+            tokio::select! {
+                _ = cancel.cancelled() => serde_json::json!({ "error": "工作组已被删除" }),
+                result = reply_rx => match result {
+                    Ok(v) => v,
+                    Err(_) => serde_json::json!({ "error": "会议已终止" }),
+                },
             }
         }
         _ => {
+            // 权限校验：只允许调用这个 Agent 的 mcp_server_ids 白名单里的服务器
+            // 暴露出来的工具。以前这里直接传 server_id=None，call_mcp_tool 会
+            // 在全部已启用服务器里搜同名工具再执行——只要提示注入诱导模型说出
+            // 一个未授权服务器的工具名就能绕过 Agent 的工具授权范围。
+            if agent.mcp_server_ids.is_empty() {
+                return serde_json::json!({ "error": format!("未知工具 {}，且该 Agent 未被授权使用任何 MCP 服务器", call.name) });
+            }
             let db_state = app_handle.state::<DbState>();
-            match call_mcp_tool(db_state, None, call.name.clone(), call.arguments.clone()).await {
+            let owning_server = match get_all_mcp_tools(db_state.clone()).await {
+                Ok(all_tools) => all_tools
+                    .into_iter()
+                    .find(|t| t.name == call.name && agent.mcp_server_ids.contains(&t.server_id))
+                    .map(|t| t.server_id),
+                Err(e) => {
+                    return serde_json::json!({ "error": format!("获取 MCP 工具列表失败: {}", e) });
+                }
+            };
+            let Some(server_id) = owning_server else {
+                return serde_json::json!({ "error": format!("工具 {} 不存在，或不在该 Agent 被授权使用的 MCP 服务器范围内", call.name) });
+            };
+            match call_mcp_tool(db_state, Some(server_id), call.name.clone(), call.arguments.clone()).await {
                 Ok(v) => v,
                 Err(e) => serde_json::json!({ "error": e.to_string() }),
             }
@@ -1319,14 +1549,18 @@ async fn dispatch_tool_call(
 
 /// Registers a pending proposal, notifies the frontend, and blocks (only
 /// this one tool call's processing -- not the rest of the app) until the
-/// user approves/rejects it via `workspace_resolve_proposal`, or 10 minutes
-/// pass with no response.
+/// user approves/rejects it via `workspace_resolve_proposal`, 10 minutes
+/// pass with no response, or the workspace/agent is deleted out from under
+/// it (`cancel`) -- without racing on `cancel` this wait would otherwise
+/// hold the task open for up to the full 10-minute timeout after deletion,
+/// still writing log entries into a workspace that no longer exists.
 async fn propose_agent_creation(
     app_handle: &AppHandle,
     pending: &PendingProposals,
     workspace_id: &str,
     proposing_agent: &WorkspaceAgent,
     draft: CreateAgentRequest,
+    cancel: &CancellationToken,
 ) -> serde_json::Value {
     let proposal_id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
@@ -1346,6 +1580,17 @@ async fn propose_agent_creation(
         }),
     );
 
+    record_pending_event(
+        app_handle,
+        workspace_id,
+        &proposing_agent.id,
+        &proposing_agent.name,
+        "proposal",
+        serde_json::json!({ "draft": draft, "proposalId": proposal_id }),
+        &proposal_id,
+    )
+    .await;
+
     insert_workspace_log(
         app_handle,
         workspace_id,
@@ -1358,30 +1603,50 @@ async fn propose_agent_creation(
     )
     .await;
 
-    match tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx).await {
-        Ok(Ok(ProposalDecision::Approved(final_request))) => {
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => {
+            pending.0.lock().unwrap().remove(&proposal_id);
+            None
+        }
+        result = tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx) => Some(result),
+    };
+
+    let response = match outcome {
+        None => {
+            mark_pending_event_resolved_via_handle(app_handle, &proposal_id).await;
+            return serde_json::json!({ "status": "cancelled", "message": "工作组已被删除" });
+        }
+        Some(Ok(Ok(ProposalDecision::Approved(final_request)))) => {
             let agent_handles = app_handle.state::<WorkspaceState>().0.clone();
             match spawn_agent_internal(app_handle, agent_handles, *final_request).await {
                 Ok(agent) => serde_json::json!({ "status": "approved", "agentId": agent.id, "name": agent.name }),
                 Err(e) => serde_json::json!({ "status": "error", "message": e.to_string() }),
             }
         }
-        Ok(Ok(ProposalDecision::Rejected)) => serde_json::json!({ "status": "rejected_by_user" }),
-        Ok(Err(_)) => serde_json::json!({ "status": "rejected_by_user" }),
-        Err(_) => {
+        Some(Ok(Ok(ProposalDecision::Rejected))) => serde_json::json!({ "status": "rejected_by_user" }),
+        Some(Ok(Err(_))) => serde_json::json!({ "status": "rejected_by_user" }),
+        Some(Err(_)) => {
             pending.0.lock().unwrap().remove(&proposal_id);
             serde_json::json!({ "status": "timed_out", "message": "用户在 10 分钟内没有响应，提议已取消" })
         }
-    }
+    };
+    mark_pending_event_resolved_via_handle(app_handle, &proposal_id).await;
+    response
 }
 
 /// Registers a pending sleep request, tells the main agent about it (which
 /// also wakes it), and blocks until either the main agent calls
-/// `workspace_approve_sleep`/`workspace_reject_sleep` or the user overrides
-/// via `workspace_resolve_sleep_request`. Defaults to *not* approved if 10
-/// minutes pass with no response -- staying awake is the safer default than
-/// silently letting an agent go quiet.
-async fn request_sleep_approval(app_handle: &AppHandle, workspace_id: &str, agent: &WorkspaceAgent, reason: &str) -> bool {
+/// `workspace_approve_sleep`/`workspace_reject_sleep`, the user overrides
+/// via `workspace_resolve_sleep_request`, 10 minutes pass with no response
+/// (staying awake is the safer default than silently letting an agent go
+/// quiet), or `cancel` fires because the workspace/agent was deleted.
+async fn request_sleep_approval(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent: &WorkspaceAgent,
+    reason: &str,
+    cancel: &CancellationToken,
+) -> bool {
     let request_id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     {
@@ -1396,6 +1661,17 @@ async fn request_sleep_approval(app_handle: &AppHandle, workspace_id: &str, agen
             "agentId": agent.id, "agentName": agent.name, "reason": reason,
         }),
     );
+
+    record_pending_event(
+        app_handle,
+        workspace_id,
+        &agent.id,
+        &agent.name,
+        "sleep",
+        serde_json::json!({ "reason": reason, "requestId": request_id }),
+        &request_id,
+    )
+    .await;
 
     if let Some(main_id) = find_main_agent_id(app_handle, workspace_id).await {
         send_workspace_message(
@@ -1414,20 +1690,41 @@ async fn request_sleep_approval(app_handle: &AppHandle, workspace_id: &str, agen
     insert_workspace_log(app_handle, workspace_id, Some(agent.id.clone()), "sleep_request", format!("{} 申请休眠：{}", agent.name, reason))
         .await;
 
-    match tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx).await {
-        Ok(Ok(approved)) => approved,
-        Ok(Err(_)) => false,
-        Err(_) => {
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => {
+            app_handle.state::<PendingSleepRequests>().0.lock().unwrap().remove(&request_id);
+            None
+        }
+        result = tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx) => Some(result),
+    };
+
+    let approved = match outcome {
+        None => {
+            mark_pending_event_resolved_via_handle(app_handle, &request_id).await;
+            return false;
+        }
+        Some(Ok(Ok(approved))) => approved,
+        Some(Ok(Err(_))) => false,
+        Some(Err(_)) => {
             app_handle.state::<PendingSleepRequests>().0.lock().unwrap().remove(&request_id);
             false
         }
-    }
+    };
+    mark_pending_event_resolved_via_handle(app_handle, &request_id).await;
+    approved
 }
 
 /// Registers a pending question, notifies the frontend to pop up an answer
-/// card, and blocks until the user answers via `workspace_resolve_question`
-/// or 10 minutes pass with no response.
-async fn request_user_answer(app_handle: &AppHandle, workspace_id: &str, agent: &WorkspaceAgent, question: &str) -> String {
+/// card, and blocks until the user answers via `workspace_resolve_question`,
+/// 10 minutes pass with no response, or `cancel` fires because the
+/// workspace/agent was deleted.
+async fn request_user_answer(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent: &WorkspaceAgent,
+    question: &str,
+    cancel: &CancellationToken,
+) -> String {
     let question_id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     {
@@ -1442,14 +1739,38 @@ async fn request_user_answer(app_handle: &AppHandle, workspace_id: &str, agent: 
             "agentId": agent.id, "agentName": agent.name, "question": question,
         }),
     );
+    record_pending_event(
+        app_handle,
+        workspace_id,
+        &agent.id,
+        &agent.name,
+        "question",
+        serde_json::json!({ "question": question, "questionId": question_id }),
+        &question_id,
+    )
+    .await;
     insert_workspace_log(app_handle, workspace_id, Some(agent.id.clone()), "question", format!("{} 提问：{}", agent.name, question)).await;
 
-    match tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(_)) => "（用户没有回答）".to_string(),
-        Err(_) => {
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => {
+            app_handle.state::<PendingQuestions>().0.lock().unwrap().remove(&question_id);
+            None
+        }
+        result = tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx) => Some(result),
+    };
+
+    let answer = match outcome {
+        None => {
+            mark_pending_event_resolved_via_handle(app_handle, &question_id).await;
+            return "（工作组已被删除）".to_string();
+        }
+        Some(Ok(Ok(answer))) => answer,
+        Some(Ok(Err(_))) => "（用户没有回答）".to_string(),
+        Some(Err(_)) => {
             app_handle.state::<PendingQuestions>().0.lock().unwrap().remove(&question_id);
             "（用户在限定时间内没有回答）".to_string()
         }
-    }
+    };
+    mark_pending_event_resolved_via_handle(app_handle, &question_id).await;
+    answer
 }

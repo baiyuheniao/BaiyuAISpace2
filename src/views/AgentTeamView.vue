@@ -21,12 +21,13 @@ import {
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
   NTag, NTimeline, NTimelineItem, NPopconfirm, useMessage,
 } from "naive-ui";
-import { Add, TrashOutline, EnterOutline, AlarmOutline } from "@vicons/ionicons5";
+import { Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
 import {
   useWorkspaceStore, AGENT_GUIDELINES_BASE, AGENT_GUIDELINES_SUB,
-  type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest, type WorkspaceLogEntry,
+  type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest,
+  type UpdateAgentRequest, type WorkspaceAgent, type WorkspaceLogEntry,
 } from "@/stores/workspace";
 import { useSettingsStore } from "@/stores/settings";
 import { useMCPStore } from "@/stores/mcp";
@@ -108,8 +109,16 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   mcpServerIds: [],
   knowledgeBaseIds: [],
   activeSkillIds: [],
+  ragTopK: 5,
+  ragRetrievalMode: "hybrid",
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
+
+const retrievalModeOptions = [
+  { label: "混合检索（推荐）", value: "hybrid" },
+  { label: "纯向量检索", value: "vector" },
+  { label: "纯关键词检索", value: "keyword" },
+];
 
 // 切换角色时，如果提示词还是另一个角色的默认准则（用户没改过），跟着换成
 // 当前角色的版本；用户已经自己写过内容就不动。
@@ -153,6 +162,72 @@ const handleCreateAgent = async () => {
     message.success("Agent 已创建");
   } catch (e) {
     message.error(`创建失败: ${e}`);
+  }
+};
+
+// ============ 编辑 Agent ============
+
+const showEditAgentModal = ref(false);
+const editAgentForm = ref<UpdateAgentRequest | null>(null);
+
+const openEditAgentModal = (agent: WorkspaceAgent) => {
+  editAgentForm.value = {
+    id: agent.id,
+    name: agent.name,
+    provider: agent.provider,
+    model: agent.model,
+    baseUrl: agent.baseUrl,
+    apiConfigId: agent.apiConfigId,
+    systemPrompt: agent.systemPrompt,
+    mcpServerIds: [...agent.mcpServerIds],
+    knowledgeBaseIds: [...agent.knowledgeBaseIds],
+    activeSkillIds: [...agent.activeSkillIds],
+    ragTopK: agent.ragTopK,
+    ragRetrievalMode: agent.ragRetrievalMode,
+  };
+  showEditAgentModal.value = true;
+};
+
+const handleUpdateAgent = async () => {
+  const form = editAgentForm.value;
+  if (!form) return;
+  if (!form.name.trim()) {
+    message.error("请填写 Agent 名称");
+    return;
+  }
+  if (!form.apiConfigId) {
+    message.error("请选择 API 配置");
+    return;
+  }
+  const config = settings.apiConfigs.find((c) => c.id === form.apiConfigId);
+  if (!config) {
+    message.error("找不到所选的 API 配置");
+    return;
+  }
+  try {
+    await workspace.updateAgent({ ...form, provider: config.provider, model: config.model, baseUrl: config.baseUrl });
+    showEditAgentModal.value = false;
+    message.success("Agent 已更新");
+  } catch (e) {
+    message.error(`更新失败: ${e}`);
+  }
+};
+
+// ============ 广播消息 ============
+
+const showBroadcastModal = ref(false);
+const broadcastContent = ref("");
+
+const handleBroadcastSend = async () => {
+  const content = broadcastContent.value.trim();
+  if (!content) return;
+  try {
+    await workspace.sendUserMessage("all", content);
+    broadcastContent.value = "";
+    showBroadcastModal.value = false;
+    message.success("已广播给所有 Agent");
+  } catch (e) {
+    message.error(`发送失败: ${e}`);
   }
 };
 
@@ -260,8 +335,9 @@ const openSchedulerPage = () => {
 
 // ============ 提醒：目标 Agent 没有存活的后台任务 ============
 
-// Agent 的后台循环只存在于内存里，应用重启后不会自动恢复；发消息给这样的
-// Agent 不会报错，只是永远没有回复。收到提醒就弹一条警告，然后清空队列。
+// Agent 的后台循环只存在于内存里；应用启动时会自动把每个工作组里的 Agent
+// 重新挂回循环，正常情况下不该再看到这个提醒。真出现了多半是极端时序问题
+// （比如启动过程中就有消息打进来），收到就弹一条警告，然后清空队列。
 watch(
   () => workspace.inactiveAgentNotices.length,
   () => {
@@ -269,7 +345,7 @@ watch(
       const notice = workspace.inactiveAgentNotices.shift();
       if (notice) {
         message.warning(
-          `「${notice.agentName}」当前不在运行状态，消息已发送但暂时不会有回复。请重新添加该 Agent 以恢复其工作能力。`,
+          `「${notice.agentName}」当前没有存活的后台任务，消息已发送但暂时不会有回复。通常重启一下应用就能自动恢复；如果重启后仍然这样，再考虑删除重建。`,
           { duration: 8000 }
         );
       }
@@ -424,6 +500,27 @@ onMounted(async () => {
             <n-form-item label="API 配置" required>
               <n-select v-model:value="proposalEdits[p.proposalId].apiConfigId" :options="settings.apiConfigOptions" placeholder="选择要使用的 API 配置" />
             </n-form-item>
+            <n-form-item label="MCP 工具" v-if="mcp.servers.length > 0">
+              <n-checkbox-group v-model:value="proposalEdits[p.proposalId].mcpServerIds">
+                <n-space vertical size="small">
+                  <n-checkbox v-for="s in mcp.servers" :key="s.id" :value="s.id" :label="s.name" />
+                </n-space>
+              </n-checkbox-group>
+            </n-form-item>
+            <n-form-item label="知识库" v-if="kb.knowledgeBases.length > 0">
+              <n-checkbox-group v-model:value="proposalEdits[p.proposalId].knowledgeBaseIds">
+                <n-space vertical size="small">
+                  <n-checkbox v-for="item in kb.knowledgeBases" :key="item.id" :value="item.id" :label="item.name" />
+                </n-space>
+              </n-checkbox-group>
+            </n-form-item>
+            <n-form-item label="Skill" v-if="skills.skills.length > 0">
+              <n-checkbox-group v-model:value="proposalEdits[p.proposalId].activeSkillIds">
+                <n-space vertical size="small">
+                  <n-checkbox v-for="sk in skills.skills" :key="sk.id" :value="sk.id" :label="sk.name" />
+                </n-space>
+              </n-checkbox-group>
+            </n-form-item>
           </n-form>
           <n-space justify="end">
             <n-button @click="handleRejectProposal(p)">拒绝</n-button>
@@ -456,6 +553,9 @@ onMounted(async () => {
                 <n-button size="small" quaternary @click="openSchedulerPage" :disabled="!workspace.currentWorkspace" title="管理定时任务">
                   <template #icon><n-icon><AlarmOutline /></n-icon></template>
                 </n-button>
+                <n-button size="small" quaternary @click="showBroadcastModal = true" :disabled="workspace.activeAgents.length === 0" title="广播给所有 Agent">
+                  <template #icon><n-icon><MegaphoneOutline /></n-icon></template>
+                </n-button>
                 <n-button size="small" type="primary" @click="openCreateAgentModal">
                   <template #icon><n-icon><Add /></n-icon></template>
                   添加 Agent
@@ -464,7 +564,7 @@ onMounted(async () => {
             </template>
             <n-list hoverable clickable class="agent-list">
               <n-list-item
-                v-for="agent in workspace.agents"
+                v-for="agent in workspace.activeAgents"
                 :key="agent.id"
                 :class="{ selected: agent.id === selectedAgentId }"
                 @click="selectedAgentId = agent.id"
@@ -479,19 +579,24 @@ onMounted(async () => {
                 <template #suffix>
                   <n-space vertical align="end" size="small">
                     <n-tag size="small" :type="statusMeta[agent.status].type">{{ statusMeta[agent.status].label }}</n-tag>
-                    <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDeleteAgent(agent.id)">
-                      <template #trigger>
-                        <n-button quaternary circle size="tiny" type="error" @click.stop>
-                          <template #icon><n-icon><TrashOutline /></n-icon></template>
-                        </n-button>
-                      </template>
-                      确定删除 Agent「{{ agent.name }}」？
-                    </n-popconfirm>
+                    <n-space size="small">
+                      <n-button quaternary circle size="tiny" @click.stop="openEditAgentModal(agent)" title="编辑">
+                        <template #icon><n-icon><PencilOutline /></n-icon></template>
+                      </n-button>
+                      <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDeleteAgent(agent.id)">
+                        <template #trigger>
+                          <n-button quaternary circle size="tiny" type="error" @click.stop>
+                            <template #icon><n-icon><TrashOutline /></n-icon></template>
+                          </n-button>
+                        </template>
+                        确定删除 Agent「{{ agent.name }}」？
+                      </n-popconfirm>
+                    </n-space>
                   </n-space>
                 </template>
               </n-list-item>
             </n-list>
-            <n-empty v-if="workspace.agents.length === 0" description="还没有 Agent" size="small" />
+            <n-empty v-if="workspace.activeAgents.length === 0" description="还没有 Agent" size="small" />
           </n-card>
         </n-gi>
 
@@ -500,8 +605,12 @@ onMounted(async () => {
             <n-empty v-if="!selectedAgent" description="选择一个 Agent 查看/发起对话" />
             <template v-else>
               <div class="message-scroll">
+                <n-button v-if="workspace.hasMoreMessages" size="tiny" quaternary block @click="workspace.loadMoreMessages" class="load-more-btn">
+                  加载更早的消息
+                </n-button>
                 <ChatMessage v-for="m in agentMessages" :key="m.id" :message="m" />
                 <n-empty v-if="agentMessages.length === 0" description="还没有消息" size="small" />
+                <p v-if="selectedAgent.status === 'running'" class="running-indicator">「{{ selectedAgent.name }}」正在处理…</p>
               </div>
               <div class="message-input-row">
                 <n-input v-model:value="newMessageContent" placeholder="给这个 Agent 发消息..." @keyup.enter="handleSendMessage" />
@@ -516,6 +625,9 @@ onMounted(async () => {
         <n-gi>
           <n-card title="活动时间线" class="panel-card" :bordered="false">
             <div class="timeline-scroll">
+              <n-button v-if="workspace.hasMoreLogs" size="tiny" quaternary block @click="workspace.loadMoreLogs" class="load-more-btn">
+                加载更早的记录
+              </n-button>
               <n-timeline>
                 <n-timeline-item
                   v-for="entry in timeline"
@@ -586,6 +698,14 @@ onMounted(async () => {
             </n-space>
           </n-checkbox-group>
         </n-form-item>
+        <template v-if="agentForm.knowledgeBaseIds.length > 0">
+          <n-form-item label="检索 top_k">
+            <n-input-number v-model:value="agentForm.ragTopK" :min="1" :max="20" />
+          </n-form-item>
+          <n-form-item label="检索模式">
+            <n-select v-model:value="agentForm.ragRetrievalMode" :options="retrievalModeOptions" />
+          </n-form-item>
+        </template>
         <n-form-item label="Skill" v-if="skills.skills.length > 0">
           <n-checkbox-group v-model:value="agentForm.activeSkillIds">
             <n-space vertical size="small">
@@ -598,6 +718,67 @@ onMounted(async () => {
         <n-space justify="end">
           <n-button @click="showCreateAgentModal = false">取消</n-button>
           <n-button type="primary" @click="handleCreateAgent">添加</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 编辑 Agent -->
+    <n-modal v-model:show="showEditAgentModal" preset="card" title="编辑 Agent" style="width: 600px; max-height: 85vh" :content-style="{ overflowY: 'auto' }">
+      <n-form v-if="editAgentForm" label-placement="left" label-width="100px">
+        <n-form-item label="名称" required>
+          <n-input v-model:value="editAgentForm.name" placeholder="给这个 Agent 起个名字" />
+        </n-form-item>
+        <n-form-item label="API 配置" required>
+          <n-select v-model:value="editAgentForm.apiConfigId" :options="settings.apiConfigOptions" placeholder="选择已保存的 API 配置" />
+        </n-form-item>
+        <n-form-item label="系统提示词">
+          <n-input v-model:value="editAgentForm.systemPrompt" type="textarea" :rows="4" placeholder="这个 Agent 的职责说明..." />
+        </n-form-item>
+        <n-form-item label="MCP 工具" v-if="mcp.servers.length > 0">
+          <n-checkbox-group v-model:value="editAgentForm.mcpServerIds">
+            <n-space vertical size="small">
+              <n-checkbox v-for="s in mcp.servers" :key="s.id" :value="s.id" :label="s.name" />
+            </n-space>
+          </n-checkbox-group>
+        </n-form-item>
+        <n-form-item label="知识库" v-if="kb.knowledgeBases.length > 0">
+          <n-checkbox-group v-model:value="editAgentForm.knowledgeBaseIds">
+            <n-space vertical size="small">
+              <n-checkbox v-for="item in kb.knowledgeBases" :key="item.id" :value="item.id" :label="item.name" />
+            </n-space>
+          </n-checkbox-group>
+        </n-form-item>
+        <template v-if="editAgentForm.knowledgeBaseIds.length > 0">
+          <n-form-item label="检索 top_k">
+            <n-input-number v-model:value="editAgentForm.ragTopK" :min="1" :max="20" />
+          </n-form-item>
+          <n-form-item label="检索模式">
+            <n-select v-model:value="editAgentForm.ragRetrievalMode" :options="retrievalModeOptions" />
+          </n-form-item>
+        </template>
+        <n-form-item label="Skill" v-if="skills.skills.length > 0">
+          <n-checkbox-group v-model:value="editAgentForm.activeSkillIds">
+            <n-space vertical size="small">
+              <n-checkbox v-for="sk in skills.skills" :key="sk.id" :value="sk.id" :label="sk.name" />
+            </n-space>
+          </n-checkbox-group>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showEditAgentModal = false">取消</n-button>
+          <n-button type="primary" @click="handleUpdateAgent">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 广播消息 -->
+    <n-modal v-model:show="showBroadcastModal" preset="card" title="广播给所有 Agent" style="width: 480px">
+      <n-input v-model:value="broadcastContent" type="textarea" :rows="3" placeholder="这条消息会发给工作组里的每一个 Agent..." />
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showBroadcastModal = false">取消</n-button>
+          <n-button type="primary" @click="handleBroadcastSend">发送</n-button>
         </n-space>
       </template>
     </n-modal>
@@ -653,7 +834,8 @@ onMounted(async () => {
 }
 
 .panel-card {
-  height: 640px;
+  height: calc(100vh - 22rem);
+  min-height: 26rem;
   display: flex;
   flex-direction: column;
 
@@ -663,6 +845,28 @@ onMounted(async () => {
     flex-direction: column;
     overflow: hidden;
   }
+
+  // 卡片标题不能换行——header-extra 里放的图标/按钮一多，flex 布局会把标题
+  // 挤到极窄，逐字换行成竖排。标题优先保留完整宽度，header-extra 自己收窄。
+  :deep(.n-card-header__main) {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  :deep(.n-card-header__extra) {
+    min-width: 0;
+  }
+}
+
+.load-more-btn {
+  margin-bottom: 8px;
+  color: $ink-faint;
+}
+
+.running-indicator {
+  padding: 4px 0;
+  font-size: $label-size;
+  color: $ink-faint;
+  transition: opacity $duration $ease;
 }
 
 .agent-list {
