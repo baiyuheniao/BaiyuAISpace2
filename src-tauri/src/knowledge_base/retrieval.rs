@@ -17,8 +17,8 @@ impl Retriever {
         Self { vector_store, db_path }
     }
 
-    /// Retrieve relevant chunks, then optionally expand each result with
-    /// sentence-window context (adjacent chunks from the same document).
+    /// 检索出相关 chunk，然后可选地为每条结果扩展句子窗口上下文
+    /// （来自同一文档的相邻 chunk）。
     pub async fn retrieve(
         &self,
         request: RetrievalRequest,
@@ -48,10 +48,9 @@ impl Retriever {
         Ok(result)
     }
 
-    /// Expand each retrieved chunk with up to `window` adjacent chunks on each
-    /// side (same document, ordered by chunk_index). The matched chunk's content
-    /// is replaced with the concatenated window so the LLM receives richer
-    /// context without changing any scores or ranking.
+    /// 为每个检索到的 chunk 扩展最多 `window` 个相邻 chunk（左右各取，同一文档内，
+    /// 按 chunk_index 排序）。命中 chunk 的内容会被替换为拼接后的窗口内容，
+    /// 让 LLM 获得更丰富的上下文，同时不影响任何分数或排名。
     async fn expand_windows(
         &self,
         chunks: Vec<RetrievedChunk>,
@@ -59,7 +58,7 @@ impl Retriever {
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
         let db_path = self.db_path.clone();
 
-        // Collect identifiers before moving `chunks`
+        // 在移动 `chunks` 之前先收集好各项标识
         let targets: Vec<(String, String, i32)> = chunks
             .iter()
             .map(|c| (c.chunk.id.clone(), c.chunk.document_id.clone(), c.chunk.chunk_index))
@@ -111,7 +110,7 @@ impl Retriever {
         Ok(result)
     }
 
-    /// Pure vector similarity search
+    /// 纯向量相似度检索
     async fn vector_search(
         &self,
         request: &RetrievalRequest,
@@ -120,7 +119,7 @@ impl Retriever {
         embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
-        // Generate query embedding using provided embedding config
+        // 使用传入的 embedding 配置生成查询向量
         let query_vector = generate_single_embedding(
             &request.query,
             embedding_provider,
@@ -128,16 +127,16 @@ impl Retriever {
             embedding_model,
             embedding_base_url,
         ).await?;
-        
-        // Search vector store
+
+        // 在向量存储中检索
         let results = self.vector_store
             .search(&request.kb_id, query_vector, request.top_k)
             .await?;
-        
-        // Convert to RetrievedChunk with full metadata
+
+        // 转换为带完整元数据的 RetrievedChunk
         let chunks = self.enrich_chunks(results, &request.kb_id).await?;
-        
-        // Filter by similarity threshold
+
+        // 按相似度阈值过滤
         let filtered_chunks: Vec<_> = chunks
             .into_iter()
             .filter(|c| c.score >= request.similarity_threshold)
@@ -150,7 +149,7 @@ impl Retriever {
         })
     }
 
-    /// Pure keyword search using SQLite FTS or LIKE
+    /// 纯关键词检索，使用 SQLite FTS 或 LIKE
     async fn keyword_search(
         &self,
         request: &RetrievalRequest,
@@ -160,12 +159,12 @@ impl Retriever {
         let query = request.query.clone();
         let top_k = request.top_k;
         
-        // Run SQLite operations in blocking task
+        // 在阻塞任务中执行 SQLite 操作
         let chunks = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(&db_path)
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-            
-            // Try FTS5 first, fallback to LIKE query
+
+            // 优先尝试 FTS5，失败则回退到 LIKE 查询
             Self::search_with_fts_blocking(&conn, &kb_id, &query, top_k)
                 .or_else(|_| Self::search_with_like_blocking(&conn, &kb_id, &query, top_k))
         }).await.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))??;
@@ -177,7 +176,7 @@ impl Retriever {
         })
     }
 
-    /// Hybrid search: combine vector and keyword
+    /// 混合检索：结合向量与关键词
     async fn hybrid_search(
         &self,
         request: &RetrievalRequest,
@@ -186,12 +185,12 @@ impl Retriever {
         embedding_base_url: &str,
         api_key: &str,
     ) -> Result<RetrievalResult, KnowledgeBaseError> {
-        // Get results from both methods with larger top_k for better fusion.
-        // Zero out similarity_threshold so vector_search doesn't pre-filter candidates
-        // before they get a chance to be rescued by keyword ranking in RRF — a chunk
-        // with low vector similarity but exact keyword match should survive the merge.
-        // RRF scores (≈0.001–0.033) are not comparable to cosine similarity (0–1),
-        // so we also skip threshold filtering on the merged output.
+        // 两种方式都用更大的 top_k 取结果，便于后续融合。
+        // 把 similarity_threshold 清零，这样 vector_search 就不会在候选项还没机会被
+        // RRF 中的关键词排名"捞回来"之前就被预先过滤掉 —— 向量相似度低但关键词精确
+        // 命中的 chunk 应该能在合并阶段存活下来。
+        // RRF 分数（约 0.001–0.033）和余弦相似度（0–1）不是同一量纲，无法直接比较，
+        // 所以我们在合并后的输出上也跳过阈值过滤。
         let mut vector_request = request.clone();
         vector_request.top_k = request.top_k * 2;
         vector_request.similarity_threshold = 0.0;
@@ -202,17 +201,17 @@ impl Retriever {
         let vector_result = self.vector_search(&vector_request, embedding_provider, embedding_model, embedding_base_url, api_key).await?;
         let keyword_result = self.keyword_search(&keyword_request).await?;
 
-        // Merge and rerank using RRF
+        // 使用 RRF 合并并重新排序
         let merged = self.merge_results(
             vector_result.chunks,
             keyword_result.chunks,
             request.top_k,
         );
 
-        // Apply threshold to the original cosine score (vector_score), not the RRF
-        // score — RRF values (≈0.001–0.033) are incomparable to similarity_threshold
-        // (0–1). A chunk passes if its vector similarity is above threshold OR it
-        // matched a keyword (keyword match is itself a relevance signal).
+        // 阈值要作用在原始的余弦分数（vector_score）上，而不是 RRF 分数 —— RRF
+        // 的值（约 0.001–0.033）和 similarity_threshold（0–1）不可比较。一个 chunk
+        // 只要满足以下任一条件即算通过：向量相似度高于阈值，或者它命中了关键词
+        // （关键词命中本身就是一种相关性信号）。
         let filtered: Vec<_> = merged
             .into_iter()
             .filter(|c| {
@@ -228,7 +227,7 @@ impl Retriever {
         })
     }
 
-    /// Get knowledge base configuration from database
+    /// 从数据库获取知识库配置
     #[allow(dead_code)]
     async fn get_knowledge_base(&self, kb_id: &str) -> Result<KnowledgeBase, KnowledgeBaseError> {
         let db_path = self.db_path.clone();
@@ -264,8 +263,8 @@ impl Retriever {
         }).await.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
     }
 
-    /// Enrich chunk results with metadata from SQLite
-    /// Fix for #38: Use JOIN instead of N+1 queries
+    /// 用 SQLite 中的元数据丰富 chunk 结果
+    /// 对应 #38 的修复：改用 JOIN 而不是 N+1 次查询
     async fn enrich_chunks(
         &self,
         results: Vec<(String, String, String, f32)>, // (chunk_id, doc_id, content, score)
@@ -282,7 +281,7 @@ impl Retriever {
                 return Ok(Vec::new());
             }
 
-            // Build a single query with JOIN to get all metadata at once
+            // 构建一条带 JOIN 的查询，一次性拿到所有元数据
             let placeholders: String = results.iter()
                 .map(|_| "?")
                 .collect::<Vec<_>>()
@@ -347,15 +346,15 @@ impl Retriever {
         }).await.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
     }
 
-    /// Search using FTS5 (Full-Text Search) - blocking version
-    /// Fix for #37: Escape FTS5 special characters in user query
+    /// 使用 FTS5（全文检索）进行搜索 —— 阻塞版本
+    /// 对应 #37 的修复：对用户查询中的 FTS5 特殊字符做转义
     fn search_with_fts_blocking(
         conn: &rusqlite::Connection,
         kb_id: &str,
         query: &str,
         top_k: i32,
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
-        // Check if FTS table exists
+        // 检查 FTS 表是否存在
         let fts_exists: bool = conn.query_row(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
             [],
@@ -366,12 +365,12 @@ impl Retriever {
             return Err(KnowledgeBaseError::RetrievalError("FTS5 not available".to_string()));
         }
 
-        // Build FTS query: escape special characters and wrap each term in double quotes
-        // FTS5 special chars: " * ( ) : ^ [ ] { } + - AND OR NOT NEAR
+        // 构建 FTS 查询：转义特殊字符，并把每个词用双引号包起来
+        // FTS5 的特殊字符包括：" * ( ) : ^ [ ] { } + - AND OR NOT NEAR
         let fts_query: String = query
             .split_whitespace()
             .map(|term| {
-                // Escape double quotes within the term
+                // 转义词内部的双引号
                 let escaped = term.replace('"', "\"\"");
                 format!("\"{}\"", escaped)
             })
@@ -403,7 +402,7 @@ impl Retriever {
                         chunk_index: row.get(3)?,
                         token_count: row.get(4)?,
                     },
-                    score: 1.0, // FTS doesn't give 0-1 scores directly
+                    score: 1.0, // FTS 不会直接给出 0-1 范围的分数
                     vector_score: None,
                     keyword_score: Some(1.0),
                     document_filename: row.get(5)?,
@@ -419,19 +418,19 @@ impl Retriever {
         Ok(chunks)
     }
 
-    /// Search using LIKE query (fallback for when FTS is not available) - blocking version
-    /// Fix for #37: Escape LIKE wildcards in user query
+    /// 使用 LIKE 查询进行搜索（FTS 不可用时的回退方案）—— 阻塞版本
+    /// 对应 #37 的修复：对用户查询中的 LIKE 通配符做转义
     fn search_with_like_blocking(
         conn: &rusqlite::Connection,
         kb_id: &str,
         query: &str,
         top_k: i32,
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
-        // Build LIKE pattern with wildcards, escaping special LIKE characters
+        // 构建带通配符的 LIKE 模式，同时转义 LIKE 的特殊字符
         let escaped_terms: Vec<String> = query
             .split_whitespace()
             .map(|term| {
-                // Escape % and _ characters
+                // 转义 % 和 _ 字符
                 let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
                 escaped
             })
@@ -461,7 +460,7 @@ impl Retriever {
                         chunk_index: row.get(3)?,
                         token_count: row.get(4)?,
                     },
-                    score: 0.5, // LIKE doesn't give proper scores
+                    score: 0.5, // LIKE 查询无法给出有意义的分数
                     vector_score: None,
                     keyword_score: Some(0.5),
                     document_filename: row.get(5)?,
@@ -477,17 +476,17 @@ impl Retriever {
         Ok(chunks)
     }
 
-    /// Merge vector and keyword results using RRF (Reciprocal Rank Fusion)
+    /// 使用 RRF（Reciprocal Rank Fusion，倒数排名融合）合并向量与关键词检索结果
     fn merge_results(
         &self,
         vector_chunks: Vec<RetrievedChunk>,
         keyword_chunks: Vec<RetrievedChunk>,
         top_k: i32,
     ) -> Vec<RetrievedChunk> {
-        let k = 60.0; // RRF constant
+        let k = 60.0; // RRF 常数
         let mut scores: std::collections::HashMap<String, (RetrievedChunk, f32)> = std::collections::HashMap::new();
         
-        // Add vector scores
+        // 加入向量分数
         for (rank, chunk) in vector_chunks.iter().enumerate() {
             let rrf_score = 1.0 / (k + rank as f32);
             scores.entry(chunk.chunk.id.clone())
@@ -499,7 +498,7 @@ impl Retriever {
                 });
         }
         
-        // Add keyword scores
+        // 加入关键词分数
         for (rank, chunk) in keyword_chunks.iter().enumerate() {
             let rrf_score = 1.0 / (k + rank as f32);
             scores.entry(chunk.chunk.id.clone())
@@ -514,7 +513,7 @@ impl Retriever {
                 });
         }
         
-        // Sort by RRF score and take top_k
+        // 按 RRF 分数排序并取前 top_k 个
         let mut results: Vec<_> = scores.into_iter()
             .map(|(_, (mut chunk, score))| {
                 chunk.score = score;
@@ -529,7 +528,7 @@ impl Retriever {
     }
 }
 
-/// Build context for LLM from retrieved chunks
+/// 用检索到的 chunk 为 LLM 构建上下文
 #[allow(dead_code)]
 pub fn build_context(chunks: &[RetrievedChunk], query: &str) -> String {
     if chunks.is_empty() {

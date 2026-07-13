@@ -32,16 +32,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// `stream_message` calls `get_all_mcp_tools` on every single chat turn
-/// (needed even when MCP is off, since a manually-activated Skill can still
-/// bind a server) -- without a cache that means re-running `tools/list`
-/// against every enabled server before the LLM request can even be sent.
-/// For stdio servers that's a fresh child process (e.g. `npx ...`) spawned
-/// and torn down per message, which can cost anywhere from hundreds of ms to
-/// the full `MCP_STDIO_TIMEOUT`/`MCP_HTTP_TIMEOUT` ceiling if the server is
-/// slow to start or briefly unreachable -- directly inflating TTFT. Cache
-/// successful lookups for a short TTL; failures are never cached so a
-/// misbehaving server keeps surfacing instead of silently vanishing.
+/// `stream_message` 在每一次聊天轮次都会调用 `get_all_mcp_tools`（即使 MCP 总开关
+/// 关闭也要调，因为手动激活的 Skill 仍然可以绑定某个服务器）——没有缓存的话，
+/// 意味着每次发送 LLM 请求前都要对全部已启用服务器重新跑一遍 `tools/list`。
+/// 对 stdio 类型服务器来说，这是每条消息都要新起一个子进程（比如 `npx ...`）再
+/// 销毁，如果服务器启动慢或者短暂不可达，耗时可以从几百毫秒一路涨到
+/// `MCP_STDIO_TIMEOUT`/`MCP_HTTP_TIMEOUT` 设的上限——直接拖慢 TTFT（首字节时间）。
+/// 因此对成功的查询结果做短 TTL 缓存；失败的结果绝不缓存，这样出问题的服务器
+/// 会持续暴露出来，而不是被悄悄掩盖掉。
 static MCP_TOOLS_CACHE: Lazy<Mutex<HashMap<String, (Vec<MCPTool>, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 const MCP_TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -148,7 +146,7 @@ pub struct MCPToolCall {
     pub input: serde_json::Value,
 }
 
-/// MCP Tool Call Result
+/// MCP 工具调用结果
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPToolResult {
@@ -157,7 +155,7 @@ pub struct MCPToolResult {
     pub error: Option<String>,
 }
 
-/// JSON-RPC 2.0 Request for MCP tools/call
+/// MCP tools/call 方法对应的 JSON-RPC 2.0 请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ToolCallRequest {
@@ -167,14 +165,14 @@ struct ToolCallRequest {
     id: String,
 }
 
-/// Parameters for tools/call method
+/// tools/call 方法的参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCallParams {
     name: String,
     arguments: serde_json::Value,
 }
 
-/// JSON-RPC 2.0 Response
+/// JSON-RPC 2.0 响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonRpcResponse {
     jsonrpc: Option<String>,
@@ -183,7 +181,7 @@ struct JsonRpcResponse {
     id: Option<String>,
 }
 
-/// JSON-RPC 2.0 Error structure
+/// JSON-RPC 2.0 错误结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonRpcErrorData {
     code: i32,
@@ -192,15 +190,15 @@ struct JsonRpcErrorData {
     data: Option<serde_json::Value>,
 }
 
-// Tauri Commands
+// Tauri 命令
 
-/// Create or update MCP server configuration
+/// 创建或更新 MCP 服务器配置
 #[tauri::command]
 pub async fn create_mcp_server(
     state: tauri::State<'_, DbState>,
     server: MCPServer,
 ) -> Result<MCPServer, MCPError> {
-    // Validate configuration
+    // 校验配置
     match server.server_type {
         MCPServerType::Stdio => {
             if server.command.is_empty() {
@@ -218,7 +216,7 @@ pub async fn create_mcp_server(
         }
     }
 
-    // Generate ID if not provided
+    // 未提供 ID 时自动生成
     let mut config = server;
     if config.id.is_empty() {
         config.id = Uuid::new_v4().to_string();
@@ -226,14 +224,14 @@ pub async fn create_mcp_server(
     config.created_at = chrono::Utc::now().timestamp_millis();
     config.updated_at = chrono::Utc::now().timestamp_millis();
 
-    // Save to database
+    // 保存到数据库
     let db = state.0.lock().await;
     db.save_mcp_server(&config)
         .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
     drop(db);
 
-    // The server's command/args/url may have just changed -- drop any cached
-    // tool list so the next lookup re-discovers instead of serving stale data.
+    // 服务器的 command/args/url 刚刚可能发生了变化 -- 清掉对应的工具列表缓存，
+    // 让下一次查询重新发现，而不是继续返回过期数据。
     MCP_TOOLS_CACHE.lock().await.remove(&config.id);
 
     log::info!(
@@ -250,7 +248,7 @@ pub async fn create_mcp_server(
     Ok(config)
 }
 
-/// Get list of MCP servers
+/// 获取 MCP 服务器列表
 #[tauri::command]
 pub async fn list_mcp_servers(state: tauri::State<'_, DbState>) -> Result<Vec<MCPServer>, MCPError> {
     let db = state.0.lock().await;
@@ -261,7 +259,7 @@ pub async fn list_mcp_servers(state: tauri::State<'_, DbState>) -> Result<Vec<MC
     Ok(servers)
 }
 
-/// Delete MCP server configuration
+/// 删除 MCP 服务器配置
 #[tauri::command]
 pub async fn delete_mcp_server(
     state: tauri::State<'_, DbState>,
@@ -281,11 +279,10 @@ const ALLOWED_MCP_COMMANDS: &[&str] = &[
     "bun", "deno", "go", "cargo", "ruby", "perl", "php",
 ];
 
-/// Translate a bare-runtime "program not found" spawn failure into a message
-/// that actually tells the user what to install, instead of the raw OS
-/// `NotFound` text -- stdio MCP servers are just "run this runtime with these
-/// args", so a missing runtime is by far the most common launch failure and
-/// the least self-explanatory one to a non-developer.
+/// 把裸运行时（如 npx/python）"program not found" 这种启动失败，翻译成真正
+/// 能告诉用户该装什么的提示，而不是原始的操作系统 `NotFound` 文本 —— stdio 类型
+/// 的 MCP 服务器本质上就是"用这些参数运行这个运行时"，所以运行时缺失是迄今为止
+/// 最常见的启动失败原因，对非开发者用户来说也是最难自己看懂的一种。
 fn friendly_missing_runtime_message(command: &str) -> String {
     let cmd_name = Path::new(command)
         .file_name()
@@ -333,22 +330,20 @@ fn validate_mcp_command(command: &str, args: &[String]) -> Result<(), MCPError> 
     Ok(())
 }
 
-/// Resolve a bare command name (e.g. "npx") to a spawnable path on Windows.
+/// 在 Windows 上把裸命令名（比如 "npx"）解析成一个可直接 spawn 的路径。
 ///
-/// `std::process::Command::new` calls `CreateProcessW` directly and does
-/// *not* do the PATHEXT-based extension search a shell does -- so commands
-/// installed as `.cmd`/`.bat` shims (which is how npm installs `npx`/`npm`
-/// themselves on Windows, unlike single-file `.exe` tools such as `node` or
-/// `cargo`) fail to spawn with a plain "program not found" even though the
-/// shim is right there on PATH. Confirmed directly: `Command::new("npx")`
-/// errors with `NotFound` on Windows, while `Command::new("node")` works.
-/// Search PATH for the first matching extension and spawn that exact file
-/// instead. Only applied at the actual spawn call -- `validate_mcp_command`
-/// still checks the original bare name against the allowlist.
+/// `std::process::Command::new` 是直接调用 `CreateProcessW`，*不会*像 shell
+/// 那样做基于 PATHEXT 的扩展名搜索 —— 所以那些以 `.cmd`/`.bat` shim 形式安装的
+/// 命令（npm 在 Windows 上安装 `npx`/`npm` 本身就是这种方式，不同于 `node`、
+/// `cargo` 这类单文件 `.exe` 工具）即使明明在 PATH 里，也会因为 spawn 不到而
+/// 报"program not found"。已直接验证过：`Command::new("npx")` 在 Windows 上
+/// 会报 `NotFound`，而 `Command::new("node")` 则能正常工作。这里改为在 PATH 中
+/// 搜索第一个匹配扩展名的文件，直接 spawn 那个具体文件。这个解析只用在真正
+/// spawn 的那一刻 -- `validate_mcp_command` 仍然是拿原始的裸命令名去比对白名单。
 #[cfg(target_os = "windows")]
 fn resolve_windows_command(command: &str) -> String {
     let path = Path::new(command);
-    // Already has an extension or is a path with a separator: leave as-is.
+    // 已经带扩展名，或者本身就是带分隔符的路径：原样返回。
     if path.extension().is_some() || command.contains(['/', '\\']) {
         return command.to_string();
     }
@@ -434,7 +429,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         }
     })?;
 
-    // Read stderr in a background task to prevent pipe blocking
+    // 在后台任务里读 stderr，防止管道被写满而阻塞
     let stderr = child.stderr.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stderr".to_string()))?;
     tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stderr).lines();
@@ -462,7 +457,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
 
     let response: JsonRpcResponse = serde_json::from_str(&response_line).map_err(MCPError::JsonError)?;
 
-    // Ensure the child process is terminated
+    // 确保子进程被终止
     let _ = child.kill().await;
     let _ = child.wait().await;
 
@@ -528,7 +523,7 @@ async fn call_mcp_tools_http(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErro
     parse_mcp_tools_from_result(&result, server)
 }
 
-/// Get available tools from a MCP server (by making a tools/list call)
+/// 获取某个 MCP 服务器可用的工具（发起一次 tools/list 调用）
 #[tauri::command]
 pub async fn get_mcp_tools(
     state: tauri::State<'_, DbState>,
@@ -536,7 +531,7 @@ pub async fn get_mcp_tools(
 ) -> Result<Vec<MCPTool>, MCPError> {
     log::info!("Fetching tools from MCP server: {}", server_id);
 
-    // Load server config from database
+    // 从数据库加载服务器配置
     let db = state.0.lock().await;
     let servers = db
         .get_mcp_servers()
@@ -552,12 +547,12 @@ pub async fn get_mcp_tools(
     Ok(tools)
 }
 
-/// Get all available tools from all enabled MCP servers
+/// 获取所有已启用 MCP 服务器的全部可用工具
 #[tauri::command]
 pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<MCPTool>, MCPError> {
     log::info!("Fetching all available MCP tools");
 
-    // Scoped so the DB lock is released before the concurrent fetches below.
+    // 用作用域限定，确保下面并发拉取之前先释放数据库锁。
     let enabled_servers: Vec<_> = {
         let db = state.0.lock().await;
         let servers = db
@@ -566,9 +561,8 @@ pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<M
         servers.into_iter().filter(|s| s.enabled).collect()
     };
 
-    // Fetch every server concurrently instead of one-at-a-time -- a serial
-    // loop means N servers each pay their own worst-case latency back to
-    // back, which compounds fast once there's more than one.
+    // 并发拉取所有服务器，而不是一个个串行处理 -- 串行循环意味着 N 个服务器
+    // 各自的最坏延迟会依次叠加，服务器一多耗时就会迅速累积。
     let fetches = enabled_servers.into_iter().map(|server| async move {
         if let Some((tools, cached_at)) = MCP_TOOLS_CACHE.lock().await.get(&server.id) {
             if cached_at.elapsed() < MCP_TOOLS_CACHE_TTL {
@@ -599,16 +593,15 @@ pub async fn get_all_mcp_tools(state: tauri::State<'_, DbState>) -> Result<Vec<M
         }
     }
 
-    // Built-in tools (web search, page fetch) ship with the app itself --
-    // no external runtime/process required -- so they're always available
-    // regardless of what the user has configured or installed.
+    // 内置工具（网页搜索、抓取网页）是随应用本体一起打包的 -- 不需要任何外部
+    // 运行时/进程 -- 所以无论用户配置或安装了什么，这些工具永远可用。
     all_tools.extend(builtin_tool_defs());
 
     log::info!("Total MCP tools available: {}", all_tools.len());
     Ok(all_tools)
 }
 
-/// Call a MCP tool with full JSON-RPC 2.0 support
+/// 调用一个 MCP 工具，完整支持 JSON-RPC 2.0
 #[tauri::command]
 pub async fn call_mcp_tool(
     state: tauri::State<'_, DbState>,
@@ -618,19 +611,19 @@ pub async fn call_mcp_tool(
 ) -> Result<serde_json::Value, MCPError> {
     log::info!("MCP tool call requested: server_id={:?}, tool={} input={:?}", server_id, tool_name, input);
 
-    // Handle built-in test/demo tools first
+    // 优先处理内置的测试/演示工具
     if tool_name.starts_with("demo_") || tool_name.starts_with("test_") {
         let request_id = Uuid::new_v4().to_string();
         return handle_demo_tool_call(&tool_name, input, &request_id).await;
     }
 
-    // Built-in web search / page fetch have no corresponding DB server row --
-    // dispatch directly instead of trying (and failing) to look one up.
+    // 内置的网页搜索/抓取网页在数据库里没有对应的服务器行 --
+    // 直接分发处理，而不是尝试（并且失败）去查一个不存在的行。
     if tool_name.starts_with("builtin__") {
         return execute_builtin_tool(&tool_name, input).await;
     }
 
-    // Load server configurations from database
+    // 从数据库加载服务器配置
     let servers = {
         let db = state.0.lock().await;
         db.get_mcp_servers()
@@ -643,7 +636,7 @@ pub async fn call_mcp_tool(
             .find(|s| s.id == server_id)
             .ok_or_else(|| MCPError::ServerNotFound(server_id.clone()))?
     } else {
-        // 1st preference: find enabled server that exposes the requested tool
+        // 优先方案：找出提供了所请求工具的那个已启用服务器
         let mut found = None;
         for server in servers.into_iter().filter(|s| s.enabled) {
             match get_mcp_tools(state.clone(), server.id.clone()).await {
@@ -672,7 +665,7 @@ pub async fn call_mcp_tool(
     }
 }
 
-/// Handle demo/test tool calls (for development/testing)
+/// 处理演示/测试用工具调用（供开发/测试使用）
 pub(crate) async fn handle_demo_tool_call(
     tool_name: &str,
     input: serde_json::Value,
@@ -682,7 +675,7 @@ pub(crate) async fn handle_demo_tool_call(
 
     let response = match tool_name {
         "demo_echo" => {
-            // Echo back the input
+            // 原样回显输入内容
             serde_json::json!({
                 "success": true,
                 "tool_name": tool_name,
@@ -691,7 +684,7 @@ pub(crate) async fn handle_demo_tool_call(
             })
         }
         "demo_calculator" => {
-            // Simple calculator demo
+            // 简单的计算器演示
             if let Some(obj) = input.as_object() {
                 let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let b = obj.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -724,7 +717,7 @@ pub(crate) async fn handle_demo_tool_call(
             }
         }
         "test_connection" => {
-            // Test connectivity
+            // 测试连通性
             serde_json::json!({
                 "success": true,
                 "tool_name": tool_name,
@@ -744,11 +737,10 @@ pub(crate) async fn handle_demo_tool_call(
     Ok(response)
 }
 
-/// Definitions for the tools the app ships with directly (web search, page
-/// fetch) -- these run in-process via `reqwest`, not as an external stdio/
-/// HTTP MCP server, so they need no `MCPServer` DB row and work regardless
-/// of what's installed on the user's machine. `server_id: "builtin"` is how
-/// `execute_tool_calls` (llm.rs) and `call_mcp_tool` recognize them.
+/// 应用本体直接内置的工具定义（网页搜索、抓取网页）-- 这些工具通过 `reqwest`
+/// 在进程内直接运行，不是外部的 stdio/HTTP MCP 服务器，所以不需要 `MCPServer`
+/// 数据库行，也不受用户机器上安装了什么的影响。`server_id: "builtin"` 就是
+/// `execute_tool_calls`（llm.rs）和 `call_mcp_tool` 用来识别它们的标记。
 fn builtin_tool_defs() -> Vec<MCPTool> {
     vec![
         MCPTool {
@@ -784,8 +776,8 @@ fn builtin_tool_defs() -> Vec<MCPTool> {
 const BUILTIN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const BUILTIN_FETCH_TEXT_LIMIT: usize = 15_000;
 
-/// Execute one of the built-in tools directly -- no subprocess, no external
-/// MCP transport, just an in-process HTTP call.
+/// 直接执行某个内置工具 -- 不起子进程，不走外部 MCP 传输协议，
+/// 就是进程内一次普通的 HTTP 调用。
 async fn execute_builtin_tool(tool_name: &str, input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
     match tool_name {
         "builtin__web_search" => builtin_web_search(input).await,
@@ -840,9 +832,8 @@ async fn builtin_web_search(input: serde_json::Value) -> Result<serde_json::Valu
         if title.is_empty() {
             continue;
         }
-        // DuckDuckGo's HTML results wrap the real target URL in an
-        // `uddg=`-encoded redirect link (`//duckduckgo.com/l/?uddg=...`)
-        // rather than linking to it directly.
+        // DuckDuckGo 的 HTML 搜索结果不是直接链接到目标网址，而是把真实目标 URL
+        // 包在一个 `uddg=` 编码的跳转链接里（`//duckduckgo.com/l/?uddg=...`）。
         let raw_href = title_el.value().attr("href").unwrap_or_default();
         let link = raw_href
             .split("uddg=")
@@ -887,9 +878,9 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
         .map_err(|e| MCPError::CommunicationError(format!("读取网页内容失败: {}", e)))?;
 
     let document = scraper::Html::parse_document(&html);
-    // Pull text from block-level content tags rather than the whole document --
-    // real content almost always lives in these, while nav/script/style/footer
-    // chrome doesn't, so this sidesteps needing to explicitly strip them out.
+    // 只从块级内容标签里取文本，而不是整个文档 -- 真正的正文内容几乎总是在
+    // 这些标签里，而导航栏/脚本/样式/页脚这些界面元素不会用它们，这样就不用
+    // 再显式地把它们过滤掉。
     let content_selector = scraper::Selector::parse(
         "h1, h2, h3, h4, h5, h6, p, li, td, th, blockquote, pre, article, dd, dt"
     ).unwrap();
@@ -904,7 +895,7 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
     }
 
     if text.trim().is_empty() {
-        // Fallback for pages that don't use semantic block tags: grab the body wholesale.
+        // 兜底方案：如果页面没有用语义化的块级标签，就整个 body 一起取。
         if let Some(body) = document.select(&scraper::Selector::parse("body").unwrap()).next() {
             text = body.text().collect::<Vec<_>>().join(" ");
         }
@@ -919,7 +910,7 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
     Ok(serde_json::json!({ "url": url, "content": text, "truncated": truncated }))
 }
 
-/// Call MCP tool via Stdio (JSON-RPC over stdin/stdout)
+/// 通过 Stdio 调用 MCP 工具（JSON-RPC 通过 stdin/stdout 传输）
 #[allow(dead_code)]
 async fn call_mcp_tool_stdio(
     server: &MCPServer,
@@ -928,7 +919,7 @@ async fn call_mcp_tool_stdio(
 ) -> Result<serde_json::Value, MCPError> {
     log::info!("Calling MCP tool via stdio: {}", tool_name);
 
-    // Build JSON-RPC request
+    // 构建 JSON-RPC 请求
     let request = ToolCallRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
@@ -946,7 +937,7 @@ async fn call_mcp_tool_stdio(
 
     validate_mcp_command(&server.command, &server.args)?;
 
-    // Execute the server process
+    // 启动服务器进程
     let mut cmd = Command::new(resolve_windows_command(&server.command));
     cmd.args(&server.args)
         .stdout(Stdio::piped())
@@ -962,7 +953,7 @@ async fn call_mcp_tool_stdio(
         }
     })?;
 
-    // Read stderr in a background task to prevent pipe blocking
+    // 在后台任务里读 stderr，防止管道被写满而阻塞
     let stderr = child.stderr.take().ok_or_else(|| {
         MCPError::CommunicationError("Failed to open stderr".to_string())
     })?;
@@ -973,7 +964,7 @@ async fn call_mcp_tool_stdio(
         }
     });
 
-    // Send request to stdin
+    // 把请求写入 stdin
     {
         let mut stdin = child.stdin.take().ok_or_else(|| {
             MCPError::CommunicationError("Failed to open stdin".to_string())
@@ -985,14 +976,14 @@ async fn call_mcp_tool_stdio(
             .map_err(|e| MCPError::CommunicationError(format!("Failed to write to stdin: {}", e)))?;
     }
 
-    // Read response from stdout with timeout
+    // 带超时地从 stdout 读取响应
     let stdout = child.stdout.take().ok_or_else(|| {
         MCPError::CommunicationError("Failed to open stdout".to_string())
     })?;
 
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
-    // Read first line (should be the JSON response)
+    // 读取第一行（应该就是 JSON 响应）
     let response_line = tokio::time::timeout(MCP_TOOL_CALL_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| MCPError::CommunicationError("Tool execution timeout".to_string()))?
@@ -1001,11 +992,11 @@ async fn call_mcp_tool_stdio(
 
     log::debug!("MCP Response: {}", response_line);
 
-    // Parse JSON-RPC response
+    // 解析 JSON-RPC 响应
     let response: JsonRpcResponse = serde_json::from_str(&response_line)
         .map_err(|e| MCPError::JsonError(e))?;
 
-    // Ensure the child process is terminated
+    // 确保子进程被终止
     let _ = child.kill().await;
     let _ = child.wait().await;
 
@@ -1021,7 +1012,7 @@ async fn call_mcp_tool_stdio(
         .unwrap_or(serde_json::json!({"status": "success"})))
 }
 
-/// Call MCP tool via HTTP/SSE
+/// 通过 HTTP/SSE 调用 MCP 工具
 #[allow(dead_code)]
 async fn call_mcp_tool_http(
     server: &MCPServer,
@@ -1034,7 +1025,7 @@ async fn call_mcp_tool_http(
         MCPError::InvalidConfig("HTTP server requires URL".to_string())
     })?;
 
-    // Build JSON-RPC request
+    // 构建 JSON-RPC 请求
     let request = ToolCallRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
@@ -1045,16 +1036,16 @@ async fn call_mcp_tool_http(
         id: Uuid::new_v4().to_string(),
     };
 
-    // Create HTTP client
+    // 创建 HTTP 客户端
     let client = reqwest::Client::new();
     let mut req_builder = client.post(url);
 
-    // Add auth header if API key provided
+    // 如果提供了 API 密钥，加上认证头
     if let Some(api_key) = &server.api_key {
         req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
     }
 
-    // Send request with timeout
+    // 带超时地发送请求
     let response = tokio::time::timeout(
         MCP_HTTP_TIMEOUT,
         req_builder
@@ -1073,7 +1064,7 @@ async fn call_mcp_tool_http(
         )));
     }
 
-    // Parse JSON-RPC response
+    // 解析 JSON-RPC 响应
     let resp_json = response
         .json::<JsonRpcResponse>()
         .await
@@ -1091,16 +1082,15 @@ async fn call_mcp_tool_http(
         .unwrap_or(serde_json::json!({"status": "success"})))
 }
 
-/// Result of a connection test -- carries the real failure reason (e.g. "需要
-/// 先安装 uv...") alongside the pass/fail flag, instead of collapsing it down
-/// to a bare boolean and leaving the user to go dig through the log file.
+/// 连接测试的结果 -- 除了成功/失败标志外，还带上真正的失败原因（比如"需要
+/// 先安装 uv..."），而不是简化成一个裸的布尔值，让用户自己去翻日志文件找原因。
 #[derive(Debug, Clone, Serialize)]
 pub struct MCPConnectionTestResult {
     pub success: bool,
     pub error: Option<String>,
 }
 
-/// Test MCP server connection
+/// 测试 MCP 服务器连接
 #[tauri::command]
 pub async fn test_mcp_connection(
     server_type: String,
@@ -1117,19 +1107,18 @@ pub async fn test_mcp_connection(
                 }
                 let args = args.unwrap_or_default();
 
-                // Validate against command whitelist and dangerous patterns
+                // 校验是否在命令白名单内，以及是否包含危险模式
                 validate_mcp_command(executable, &args)?;
 
-                // A stdio MCP server is a long-running process that never exits on
-                // its own, so waiting for it to terminate (as `.output()` does)
-                // would hang forever. Instead, probe it with a real tools/list
-                // JSON-RPC request, the same way `call_mcp_tools_stdio` does.
+                // stdio 类型的 MCP 服务器是一个长期运行、不会自己退出的进程，
+                // 所以像 `.output()` 那样等它终止会永远卡住。这里改为像
+                // `call_mcp_tools_stdio` 一样，发一次真实的 tools/list
+                // JSON-RPC 请求来探测。
                 //
-                // `command`/`args` are kept as two separate fields here -- matching
-                // exactly how `call_mcp_tools_stdio` spawns the real saved server
-                // (`Command::new(&server.command).args(&server.args)`, no shell
-                // parsing) -- so a passing test here means the real launch will
-                // behave the same way.
+                // `command`/`args` 这里特意保留为两个独立字段 -- 与
+                // `call_mcp_tools_stdio` 启动真实已保存服务器的方式完全一致
+                // （`Command::new(&server.command).args(&server.args)`，不经过
+                // shell 解析）-- 这样这里测试通过，就意味着真正启动时行为一致。
                 let probe_server = MCPServer {
                     id: String::new(),
                     name: String::new(),
@@ -1162,7 +1151,7 @@ pub async fn test_mcp_connection(
         }
         "sse" | "http" => {
             if let Some(url) = url {
-                // Try HTTP request to server
+                // 尝试向服务器发起 HTTP 请求
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(resp) => {
                         log::info!("MCP test connection to '{}' returned status {}", url, resp.status());

@@ -86,7 +86,7 @@ pub fn list_schedules(conn: &Connection, workspace_id: Option<&str>) -> Result<V
     result
 }
 
-/// Returns all enabled schedules whose `next_run_at` is at or before `now_ms`.
+/// 返回所有已启用、且 `next_run_at` 早于或等于 `now_ms` 的定时任务。
 pub fn list_due_schedules(conn: &Connection, now_ms: i64) -> Result<Vec<Schedule>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id,name,workspace_id,target_agent_id,message,kind,interval_minutes,at_time,weekday,once_at,next_run_at,last_run_at,enabled,created_at,updated_at FROM schedules WHERE enabled=1 AND next_run_at<=?1"
@@ -108,7 +108,7 @@ pub fn get_schedule(conn: &Connection, id: &str) -> Result<Option<Schedule>, rus
     Ok(rows.next().transpose()?)
 }
 
-/// After a schedule fires, update `next_run_at`, `last_run_at`, and optionally disable it.
+/// 定时任务触发之后，更新 `next_run_at`、`last_run_at`，并可选择将其禁用。
 pub fn update_after_fire(conn: &Connection, id: &str, next_run_at: Option<i64>, last_run_at: i64, disable: bool) -> Result<(), rusqlite::Error> {
     let now = chrono::Utc::now().timestamp_millis();
     if disable {

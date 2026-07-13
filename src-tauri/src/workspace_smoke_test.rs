@@ -2,12 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Temporary smoke-test harness for Agent Team Mode's Workspace module.
-//! Only runs when `BAIYU_WORKSPACE_SMOKE_TEST` is set (see `main.rs`) --
-//! not part of the shipped feature. Drives the real Tauri commands end to
-//! end against two local Ollama models so multi-agent tool-calling can be
-//! verified without a frontend or any cloud API key. Safe to delete this
-//! file and its hook in `main.rs` once Phase 1 is verified.
+//! Agent Team Mode 的 Workspace 模块所用的临时冒烟测试脚手架。
+//! 只有设置了 `BAIYU_WORKSPACE_SMOKE_TEST` 环境变量时才会运行（见 `main.rs`）——
+//! 不属于正式发布的功能。通过真实的 Tauri 命令端到端驱动两个本地 Ollama 模型，
+//! 这样无需前端界面、也无需任何云端 API Key 就能验证多 Agent 之间的工具调用。
+//! 待 Phase 1 验证完毕后，可以安全删除这个文件以及 `main.rs` 里挂它的那个钩子。
 
 use crate::db::DbState;
 use crate::workspace::commands::{PendingQuestions, PendingSleepRequests, WorkspaceState};
@@ -174,8 +173,8 @@ pub async fn run(app_handle: AppHandle) {
 
     log::info!("[smoke_test] ===== Phase 1 验证结束，开始 Phase 2 验证（提问 / 休眠审批）=====");
 
-    // Auto-answer the question the moment workspace_asks fires, simulating
-    // the frontend card -- this exercises the always-user-routed `ask` flow.
+    // workspace_asks 一触发就自动代答，模拟前端的提问卡片交互——
+    // 用来验证那条永远要经由用户处理的 `ask` 流程。
     let answer_handle = app_handle.clone();
     app_handle.once_any("workspace://question", move |event| {
         let handle = answer_handle.clone();
@@ -199,11 +198,10 @@ pub async fn run(app_handle: AppHandle) {
         });
     });
 
-    // Safety net: if the main agent hasn't approved the sleep request itself
-    // within 30s, fall back to the user-override path so the smoke test
-    // doesn't hang for the full 10-minute timeout. If the main agent beats
-    // this to it, `workspace_resolve_sleep_request` below will just fail
-    // with "not found", which is the expected/healthy outcome.
+    // 安全兜底：如果主 Agent 30 秒内没有自行批准这个休眠申请，就走用户代为覆盖
+    // 的路径，避免冒烟测试卡到完整的 10 分钟超时。如果主 Agent 抢先处理了，
+    // 下面这行 `workspace_resolve_sleep_request` 只会因为"找不到"而失败，
+    // 这本身就是预期中的正常结果。
     let sleep_handle = app_handle.clone();
     app_handle.once_any("workspace://sleep-request", move |event| {
         let handle = sleep_handle.clone();
@@ -257,9 +255,9 @@ pub async fn run(app_handle: AppHandle) {
         }
     }
 
-    // The main agent's acceptance-review wake (triggered above once every
-    // sub-agent is Sleeping) happens on its own loop cycle -- give it a
-    // little more time to actually run and reply before dumping results.
+    // 主 Agent 的验收唤醒（在上面所有子 Agent 都进入 Sleeping 状态后触发）
+    // 是在它自己的循环周期里发生的——多给它一点时间真正跑起来并回复，
+    // 再去查看结果。
     log::info!("[smoke_test] 等待主 Agent 完成验收回复...");
     for i in 0..15 {
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -300,7 +298,7 @@ pub async fn run(app_handle: AppHandle) {
 
     log::info!("[smoke_test] ===== Phase 2 验证结束，开始 Phase 3 验证（会议机制）=====");
 
-    // Phase 3 uses a fresh workspace to avoid state contamination from Phase 1/2.
+    // Phase 3 使用一个全新的工作组，避免受到 Phase 1/2 残留状态的污染。
     let meeting_ws = match crate::workspace::commands::workspace_create(
         CreateWorkspaceRequest {
             name: "Phase3 会议测试工作组".to_string(),

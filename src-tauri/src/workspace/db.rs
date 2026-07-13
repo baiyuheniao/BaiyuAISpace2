@@ -5,21 +5,18 @@
 use super::types::*;
 use rusqlite::Connection;
 
-/// Opens a connection with a busy-timeout set, so a write that lands while
-/// another connection briefly holds the write lock retries for up to 5s
-/// instead of failing immediately with `SQLITE_BUSY` -- every business
-/// operation in this module opens its own short-lived connection (see
-/// `delete_workspace`'s doc comment), so concurrent writes from two agents'
-/// loops firing at once is a real, not theoretical, scenario.
+/// 打开连接时设置 busy-timeout，这样一次写入如果撞上另一个连接短暂持有写锁
+/// 的窗口，会重试最多 5 秒，而不是立刻以 `SQLITE_BUSY` 失败——本模块里每个
+/// 业务操作都各自打开一个短生命周期的连接（见 `delete_workspace` 的文档注释），
+/// 所以两个 Agent 的循环同时触发写入，是真实会发生的场景，不是纸上谈兵。
 pub fn open_conn(path: &str) -> Result<Connection, WorkspaceError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
 }
 
-/// Create the Workspace tables if they don't already exist, and additively
-/// migrate older installs (`ALTER TABLE ... ADD COLUMN`, guarded by checking
-/// `PRAGMA table_info` first) up to the current schema.
+/// 若 Workspace 相关表不存在则创建，并对老版本安装做增量迁移（`ALTER TABLE
+/// ... ADD COLUMN`，执行前先查一遍 `PRAGMA table_info` 做保护）追平到当前 schema。
 pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         r#"
@@ -141,7 +138,7 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     )?;
 
-    // Additive migrations for installs created before this column set existed.
+    // 给早于这批列存在时创建的安装做增量迁移。
     let agent_columns: Vec<String> = conn
         .prepare("PRAGMA table_info(workspace_agents)")?
         .query_map([], |row| row.get(1))?
@@ -231,12 +228,11 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Option<Workspace>, W
     }
 }
 
-/// Deletes a workspace and everything in it. Does the cascade manually,
-/// children first, rather than relying solely on the `ON DELETE CASCADE` in
-/// the table defs above -- `PRAGMA foreign_keys` is a per-connection setting
-/// and every business operation here opens a fresh `rusqlite::Connection`
-/// rather than reusing `Database::init`'s long-lived one, so whether cascade
-/// actually fires isn't something this module should depend on.
+/// 删除一个工作组及其下所有内容。手动做级联删除、先删子表再删主表，而不是
+/// 单纯依赖上面表定义里的 `ON DELETE CASCADE`——`PRAGMA foreign_keys` 是按
+/// 连接（per-connection）生效的设置，而本模块每个业务操作都是新开一个
+/// `rusqlite::Connection`，并不复用 `Database::init` 那个长生命周期的连接，
+/// 所以级联到底会不会真的触发，本模块不应该指望它。
 pub fn delete_workspace(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
     conn.execute(
         "DELETE FROM workspace_agent_tasks WHERE agent_id IN (SELECT id FROM workspace_agents WHERE workspace_id = ?1)",
@@ -250,8 +246,8 @@ pub fn delete_workspace(conn: &Connection, id: &str) -> Result<(), WorkspaceErro
     Ok(())
 }
 
-/// Active (non-soft-deleted) agent count, used for the `max_agents` safety
-/// cap -- a deleted agent shouldn't hold a seat open.
+/// 存活（未软删除）的 Agent 数量，用于 `max_agents` 安全阀检查——已删除的
+/// Agent 不该继续占着一个名额。
 pub fn count_agents(conn: &Connection, workspace_id: &str) -> Result<i64, WorkspaceError> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM workspace_agents WHERE workspace_id = ?1 AND deleted_at IS NULL",
@@ -342,10 +338,9 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
     Ok(())
 }
 
-/// Looks up an agent by id regardless of soft-delete status -- used both for
-/// the live agent-loop path (which only ever holds ids of active agents
-/// anyway) and to backfill display names for historical messages/logs sent
-/// by an agent that has since been deleted.
+/// 按 id 查一个 Agent，不管它是否已被软删除——既用于运行中的 Agent 循环
+/// （反正它手上拿到的 id 本来就都是存活 Agent 的），也用于给已被删除的
+/// Agent 发出的历史消息/日志回填显示名字。
 pub fn get_agent(conn: &Connection, id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
     let sql = format!("SELECT {} FROM workspace_agents WHERE id = ?1", AGENT_SELECT_COLUMNS);
     let result = conn.query_row(&sql, [id], row_to_agent);
@@ -356,10 +351,9 @@ pub fn get_agent(conn: &Connection, id: &str) -> Result<Option<WorkspaceAgent>, 
     }
 }
 
-/// Active agents only (excludes soft-deleted) -- what every existing caller
-/// (agent roster, meeting participants, max-agents count, main-agent lookup)
-/// actually wants. Use `get_agent` directly when a deleted agent's row still
-/// needs to be resolvable (e.g. historical message sender names).
+/// 只返回存活的 Agent（排除软删除的）——这也是现有每个调用方（Agent 名册、
+/// 会议与会者、max-agents 计数、主 Agent 查找）实际想要的结果。如果需要
+/// 已删除 Agent 的行仍然可查（比如历史消息的发送者名字），直接用 `get_agent`。
 pub fn list_agents(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspaceAgent>, WorkspaceError> {
     let sql = format!(
         "SELECT {} FROM workspace_agents WHERE workspace_id = ?1 AND deleted_at IS NULL ORDER BY created_at ASC",
@@ -370,9 +364,8 @@ pub fn list_agents(conn: &Connection, workspace_id: &str) -> Result<Vec<Workspac
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-/// All agents including soft-deleted ones -- used only where a deleted
-/// agent's name still needs to resolve (rendering historical messages/logs
-/// that reference it). Everything else should use `list_agents`.
+/// 包含软删除在内的全部 Agent——只在需要解析已删除 Agent 名字的场景使用
+/// （渲染引用了它的历史消息/日志）。其余场景一律用 `list_agents`。
 pub fn list_agents_including_deleted(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspaceAgent>, WorkspaceError> {
     let sql = format!(
         "SELECT {} FROM workspace_agents WHERE workspace_id = ?1 ORDER BY created_at ASC",
@@ -391,10 +384,9 @@ pub fn update_agent_status(conn: &Connection, id: &str, status: AgentStatus) -> 
     Ok(())
 }
 
-/// Applies user edits to an existing agent's config. Deliberately doesn't
-/// touch `status` -- the live loop reloads the row fresh every wake, so a
-/// plain field update takes effect on the agent's next turn without needing
-/// to restart its background task.
+/// 把用户的编辑应用到一个已存在 Agent 的配置上。刻意不改动 `status`——
+/// 运行中的循环每次唤醒都会重新读一遍这一行，所以普通字段更新在 Agent 下一轮
+/// 就会生效，不需要重启它的后台任务。
 pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), WorkspaceError> {
     let rows = conn.execute(
         "UPDATE workspace_agents SET name = ?1, provider = ?2, model = ?3, base_url = ?4, api_config_id = ?5, \
@@ -472,8 +464,8 @@ pub fn insert_task(conn: &Connection, task: &WorkspaceAgentTask) -> Result<(), W
     Ok(())
 }
 
-/// All of an agent's tasks, oldest first -- open items naturally sort before
-/// ones completed later since `done` doesn't reorder the row.
+/// 一个 Agent 的全部任务，最早的在前——未完成项自然排在后完成的前面，
+/// 因为 `done` 字段不会导致这一行重新排序。
 pub fn list_tasks(conn: &Connection, agent_id: &str) -> Result<Vec<WorkspaceAgentTask>, WorkspaceError> {
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, content, done, created_at, updated_at
@@ -499,9 +491,8 @@ pub fn delete_task(conn: &Connection, task_id: &str) -> Result<(), WorkspaceErro
     Ok(())
 }
 
-/// Soft delete: keeps the row (with `deleted_at` set) so historical
-/// messages/logs referencing this agent id can still resolve its name,
-/// instead of falling back to a raw UUID in the timeline.
+/// 软删除：保留这一行（设置 `deleted_at`），这样引用这个 agent id 的历史
+/// 消息/日志仍能解析出名字，而不是在时间线上退化成显示一串原始 UUID。
 pub fn delete_agent(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
     conn.execute(
         "UPDATE workspace_agents SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
@@ -530,8 +521,7 @@ pub fn insert_message(conn: &Connection, msg: &WorkspaceMessage) -> Result<(), W
     Ok(())
 }
 
-/// All messages in a workspace, oldest first -- used by the frontend to
-/// render the full timeline.
+/// 一个工作组的全部消息，最早的在前——供前端渲染完整时间线用。
 pub fn list_messages(conn: &Connection, workspace_id: &str, limit: i64) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at
@@ -543,10 +533,9 @@ pub fn list_messages(conn: &Connection, workspace_id: &str, limit: i64) -> Resul
     Ok(messages)
 }
 
-/// Recent messages relevant to one agent's own context: anything addressed
-/// to it directly, broadcast to "all", or sent by it previously. Oldest
-/// first, capped at `limit` so a long-running workspace doesn't grow the
-/// per-turn prompt unbounded.
+/// 跟某个 Agent 自身上下文相关的近期消息：直接发给它的、广播给 "all" 的，
+/// 或者它之前自己发过的。最早的在前，用 `limit` 封顶，避免一个长期运行的
+/// 工作组把每轮提示词无限撑大。
 pub fn list_recent_messages_for_agent(
     conn: &Connection,
     workspace_id: &str,
@@ -610,11 +599,10 @@ fn row_to_pending_event(row: &rusqlite::Row) -> rusqlite::Result<WorkspacePendin
     })
 }
 
-/// Records a proposal/sleep-request/question the moment it's raised, so it
-/// survives a restart or a user who wasn't looking at this page when the
-/// one-shot frontend event fired. `id` must match the id used to resolve it
-/// (`proposal_id`/`request_id`/`question_id`) so `resolve_pending_event` can
-/// find it again.
+/// 在一个提议/休眠请求/问题被提出的那一刻就记录下来，这样即便应用重启、
+/// 或者一次性前端事件触发时用户根本没在看这个页面，它也不会丢。`id` 必须
+/// 跟用来解决它的那个 id（`proposal_id`/`request_id`/`question_id`）一致，
+/// 这样 `resolve_pending_event` 才能重新找到它。
 pub fn insert_pending_event(conn: &Connection, event: &WorkspacePendingEvent) -> Result<(), WorkspaceError> {
     conn.execute(
         "INSERT INTO workspace_pending_events (id, workspace_id, agent_id, agent_name, kind, payload, created_at, resolved_at)
@@ -640,9 +628,8 @@ pub fn resolve_pending_event(conn: &Connection, id: &str) -> Result<(), Workspac
     Ok(())
 }
 
-/// Everything still awaiting a human decision in this workspace, oldest
-/// first -- what the frontend fetches on selecting a workspace to backfill
-/// anything it missed while the page (or the app) wasn't open.
+/// 这个工作组里所有还在等人工决策的事项，最早的在前——前端在选中一个
+/// 工作组时会拉这个接口，把页面（或整个应用）没打开期间错过的内容补回来。
 pub fn list_unresolved_pending_events(conn: &Connection, workspace_id: &str) -> Result<Vec<WorkspacePendingEvent>, WorkspaceError> {
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, agent_id, agent_name, kind, payload, created_at, resolved_at
@@ -844,7 +831,7 @@ mod tests {
 
         assert_eq!(count_agents(&conn, "ws-1").unwrap(), 0);
         assert!(list_agents(&conn, "ws-1").unwrap().is_empty());
-        // Still resolvable by id -- historical messages/logs need the name.
+        // 仍然能按 id 查到——历史消息/日志需要这个名字。
         let fetched = get_agent(&conn, &agent.id).unwrap().expect("soft-deleted agent should still be gettable by id");
         assert!(fetched.deleted_at.is_some());
         assert_eq!(fetched.name, "A");
@@ -897,7 +884,7 @@ mod tests {
         assert_eq!(fetched.rag_rerank_top_n, Some(3));
         assert!(!fetched.require_tool_approval);
         assert!(fetched.enable_thinking);
-        // Status untouched by an edit -- the live loop reloads config, not status.
+        // 编辑不会改动状态——运行中的循环重新加载的是配置，不是状态。
         assert_eq!(fetched.status, AgentStatus::Running);
 
         assert!(matches!(

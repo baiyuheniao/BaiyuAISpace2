@@ -4,17 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How a schedule repeats.
+/// 定时任务的重复方式。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleKind {
-    /// Fire once at `once_at`, then disable.
+    /// 在 `once_at` 时刻触发一次，之后自动禁用。
     Once,
-    /// Fire every `interval_minutes` minutes starting from creation.
+    /// 从创建时刻起，每隔 `interval_minutes` 分钟触发一次。
     Interval,
-    /// Fire every day at `at_time` (local wall-clock "HH:MM").
+    /// 每天在 `at_time`（本地墙钟时间 "HH:MM"）触发。
     Daily,
-    /// Fire every week on `weekday` at `at_time`.
+    /// 每周在 `weekday` 这一天的 `at_time` 触发。
     Weekly,
 }
 
@@ -38,28 +38,28 @@ impl ScheduleKind {
     }
 }
 
-/// A persisted scheduled task.
+/// 持久化保存的定时任务。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
     pub id: String,
     pub name: String,
-    /// The workspace this schedule is scoped to. `None` = future non-workspace use.
+    /// 该定时任务所属的工作组。`None` 表示预留给未来非工作组场景使用。
     pub workspace_id: Option<String>,
-    /// Which agent receives the message. `None` = broadcast to all agents in workspace.
+    /// 消息发给哪个 Agent。`None` 表示广播给工作组内所有 Agent。
     pub target_agent_id: Option<String>,
-    /// The message content sent to the agent when the schedule fires.
+    /// 任务触发时发给 Agent 的消息内容。
     pub message: String,
     pub kind: ScheduleKind,
-    /// Used when `kind == Interval`. Unit: minutes.
+    /// 仅当 `kind == Interval` 时使用。单位：分钟。
     pub interval_minutes: Option<i64>,
-    /// Used when `kind == Daily | Weekly`. Format: "HH:MM" in local time.
+    /// 仅当 `kind == Daily | Weekly` 时使用。格式为本地时间的 "HH:MM"。
     pub at_time: Option<String>,
-    /// Used when `kind == Weekly`. 0 = Monday … 6 = Sunday.
+    /// 仅当 `kind == Weekly` 时使用。0 = 周一 … 6 = 周日。
     pub weekday: Option<i64>,
-    /// Used when `kind == Once`. Unix milliseconds.
+    /// 仅当 `kind == Once` 时使用。Unix 毫秒时间戳。
     pub once_at: Option<i64>,
-    /// Unix milliseconds — when the scheduler loop should next fire this task.
+    /// Unix 毫秒时间戳 —— 调度循环下一次应该触发该任务的时刻。
     pub next_run_at: i64,
     pub last_run_at: Option<i64>,
     pub enabled: bool,
@@ -81,7 +81,7 @@ pub struct CreateScheduleRequest {
     pub once_at: Option<i64>,
 }
 
-/// Payload emitted as `scheduler://triggered` Tauri event.
+/// 作为 `scheduler://triggered` Tauri 事件发出的数据载荷。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleTriggeredEvent {

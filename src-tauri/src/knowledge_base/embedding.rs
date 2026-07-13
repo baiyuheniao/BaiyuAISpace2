@@ -109,7 +109,7 @@ async fn generate_embeddings_batch(
     let url = get_embedding_url(base_url);
     let client = reqwest::Client::new();
     
-    // Build request body
+    // 构建请求体
     let body = match provider {
         "zhipu" => {
             json!({
@@ -126,7 +126,7 @@ async fn generate_embeddings_batch(
         }
     };
     
-    // Build headers
+    // 构建请求头
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -205,7 +205,7 @@ fn parse_embedding_response(json: &serde_json::Value) -> Result<Vec<Vec<f32>>, K
     parse_embedding_array(data)
 }
 
-/// Generate single embedding
+/// 生成单条文本的 embedding
 pub async fn generate_single_embedding(
     text: &str,
     provider: &str,
@@ -218,7 +218,7 @@ pub async fn generate_single_embedding(
         .ok_or_else(|| KnowledgeBaseError::EmbeddingError("No embedding generated".to_string()))
 }
 
-/// Get embedding dimension for a model
+/// 获取指定模型的 embedding 向量维度
 #[allow(dead_code)]
 pub fn get_embedding_dimension(provider: &str, model: &str) -> i32 {
     match (provider, model) {
@@ -231,7 +231,7 @@ pub fn get_embedding_dimension(provider: &str, model: &str) -> i32 {
     }
 }
 
-/// Available embedding models
+/// 可用的 embedding 模型列表
 pub fn get_available_embedding_models() -> Vec<(String, String, i32)> {
     vec![
         ("openai".to_string(), "text-embedding-3-small".to_string(), 1536),

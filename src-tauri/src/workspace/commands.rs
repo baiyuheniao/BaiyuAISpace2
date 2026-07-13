@@ -37,24 +37,22 @@ const MAX_HISTORY_MESSAGES: i64 = 40;
 const WAKE_RATE_WINDOW_SECS: i64 = 300;
 const MAX_WAKES_PER_WINDOW: usize = 20;
 
-/// One running agent's wake signal + stop switch. Lives only in memory, but
-/// `main.rs`'s `setup()` calls `start_agent_loop` again for every active
-/// agent on launch (via this same function), so a restart resumes every
-/// workspace's agents rather than leaving them permanently dormant.
+/// 一个运行中 Agent 的唤醒信号 + 停止开关。只存在于内存里，但 `main.rs` 的
+/// `setup()` 在启动时会对每个活跃 Agent 再调一次 `start_agent_loop`（走的是
+/// 同一个函数），所以应用重启后各工作组的 Agent 会恢复运行，而不是永久沉睡。
 pub struct AgentHandle {
     pub notify: Arc<Notify>,
     pub cancel: CancellationToken,
 }
 
-/// Registry of running agent loops, keyed by agent id (ids are UUIDs and
-/// therefore globally unique, so a flat map works fine across workspaces).
+/// 运行中 Agent 循环的注册表，key 是 agent id（id 是 UUID，天然全局唯一，
+/// 所以跨工作组用一个扁平 map 就够了）。
 #[derive(Default)]
 pub struct WorkspaceState(pub Arc<Mutex<HashMap<String, AgentHandle>>>);
 
-/// What the user decided about a main agent's `workspace_create_agent`
-/// proposal. `Approved` carries the *final* request, filled in by the
-/// frontend confirmation card (it supplies `api_config_id`/`base_url`,
-/// which the model can't know).
+/// 用户对主 Agent 的 `workspace_create_agent` 提议做出的决定。`Approved`
+/// 携带的是*最终*的 request，由前端确认卡片填入（它会补上 `api_config_id`/
+/// `base_url`，这些是模型不可能知道的）。
 pub enum ProposalDecision {
     Approved(Box<CreateAgentRequest>),
     Rejected,
@@ -63,32 +61,29 @@ pub enum ProposalDecision {
 #[derive(Default)]
 pub struct PendingProposals(pub Arc<Mutex<HashMap<String, oneshot::Sender<ProposalDecision>>>>);
 
-/// A sub-agent's pending `workspace_sleep` request, keyed by a generated
-/// request id. Resolved either by the main agent calling
-/// `workspace_approve_sleep`/`workspace_reject_sleep`, or by the user
-/// overriding directly via `workspace_resolve_sleep_request` -- whichever
-/// happens first wins, since removing the entry from the map is what grants
-/// the right to resolve it.
+/// 一个子 Agent 待处理的 `workspace_sleep` 请求，key 是生成的 request id。
+/// 由主 Agent 调用 `workspace_approve_sleep`/`workspace_reject_sleep` 解决，
+/// 或者由用户通过 `workspace_resolve_sleep_request` 直接越权处理——谁先到谁
+/// 生效，因为把这条记录从 map 里摘掉这个动作本身就等于拿到了处理权。
 #[derive(Default)]
 pub struct PendingSleepRequests(pub Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
 
-/// A pending `workspace_asks` question, keyed by a generated question id.
-/// Resolved by the user answering via `workspace_resolve_question`.
+/// 一个待处理的 `workspace_asks` 问题，key 是生成的 question id。由用户通过
+/// `workspace_resolve_question` 回答来解决。
 #[derive(Default)]
 pub struct PendingQuestions(pub Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>);
 
-/// A pending MCP tool-call approval, keyed by a generated approval id.
-/// Only raised when the calling agent's `require_tool_approval` is true --
-/// see `dispatch_tool_call`'s fallback arm.
+/// 一个待处理的 MCP 工具调用审批，key 是生成的 approval id。只有在发起调用
+/// 的 Agent `require_tool_approval` 为 true 时才会触发——见 `dispatch_tool_call`
+/// 的兜底分支。
 #[derive(Default)]
 pub struct PendingToolApprovals(pub Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
 
-/// Recent wake timestamps (ms) per agent, in a fixed-size sliding window --
-/// the guardrail against runaway ping-pong: if an agent gets woken more than
-/// `MAX_WAKES_PER_WINDOW` times within `WAKE_RATE_WINDOW_SECS`, it's
-/// automatically paused. Deliberately in-memory only (not persisted) since a
-/// restart naturally resets the count, which is fine -- the guardrail only
-/// needs to catch runaway behavior within a single running session.
+/// 每个 Agent 最近的唤醒时间戳（毫秒），是个固定大小的滑动窗口——用来防止
+/// 失控互相搭话：如果一个 Agent 在 `WAKE_RATE_WINDOW_SECS` 内被唤醒次数超过
+/// `MAX_WAKES_PER_WINDOW`，就自动暂停它。刻意只存内存不落库，因为重启会
+/// 自然把计数清零，这没问题——这个护栏只需要在单次运行会话内抓住失控行为
+/// 就够了。
 #[derive(Default)]
 pub struct WakeRateState(pub Arc<Mutex<HashMap<String, VecDeque<i64>>>>);
 
@@ -97,7 +92,7 @@ pub fn init_workspace_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands
+// Tauri command（前端可直接调用的命令）
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -165,11 +160,10 @@ pub async fn workspace_delete(
     Ok(())
 }
 
-/// Manual-creation path: the user fills in a form and this directly spawns
-/// the agent and its background loop. The other creation path -- the main
-/// agent's `workspace_create_agent` tool -- funnels through the same
-/// `spawn_agent_internal` after the user approves the proposal via
-/// `workspace_resolve_proposal`, so both paths end up identical from here on.
+/// 手动创建路径：用户填表单，这里直接生成 Agent 及其后台循环。另一条创建
+/// 路径——主 Agent 的 `workspace_create_agent` 工具——在用户通过
+/// `workspace_resolve_proposal` 批准提议之后，也会汇入同一个
+/// `spawn_agent_internal`，所以两条路径从这里往后就完全一致了。
 #[tauri::command]
 pub async fn workspace_create_agent_manual(
     request: CreateAgentRequest,
@@ -179,10 +173,9 @@ pub async fn workspace_create_agent_manual(
     spawn_agent_internal(&app_handle, workspace_state.0.clone(), request).await
 }
 
-/// Returns every agent including soft-deleted ones -- the frontend needs the
-/// deleted ones too, to resolve sender names in historical messages/logs
-/// instead of showing a raw UUID; it filters them back out of the active
-/// roster/dropdowns itself using `deletedAt`.
+/// 返回包括软删除在内的全部 Agent——前端也需要已删除的那些，才能在历史
+/// 消息/日志里正确解析出发送者名字，而不是显示一串原始 UUID；前端自己会
+/// 用 `deletedAt` 把它们从活跃名册/下拉框里过滤掉。
 #[tauri::command]
 pub async fn workspace_list_agents(
     workspace_id: String,
@@ -193,10 +186,9 @@ pub async fn workspace_list_agents(
     db::list_agents_including_deleted(&conn, &workspace_id)
 }
 
-/// Applies user edits to an existing agent (name/model/prompt/tool access/RAG
-/// config). Deliberately doesn't restart the agent's background loop --
-/// `process_agent_wake` reloads the agent row from the DB at the start of
-/// every wake, so a plain config update takes effect on its very next turn.
+/// 把用户的编辑应用到一个已存在的 Agent（名字/模型/提示词/工具权限/RAG 配置）。
+/// 刻意不重启 Agent 的后台循环——`process_agent_wake` 每次唤醒开始时都会
+/// 从数据库重新读一遍这一行，所以普通配置更新在它下一轮就会生效。
 #[tauri::command]
 pub async fn workspace_update_agent(
     request: UpdateAgentRequest,
@@ -229,10 +221,9 @@ pub async fn workspace_delete_agent(
     Ok(())
 }
 
-/// Manual emergency-stop: immediately marks the agent Paused so its loop
-/// no-ops on every future wake until resumed. Does not cancel work already
-/// in flight for the current wake (that finishes normally); it only stops
-/// the *next* one from starting.
+/// 手动紧急停止：立刻把 Agent 标记为 Paused，此后它的循环每次唤醒都会
+/// 空操作跳过，直到被恢复。不会取消当前这一轮已经在跑的工作（那一轮会
+/// 正常跑完）；只是阻止*下一轮*开始。
 #[tauri::command]
 pub async fn workspace_pause_agent(
     agent_id: String,
@@ -253,21 +244,20 @@ pub async fn workspace_resume_agent(
     let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
     set_agent_status(&app_handle, &agent_id, AgentStatus::Idle).await;
     insert_workspace_log(&app_handle, &agent.workspace_id, Some(agent_id.clone()), "resumed", format!("「{}」已恢复运行", agent.name)).await;
-    // Any message that arrived while paused already consumed its `Notify`
-    // permit on the wake that then no-op'd on the paused check -- without an
-    // explicit notify here, a backlogged message would sit unanswered until
-    // some unrelated future message happens to wake the loop again.
+    // 暂停期间到达的消息，其唤醒已经消耗掉了 `Notify` 的 permit（然后在暂停
+    // 检查那里被空操作跳过了）——如果这里不显式再 notify 一次，积压的消息
+    // 就会一直没人回应，直到某条不相关的未来消息碰巧再把循环唤醒。
     if let Some(handle) = workspace_state.0.lock().unwrap().get(&agent_id) {
         handle.notify.notify_one();
     }
     Ok(())
 }
 
-/// User sends a message into the workspace -- to one specific agent, or
-/// broadcast to everyone with `to_agent_id: "all"`. This is also how a
-/// freshly created agent gets its first wake: an agent's loop starts dormant
-/// (blocked on its `Notify`) and only runs once something actually messages
-/// it, so a brand-new agent never gets asked to reply with zero context.
+/// 用户往工作组里发一条消息——发给某个具体 Agent，或者用
+/// `to_agent_id: "all"` 广播给所有人。一个刚创建的 Agent 也是靠这个拿到
+/// 第一次唤醒：Agent 的循环起步时是沉睡的（挂在自己的 `Notify` 上），只有
+/// 真的有消息发给它才会开始跑，所以一个全新的 Agent 永远不会在零上下文
+/// 的情况下被要求回复。
 #[tauri::command]
 pub async fn workspace_send_user_message(
     workspace_id: String,
@@ -280,12 +270,11 @@ pub async fn workspace_send_user_message(
     }
     send_workspace_message(&app_handle, &workspace_id, "user", &to_agent_id, &content).await;
 
-    // Agent background loops are in-memory only (see `start_agent_loop`) and
-    // don't get restarted when the app relaunches. If the target's handle is
-    // missing, the notify inside `send_workspace_message` was a silent
-    // no-op: the message above still got saved and shown, but nobody will
-    // ever pick it up. Tell the frontend so it can warn the user instead of
-    // leaving them waiting on a reply that will never come.
+    // Agent 后台循环只存在于内存中（见 `start_agent_loop`），应用重新启动后
+    // 不会自动恢复。如果目标 Agent 的 handle 不存在，上面 `send_workspace_message`
+    // 内部的 notify 就静默地什么也没做：消息本身照常存库、照常显示，但不会
+    // 有人真正去处理它。这里告诉前端一声，让它能提醒用户，而不是让用户干等
+    // 一个永远不会来的回复。
     let has_live_handle = {
         let workspace_state = app_handle.state::<WorkspaceState>();
         let handles = workspace_state.0.lock().unwrap();
@@ -324,11 +313,10 @@ pub async fn workspace_list_logs(
     db::list_logs(&conn, &workspace_id, limit.unwrap_or(500))
 }
 
-/// The frontend calls this in response to a `workspace://agent-proposal`
-/// event, after the user reviews/edits the main agent's proposed sub-agent
-/// and clicks approve/reject. `request` must be the full, user-confirmed
-/// `CreateAgentRequest` (including `api_config_id`/`base_url`, which the
-/// model never supplied) when `approved` is true.
+/// 前端响应 `workspace://agent-proposal` 事件调用此命令：用户查看/编辑完
+/// 主 Agent 提议的子 Agent 配置后，点了批准或拒绝。`approved` 为 true 时，
+/// `request` 必须是完整的、经用户确认的 `CreateAgentRequest`（包括模型从
+/// 未提供过的 `api_config_id`/`base_url`）。
 #[tauri::command]
 pub async fn workspace_resolve_proposal(
     proposal_id: String,
@@ -363,11 +351,10 @@ pub async fn workspace_resolve_proposal(
     Ok(())
 }
 
-/// Lets the user directly approve/reject a sub-agent's pending
-/// `workspace_sleep` request, bypassing the main agent -- the "用户也能直接代为
-/// 批准/拒绝" override from the design doc. Whoever removes the entry from
-/// the map first (this, or the main agent calling `workspace_approve_sleep`/
-/// `workspace_reject_sleep`) is the one whose decision actually takes effect.
+/// 让用户绕过主 Agent，直接批准/拒绝一个子 Agent 待处理的 `workspace_sleep`
+/// 请求——对应设计文档里"用户也能直接代为批准/拒绝"这条越权规则。谁先把
+/// 这条记录从 map 里摘掉（这里，或者主 Agent 调用 `workspace_approve_sleep`/
+/// `workspace_reject_sleep`），谁的决定就真正生效。
 #[tauri::command]
 pub async fn workspace_resolve_sleep_request(
     request_id: String,
@@ -387,8 +374,7 @@ pub async fn workspace_resolve_sleep_request(
     Ok(())
 }
 
-/// The frontend calls this after the user types an answer into the card
-/// popped up in response to a `workspace://question` event.
+/// 前端在用户对着 `workspace://question` 事件弹出的卡片输入完答案后调用。
 #[tauri::command]
 pub async fn workspace_resolve_question(
     question_id: String,
@@ -408,10 +394,9 @@ pub async fn workspace_resolve_question(
     Ok(())
 }
 
-/// Lists everything in this workspace still awaiting a human decision -- the
-/// frontend fetches this on selecting a workspace so a proposal/sleep
-/// request/question raised while the page wasn't open (or the app wasn't
-/// running) isn't lost, unlike the one-shot events these are paired with.
+/// 列出这个工作组里所有还在等人工决策的事项——前端在选中一个工作组时会拉
+/// 一次，这样即便页面（或整个应用）没打开期间提出了提议/休眠请求/问题，
+/// 它们也不会像与之配对的一次性事件那样直接丢失。
 #[tauri::command]
 pub async fn workspace_list_pending_events(
     workspace_id: String,
@@ -422,8 +407,7 @@ pub async fn workspace_list_pending_events(
     db::list_unresolved_pending_events(&conn, &workspace_id)
 }
 
-/// The frontend calls this after the user approves/rejects a
-/// `workspace://tool-approval` card.
+/// 前端在用户批准/拒绝一张 `workspace://tool-approval` 卡片后调用。
 #[tauri::command]
 pub async fn workspace_resolve_tool_approval(
     approval_id: String,
@@ -441,8 +425,8 @@ pub async fn workspace_resolve_tool_approval(
     Ok(())
 }
 
-/// Lets the frontend show/manage an agent's structured to-do list directly,
-/// not just let the agent itself manage it via `workspace_task_list`.
+/// 让前端能直接查看/管理一个 Agent 的结构化待办清单，而不是只能让 Agent
+/// 自己通过 `workspace_task_list` 工具去管理。
 #[tauri::command]
 pub async fn workspace_list_agent_tasks(
     agent_id: String,
@@ -512,7 +496,7 @@ async fn record_pending_event(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers shared by both creation paths and the agent loop
+// 两条创建路径和 Agent 循环共用的内部辅助函数
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn load_agent(app_handle: &AppHandle, agent_id: &str) -> Result<Option<WorkspaceAgent>, WorkspaceError> {
@@ -578,12 +562,11 @@ pub async fn insert_workspace_log(
     let _ = app_handle.emit("workspace://log", &entry);
 }
 
-/// Persists a message and wakes whichever agent(s) it's addressed to.
-/// `to_agent_id` of `"all"` broadcasts to every other agent currently
-/// registered in `WorkspaceState` (not just ones in this workspace --
-/// acceptable for Phase 1 since handles are looked up by id and a wake on an
-/// unrelated agent is a no-op cost, but should be scoped per-workspace if
-/// `WorkspaceState` ever needs to track workspace membership directly).
+/// 落库一条消息，并唤醒它指向的那个（或那些）Agent。`to_agent_id` 为
+/// `"all"` 时，会广播给当前注册在 `WorkspaceState` 里的每一个其他 Agent
+/// （不只是这个工作组里的——Phase 1 里这样可以接受，因为 handle 是按 id
+/// 查找的，唤醒一个不相关的 Agent 只是一次空操作的开销；但如果以后
+/// `WorkspaceState` 需要直接跟踪工作组归属关系，这里就该按工作组收窄范围了）。
 pub async fn send_workspace_message(
     app_handle: &AppHandle,
     workspace_id: &str,
@@ -677,9 +660,9 @@ async fn find_main_agent_id(app_handle: &AppHandle, workspace_id: &str) -> Optio
         .map(|a| a.id)
 }
 
-/// After a sub-agent's sleep request gets approved, check whether every
-/// sub-agent in the workspace is now `Sleeping`; if so, message the main
-/// agent (which also wakes it) asking it to review whether the task is done.
+/// 一个子 Agent 的休眠请求被批准之后，检查这个工作组里是不是所有子 Agent
+/// 都已经进入 `Sleeping` 状态；如果是，给主 Agent 发消息（同时也会唤醒它），
+/// 请它验收一下任务是否已经完成。
 async fn maybe_trigger_main_agent_review(app_handle: &AppHandle, workspace_id: &str) {
     let agents = list_agents_for_workspace(app_handle, workspace_id).await;
     let subs: Vec<_> = agents.iter().filter(|a| a.role == AgentRole::Sub).collect();
@@ -710,9 +693,8 @@ async fn maybe_trigger_main_agent_review(app_handle: &AppHandle, workspace_id: &
     .await;
 }
 
-/// Shared by the manual-creation command and an approved
-/// `workspace_create_agent` proposal: validates the agent-count safety cap,
-/// inserts the DB row, and starts the agent's background loop.
+/// 手动创建命令和一个被批准的 `workspace_create_agent` 提议共用这个函数：
+/// 校验 Agent 数量安全上限、插入数据库行、启动 Agent 的后台循环。
 async fn spawn_agent_internal(
     app_handle: &AppHandle,
     agent_handles: Arc<Mutex<HashMap<String, AgentHandle>>>,
@@ -791,14 +773,12 @@ async fn spawn_agent_internal(
     Ok(agent)
 }
 
-/// Deliberately synchronous (not `async fn`): it only ever does a quick,
-/// non-blocking `std::sync::Mutex` insert before firing off the loop task.
-/// Keeping it sync breaks an indirect recursive-async cycle that otherwise
-/// trips up rustc's Send checking -- `run_agent_loop` can reach back here
-/// through `process_agent_wake` -> `dispatch_tool_call` ->
-/// `propose_agent_creation` -> `spawn_agent_internal` when a main agent's
-/// proposal gets approved, and an `async fn` here would make that chain
-/// self-referential.
+/// 刻意写成同步函数（不是 `async fn`）：它做的事只是往 `std::sync::Mutex`
+/// 里做一次不阻塞的快速插入，然后把循环任务丢出去。保持同步是为了打破一个
+/// 间接的递归 async 环，否则会把 rustc 的 Send 检查绕晕——当一个主 Agent 的
+/// 提议被批准时，`run_agent_loop` 会经由 `process_agent_wake` ->
+/// `dispatch_tool_call` -> `propose_agent_creation` -> `spawn_agent_internal`
+/// 这条链路又绕回这里，如果这里也是 `async fn`，这条链就会自己引用自己。
 pub(crate) fn start_agent_loop(app_handle: AppHandle, agent_handles: Arc<Mutex<HashMap<String, AgentHandle>>>, agent: WorkspaceAgent) {
     let notify = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
@@ -816,9 +796,9 @@ pub(crate) fn start_agent_loop(app_handle: AppHandle, agent_handles: Arc<Mutex<H
     });
 }
 
-/// The agent's persistent background task: sleeps on `notify` until
-/// something addresses it, then processes everything that's accumulated and
-/// goes back to sleep. Runs until `cancel` fires (workspace/agent deleted).
+/// Agent 的常驻后台任务：挂在 `notify` 上睡眠，直到有东西找上它，处理完
+/// 这期间积累的一切之后再重新睡回去。一直运行到 `cancel` 触发为止（工作组
+/// 或 Agent 被删除）。
 async fn run_agent_loop(
     app_handle: AppHandle,
     workspace_id: String,
@@ -844,10 +824,9 @@ async fn run_agent_loop(
     log::info!("Workspace agent {} 循环已停止", agent_id);
 }
 
-/// One "wake": reload the agent's current config, replay its relevant
-/// message history, then keep alternating model-call <-> tool-execution
-/// (bounded by `MAX_ROUNDS_PER_WAKE`) until the model produces a plain-text
-/// reply instead of another tool call.
+/// 一次"唤醒"：重新加载 Agent 当前配置，回放跟它相关的消息历史，然后
+/// 在模型调用和工具执行之间反复交替（受 `MAX_ROUNDS_PER_WAKE` 约束），
+/// 直到模型给出一段纯文本回复而不是又一次工具调用为止。
 async fn process_agent_wake(
     app_handle: &AppHandle,
     workspace_id: &str,
@@ -907,8 +886,8 @@ async fn process_agent_wake(
         agent.name, agent_id, workspace.name, agent.provider, agent.model
     );
 
-    // Keep Meeting status visible while the agent speaks during a round-robin;
-    // only promote to Running when starting a normal (non-meeting) wake.
+    // Agent 在轮转发言时保持 Meeting 状态可见；只有开始一次普通（非会议）
+    // 唤醒时，才把状态提升为 Running。
     if agent.status != AgentStatus::Meeting {
         set_agent_status(app_handle, agent_id, AgentStatus::Running).await;
     }
@@ -937,8 +916,8 @@ async fn process_agent_wake(
     let system_prompt = build_agent_system_prompt(app_handle, &agent, &latest_query).await;
     let mut native_messages = build_native_messages(&agent.provider, &chat_history);
 
-    // Local models (e.g. Ollama) don't require an API key -- mirrors the
-    // same exception in llm.rs's request-level `get_api_key()`.
+    // 本地模型（比如 Ollama）不需要 API 密钥——跟 llm.rs 请求层
+    // `get_api_key()` 里的同一条例外规则保持一致。
     let api_key = if agent.provider == "local" {
         String::new()
     } else {
@@ -953,12 +932,21 @@ async fn process_agent_wake(
             })?
     };
 
+    // 无条件拉取：内置工具（server_id "builtin"，网络搜索/网页抓取）不在
+    // agent.mcp_server_ids 白名单可选范围内（UI 里压根不会把它列成一个可勾选
+    // 的服务器），但设计意图是它像聊天页一样「开箱即用、不需要额外配置」——
+    // 之前这里被 mcp_server_ids 是否为空整个短路掉，导致没勾选任何外部 MCP
+    // 服务器的 Agent（包括没配置过 MCP 的主 Agent）永远拿不到这两个内置工具。
     let mut tools = workspace_tool_defs(&agent);
-    if !agent.mcp_server_ids.is_empty() {
+    {
         let db_state = app_handle.state::<DbState>();
         match get_all_mcp_tools(db_state).await {
             Ok(all_tools) => {
-                tools.extend(all_tools.into_iter().filter(|t| agent.mcp_server_ids.contains(&t.server_id)));
+                tools.extend(
+                    all_tools
+                        .into_iter()
+                        .filter(|t| t.server_id == "builtin" || agent.mcp_server_ids.contains(&t.server_id)),
+                );
             }
             Err(e) => log::warn!("Workspace agent {} 获取 MCP 工具列表失败: {}", agent_id, e),
         }
@@ -991,9 +979,9 @@ async fn process_agent_wake(
             Some(&system_prompt),
             &native_messages,
             &tools,
-            // None -- let each provider apply its own generous default
-            // (32000 for Anthropic, model ceiling for the rest) instead of
-            // the old hardcoded 4096 that silently truncated long replies.
+            // 传 None——让各个 provider 应用自己那套宽裕的默认值（Anthropic
+            // 是 32000，其余是各模型自己的上限），而不是沿用旧代码里硬编码的
+            // 4096，那会悄悄截断长回复。
             None,
             agent.enable_thinking,
         )
@@ -1058,8 +1046,8 @@ async fn process_agent_wake(
         );
     }
 
-    // Don't stomp over Sleeping (set by workspace_sleep) or Meeting (managed
-    // by the meeting coordinator, which resets participants to Idle at the end).
+    // 别覆盖掉 Sleeping（由 workspace_sleep 设置）或 Meeting（由会议协调器
+    // 管理，会议结束时协调器自己会把与会者状态复位成 Idle）。
     let blocking = matches!(
         load_agent(app_handle, agent_id).await,
         Ok(Some(WorkspaceAgent { status: AgentStatus::Sleeping | AgentStatus::Meeting, .. }))
@@ -1070,11 +1058,10 @@ async fn process_agent_wake(
     Ok(())
 }
 
-/// Recent messages relevant to this agent, converted to the flat
-/// `ChatMessage` shape `build_native_messages` expects. Incoming messages
-/// are prefixed with the sender's display name so a multi-party
-/// conversation stays legible to the model; the agent's own past messages
-/// are left as-is since it already knows it said them.
+/// 跟这个 Agent 相关的近期消息，转换成 `build_native_messages` 期望的扁平
+/// `ChatMessage` 结构。发给它的消息会加上发送者的显示名字前缀，这样多方
+/// 对话对模型来说依然可读；Agent 自己发过的历史消息则原样保留，因为它
+/// 本来就知道那是自己说的话。
 async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &WorkspaceAgent) -> Vec<ChatMessage> {
     let db_state = app_handle.state::<DbState>();
     let (messages, agents) = {
@@ -1085,9 +1072,9 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
         };
         let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, MAX_HISTORY_MESSAGES)
             .unwrap_or_default();
-        // Include soft-deleted agents here -- a deleted agent's past messages
-        // are still in this history window and need their sender name
-        // resolved, not shown as a raw id to the model.
+        // 这里也要包含软删除的 Agent——一个已删除 Agent 过去发的消息仍然
+        // 落在这个历史窗口里，需要能正确解析出发送者名字，而不是给模型看
+        // 一串原始 id。
         let agents = db::list_agents_including_deleted(&conn, workspace_id).unwrap_or_default();
         (messages, agents)
     };
@@ -1124,11 +1111,10 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
         .collect()
 }
 
-/// Merges the agent's own system prompt with its active Skills' instructions
-/// and, if it has knowledge bases configured, RAG context retrieved for the
-/// latest incoming message -- reusing `search_knowledge_base`/`build_context`
-/// exactly as the regular chat mode does, rather than re-implementing
-/// retrieval here.
+/// 把 Agent 自己的系统提示词，跟它启用的 Skill 的说明合并；如果它配置了
+/// 知识库，还会为最新收到的消息检索 RAG 上下文并合并进来——这里直接复用
+/// 普通聊天模式的 `search_knowledge_base`/`build_context`，而不是在这里
+/// 重新实现一套检索逻辑。
 async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgent, latest_query: &str) -> String {
     let mut sections = vec![agent.system_prompt.clone()];
 
@@ -1211,11 +1197,11 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
     sections.join("\n\n---\n\n")
 }
 
-/// The always-available Workspace tools. `workspace_create_agent`/
-/// `workspace_approve_sleep`/`workspace_reject_sleep` are main-agent-only;
-/// `workspace_sleep` is sub-agent-only (the main agent is the one doing the
-/// overseeing, it doesn't make sense for it to sleep); `workspace_message`/
-/// `workspace_agent_list`/`workspace_asks` are available to everyone.
+/// 始终可用的 Workspace 工具集。`workspace_create_agent`/
+/// `workspace_approve_sleep`/`workspace_reject_sleep` 只有主 Agent 能用；
+/// `workspace_sleep` 只有子 Agent 能用（主 Agent 是负责监督全局的那个，让
+/// 它去休眠没有意义）；`workspace_message`/`workspace_agent_list`/
+/// `workspace_asks` 所有人都能用。
 fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
     let mut tools = vec![
         MCPTool {
@@ -1390,9 +1376,9 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
     tools
 }
 
-/// Executes one tool call the model asked for, always returning a JSON
-/// value (errors become `{"error": ...}` rather than propagating) since this
-/// result is fed straight back to the model as the tool's output.
+/// 执行模型发起的一次工具调用，始终返回一个 JSON 值（出错时变成
+/// `{"error": ...}` 而不是往外传播异常），因为这个结果会直接原样喂回给
+/// 模型，作为这次工具调用的输出。
 async fn dispatch_tool_call(
     app_handle: &AppHandle,
     workspace: &Workspace,
@@ -1765,17 +1751,17 @@ async fn dispatch_tool_call(
         }
         _ => {
             // 权限校验：只允许调用这个 Agent 的 mcp_server_ids 白名单里的服务器
-            // 暴露出来的工具。以前这里直接传 server_id=None，call_mcp_tool 会
-            // 在全部已启用服务器里搜同名工具再执行——只要提示注入诱导模型说出
-            // 一个未授权服务器的工具名就能绕过 Agent 的工具授权范围。
-            if agent.mcp_server_ids.is_empty() {
-                return serde_json::json!({ "error": format!("未知工具 {}，且该 Agent 未被授权使用任何 MCP 服务器", call.name) });
-            }
+            // 暴露出来的工具，外加 server_id "builtin" 的内置工具（网络搜索/
+            // 网页抓取）——它不占用 mcp_server_ids 名额，因为不是外部服务器，
+            // 设计上和聊天页一样开箱即用，不需要显式授权。以前这里直接传
+            // server_id=None，call_mcp_tool 会在全部已启用服务器里搜同名工具
+            // 再执行——只要提示注入诱导模型说出一个未授权服务器的工具名就能
+            // 绕过 Agent 的工具授权范围，所以非内置工具仍必须命中白名单。
             let db_state = app_handle.state::<DbState>();
             let owning_tool = match get_all_mcp_tools(db_state.clone()).await {
                 Ok(all_tools) => all_tools
                     .into_iter()
-                    .find(|t| t.name == call.name && agent.mcp_server_ids.contains(&t.server_id)),
+                    .find(|t| t.name == call.name && (t.server_id == "builtin" || agent.mcp_server_ids.contains(&t.server_id))),
                 Err(e) => {
                     return serde_json::json!({ "error": format!("获取 MCP 工具列表失败: {}", e) });
                 }
@@ -1802,13 +1788,12 @@ async fn dispatch_tool_call(
     }
 }
 
-/// Registers a pending proposal, notifies the frontend, and blocks (only
-/// this one tool call's processing -- not the rest of the app) until the
-/// user approves/rejects it via `workspace_resolve_proposal`, 10 minutes
-/// pass with no response, or the workspace/agent is deleted out from under
-/// it (`cancel`) -- without racing on `cancel` this wait would otherwise
-/// hold the task open for up to the full 10-minute timeout after deletion,
-/// still writing log entries into a workspace that no longer exists.
+/// 注册一条待处理的提议，通知前端，然后阻塞等待（只阻塞这一次工具调用的
+/// 处理流程，不影响应用其他部分），直到用户通过 `workspace_resolve_proposal`
+/// 批准/拒绝、10 分钟无响应超时、或者工作组/Agent 在此期间被删除
+/// （`cancel` 触发）。如果不跟 `cancel` 做 race，这个等待原本会一直占着这个
+/// 任务，最长撑满整整 10 分钟超时，删除之后还在往一个已经不存在的工作组
+/// 里写日志。
 async fn propose_agent_creation(
     app_handle: &AppHandle,
     pending: &PendingProposals,
@@ -1889,12 +1874,11 @@ async fn propose_agent_creation(
     response
 }
 
-/// Registers a pending sleep request, tells the main agent about it (which
-/// also wakes it), and blocks until either the main agent calls
-/// `workspace_approve_sleep`/`workspace_reject_sleep`, the user overrides
-/// via `workspace_resolve_sleep_request`, 10 minutes pass with no response
-/// (staying awake is the safer default than silently letting an agent go
-/// quiet), or `cancel` fires because the workspace/agent was deleted.
+/// 注册一条待处理的休眠请求，告知主 Agent（同时唤醒它），然后阻塞等待，
+/// 直到主 Agent 调用 `workspace_approve_sleep`/`workspace_reject_sleep`、
+/// 用户通过 `workspace_resolve_sleep_request` 越权处理、10 分钟无响应超时
+/// （保持清醒是比悄无声息地让 Agent 沉默下去更安全的默认行为），或者
+/// `cancel` 因工作组/Agent 被删除而触发。
 async fn request_sleep_approval(
     app_handle: &AppHandle,
     workspace_id: &str,
@@ -1969,10 +1953,9 @@ async fn request_sleep_approval(
     approved
 }
 
-/// Registers a pending question, notifies the frontend to pop up an answer
-/// card, and blocks until the user answers via `workspace_resolve_question`,
-/// 10 minutes pass with no response, or `cancel` fires because the
-/// workspace/agent was deleted.
+/// 注册一条待处理的问题，通知前端弹出答题卡片，然后阻塞等待，直到用户
+/// 通过 `workspace_resolve_question` 回答、10 分钟无响应超时、或者
+/// `cancel` 因工作组/Agent 被删除而触发。
 async fn request_user_answer(
     app_handle: &AppHandle,
     workspace_id: &str,
@@ -2030,13 +2013,11 @@ async fn request_user_answer(
     answer
 }
 
-/// Keyword heuristic for "this MCP tool can do real damage if misused" --
-/// checked against the tool's name and description (case-insensitive,
-/// substring match). Deliberately covers destructive/mutating/execution
-/// verbs, not read-only ones (list/get/search/query/read/fetch) -- those
-/// stay auto-approved so the approval gate doesn't turn into "click yes on
-/// everything" noise that nobody actually reads. English and Chinese verbs
-/// both included since MCP tool descriptions can be in either.
+/// "这个 MCP 工具一旦用错真的会造成实质损害"的关键词启发式判断——对工具的
+/// 名字和描述做匹配（不区分大小写，子串匹配）。刻意只覆盖破坏性/修改性/
+/// 执行类动词，不包括只读的（list/get/search/query/read/fetch 之类）——
+/// 那些继续自动放行，不然审批门就会变成一堆没人真的会看、只会无脑点"同意"
+/// 的噪音。中英文动词都收录了，因为 MCP 工具描述两种语言都可能出现。
 const DANGEROUS_TOOL_KEYWORDS: &[&str] = &[
     "delete", "remove", "drop", "truncate", "wipe", "format", "destroy", "purge",
     "kill", "terminate", "uninstall", "shutdown", "reboot",
@@ -2051,12 +2032,11 @@ fn is_dangerous_tool(name: &str, description: &str) -> bool {
     DANGEROUS_TOOL_KEYWORDS.iter().any(|kw| haystack.contains(kw))
 }
 
-/// Registers a pending MCP tool-call approval, notifies the frontend, and
-/// blocks until the user approves/rejects it, 10 minutes pass with no
-/// response, or `cancel` fires. Unlike the sleep-approval default (stay
-/// awake is safe), this defaults to **deny** on timeout/cancel -- an
-/// unactioned approval for a real tool call (filesystem/shell-capable MCP
-/// servers included) should never silently proceed.
+/// 注册一条待处理的 MCP 工具调用审批，通知前端，然后阻塞等待，直到用户
+/// 批准/拒绝、10 分钟无响应超时、或者 `cancel` 触发。跟休眠审批的默认行为
+/// （保持清醒是安全的）不同，这里超时/取消时默认是**拒绝**——一次真实的
+/// 工具调用（可能涉及有文件系统/shell 能力的 MCP 服务器）如果没人处理，
+/// 绝不能悄悄放行。
 async fn request_tool_approval(
     app_handle: &AppHandle,
     workspace_id: &str,

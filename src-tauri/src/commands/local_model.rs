@@ -2,11 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Local model management module
+//! 本地模型管理模块
 //!
-//! Provides commands for managing locally deployed models via Ollama API.
-//! Supports multiple model sources (Ollama official, HuggingFace, ModelScope)
-//! for downloading/pulling models.
+//! 提供通过 Ollama API 管理本地部署模型的命令。
+//! 支持从多个模型源（Ollama 官方、HuggingFace、ModelScope）
+//! 下载/拉取模型。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 use once_cell::sync::Lazy;
 
-/// Prevent the console window that Windows would otherwise briefly flash
-/// when spawning a console subprocess (e.g. `ollama.exe`) from this GUI app.
+/// 防止从这个 GUI 应用启动控制台子进程（例如 `ollama.exe`）时，
+/// Windows 原本会一闪而过弹出的控制台窗口。
 pub(crate) fn hide_console_window(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
     #[cfg(target_os = "windows")]
     {
@@ -27,26 +27,26 @@ pub(crate) fn hide_console_window(cmd: &mut tokio::process::Command) -> &mut tok
     cmd
 }
 
-// ============ Types ============
+// ============ 类型定义 ============
 
-/// Information about a locally available model from Ollama
+/// Ollama 提供的本地可用模型信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelInfo {
     pub name: String,
-    /// Model display name (e.g. "llama3:latest")
+    /// 模型显示名称（如 "llama3:latest"）
     pub model: String,
-    /// Modified timestamp
+    /// 修改时间戳
     pub modified_at: String,
-    /// Model size in bytes
+    /// 模型大小（字节）
     pub size: u64,
-    /// Model digest hash
+    /// 模型摘要哈希
     pub digest: String,
-    /// Model details (family, parameter size, quantization level)
+    /// 模型详情（family、参数量、量化等级）
     pub details: Option<ModelDetails>,
 }
 
-/// Detailed model information
+/// 模型详细信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDetails {
@@ -58,7 +58,7 @@ pub struct ModelDetails {
     pub quantization_level: Option<String>,
 }
 
-/// Ollama API response for listing models
+/// Ollama 列出模型接口的响应
 #[derive(Debug, Deserialize)]
 struct OllamaListResponse {
     models: Vec<OllamaModelEntry>,
@@ -74,11 +74,11 @@ struct OllamaModelEntry {
     details: Option<ModelDetails>,
 }
 
-/// Ollama API response for model show
+/// Ollama 模型详情（show）接口的响应
 #[derive(Debug, Deserialize)]
 struct OllamaShowResponse {
     details: Option<ModelDetails>,
-    // Other fields we don't need
+    // 其余我们用不到的字段
     #[allow(dead_code)]
     license: Option<String>,
     #[allow(dead_code)]
@@ -89,21 +89,21 @@ struct OllamaShowResponse {
     template: Option<String>,
 }
 
-/// Model source configuration
+/// 模型源配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSource {
-    /// Unique identifier for the source
+    /// 模型源的唯一标识
     pub id: String,
-    /// Display name
+    /// 显示名称
     pub name: String,
-    /// Base URL for the model registry
+    /// 模型仓库的 base URL
     pub base_url: String,
-    /// Description
+    /// 描述
     pub description: String,
 }
 
-/// Download progress event emitted to frontend
+/// 下发给前端的下载进度事件
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
@@ -114,38 +114,38 @@ pub struct DownloadProgress {
     pub completed: Option<u64>,
 }
 
-/// Pull request parameters
+/// 拉取模型请求的参数
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullModelRequest {
-    /// Model name (e.g. "llama3:latest" or "huggingface/user/model:tag")
+    /// 模型名称（如 "llama3:latest" 或 "huggingface/user/model:tag"）
     pub model_name: String,
-    /// Source ID to pull from (optional, uses configured default)
+    /// 从哪个源拉取（可选，不填则用已配置的默认源）
     pub source_id: Option<String>,
-    /// Whether to use insecure connection
+    /// 是否使用非安全连接
     pub insecure: Option<bool>,
 }
 
-/// Delete request parameters
+/// 删除请求的参数
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteModelRequest {
-    /// Model name to delete
+    /// 要删除的模型名称
     pub model_name: String,
 }
 
-/// Configuration for local model service
+/// 本地模型服务的配置
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelConfig {
-    /// Ollama service base URL
+    /// Ollama 服务的 base URL
     pub ollama_base_url: String,
-    /// Default model source ID
+    /// 默认模型源 ID
     pub default_source_id: String,
 }
 
-/// Predefined model sources
+/// 预定义的模型源
 pub fn get_model_sources() -> Vec<ModelSource> {
     vec![
         ModelSource {
@@ -169,12 +169,12 @@ pub fn get_model_sources() -> Vec<ModelSource> {
     ]
 }
 
-// ============ Helper functions ============
+// ============ 辅助函数 ============
 
-/// Create HTTP client for Ollama API calls. This always targets the user's
-/// own Ollama server (local or LAN), never a remote SaaS endpoint, so it's
-/// exempted from the system proxy -- otherwise a global-mode proxy set up
-/// for reaching overseas providers would also detour this local traffic.
+/// 为 Ollama API 调用创建 HTTP 客户端。这个客户端访问的永远是用户自己的
+/// Ollama 服务器（本机或局域网），绝不是远程 SaaS 端点，所以这里排除了
+/// 系统代理 -- 否则为了访问境外服务商而开的全局代理模式，也会把这部分
+/// 本地流量一并绕过去。
 fn create_ollama_client(_base_url: &str) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -194,15 +194,15 @@ fn create_download_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// Build Ollama API URL from base URL and endpoint
+/// 根据 base URL 和端点拼出 Ollama API 的完整 URL
 fn build_ollama_url(base_url: &str, endpoint: &str) -> String {
     let base = base_url.trim_end_matches('/');
     format!("{}{}", base, endpoint)
 }
 
-// ============ Tauri Commands ============
+// ============ Tauri 命令 ============
 
-/// Check if Ollama service is running and accessible
+/// 检查 Ollama 服务是否正在运行且可访问
 #[tauri::command]
 pub async fn check_ollama_status(
     ollama_base_url: String,
@@ -221,7 +221,7 @@ pub async fn check_ollama_status(
     }
 }
 
-/// List all locally available models from Ollama
+/// 列出 Ollama 上所有本地可用的模型
 #[tauri::command]
 pub async fn list_local_models(
     ollama_base_url: String,
@@ -262,7 +262,7 @@ pub async fn list_local_models(
     Ok(models)
 }
 
-/// Get detailed information about a specific local model
+/// 获取指定本地模型的详细信息
 #[tauri::command]
 pub async fn show_local_model(
     ollama_base_url: String,
@@ -299,8 +299,8 @@ pub async fn show_local_model(
     })
 }
 
-/// Pull (download) a model from a specified source
-/// Emits download progress events to the frontend
+/// 从指定源拉取（下载）模型
+/// 会向前端下发下载进度事件
 #[tauri::command]
 pub async fn pull_local_model(
     request: PullModelRequest,
@@ -312,10 +312,10 @@ pub async fn pull_local_model(
 
     let url = build_ollama_url(&ollama_base_url, "/api/pull");
 
-    // Build the model name with source prefix if needed
+    // 按需给模型名加上来源前缀
     let model_ref = match request.source_id.as_deref() {
         Some("huggingface") => {
-            // HuggingFace format: hf.co/user/model:tag or hf.co/user/model
+            // HuggingFace 格式：hf.co/user/model:tag 或 hf.co/user/model
             if !request.model_name.starts_with("hf.co/") {
                 format!("hf.co/{}", request.model_name)
             } else {
@@ -323,12 +323,12 @@ pub async fn pull_local_model(
             }
         }
         Some("modelscope") => {
-            // ModelScope format: ms://user/model or just the model name
-            // Ollama supports pulling from ModelScope via the model name
+            // ModelScope 格式：ms://user/model，或者直接是模型名
+            // Ollama 支持直接用模型名从 ModelScope 拉取
             request.model_name.clone()
         }
         _ => {
-            // Default: Ollama official registry
+            // 默认：Ollama 官方仓库
             request.model_name.clone()
         }
     };
@@ -356,7 +356,7 @@ pub async fn pull_local_model(
         return Err(format!("Pull failed: {}", error_text));
     }
 
-    // Process streaming response for progress updates
+    // 处理流式响应，持续更新进度
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -395,7 +395,7 @@ pub async fn pull_local_model(
     Ok(())
 }
 
-/// Delete a local model from Ollama
+/// 从 Ollama 删除一个本地模型
 #[tauri::command]
 pub async fn delete_local_model(
     request: DeleteModelRequest,
@@ -422,13 +422,13 @@ pub async fn delete_local_model(
     Ok(())
 }
 
-/// Get the list of available model sources
+/// 获取可用模型源列表
 #[tauri::command]
 pub async fn get_model_sources_cmd() -> Result<Vec<ModelSource>, String> {
     Ok(get_model_sources())
 }
 
-/// Get Ollama version info
+/// 获取 Ollama 版本信息
 #[tauri::command]
 pub async fn get_ollama_version(
     ollama_base_url: String,
@@ -456,64 +456,64 @@ pub async fn get_ollama_version(
     Ok(body["version"].as_str().unwrap_or("unknown").to_string())
 }
 
-// ============ Ollama Installation & Service Management ============
+// ============ Ollama 安装与服务管理 ============
 
-/// Global state for the managed Ollama service process
+/// 被托管的 Ollama 服务进程的全局状态
 static OLLAMA_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 
-/// Ollama installation detection result
+/// Ollama 安装检测结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaInstallInfo {
-    /// Whether Ollama is installed on the system
+    /// 系统上是否已安装 Ollama
     pub installed: bool,
-    /// Path to the Ollama executable (if found)
+    /// Ollama 可执行文件路径（如果找到）
     pub install_path: Option<String>,
-    /// Ollama version (if detectable)
+    /// Ollama 版本（如果能检测到）
     pub version: Option<String>,
 }
 
-/// Ollama service status
+/// Ollama 服务状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaServiceStatus {
-    /// Whether the Ollama service is currently running
+    /// Ollama 服务当前是否在运行
     pub running: bool,
-    /// Whether the service was started by our application
+    /// 该服务是否是本应用启动的
     pub managed_by_app: bool,
 }
 
-/// Model search result from Ollama library
+/// 来自 Ollama 库的模型搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSearchResult {
-    /// Model name (e.g. "llama3.2")
+    /// 模型名称（如 "llama3.2"）
     pub name: String,
-    /// Display description
+    /// 展示用的描述
     pub description: String,
-    /// Available tags (e.g. ["1b", "3b", "7b", "70b"])
+    /// 可用标签（如 ["1b", "3b", "7b", "70b"]）
     pub tags: Vec<String>,
-    /// Model size info string
+    /// 模型体积信息字符串
     pub size_info: String,
 }
 
-/// Ollama installer download progress event
+/// Ollama 安装包下载进度事件
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaInstallProgress {
-    /// Current stage: "downloading" | "installing" | "completed" | "error"
+    /// 当前阶段："downloading" | "installing" | "completed" | "error"
     pub stage: String,
-    /// Download progress percentage (0-100)
+    /// 下载进度百分比 (0-100)
     pub progress_percent: u64,
-    /// Downloaded bytes
+    /// 已下载字节数
     pub downloaded_bytes: u64,
-    /// Total bytes (if known)
+    /// 总字节数（如果已知）
     pub total_bytes: Option<u64>,
-    /// Status message
+    /// 状态消息
     pub message: String,
 }
 
-/// Ollama download mirror sources
+/// Ollama 下载镜像源
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaDownloadMirror {
@@ -523,7 +523,7 @@ pub struct OllamaDownloadMirror {
     pub description: String,
 }
 
-/// Get the platform-specific Ollama download filename
+/// 获取当前平台对应的 Ollama 安装包文件名
 fn get_ollama_download_filename() -> (&'static str, &'static str) {
     if cfg!(target_os = "windows") {
         ("OllamaSetup.exe", "OllamaSetup.exe")
@@ -534,8 +534,8 @@ fn get_ollama_download_filename() -> (&'static str, &'static str) {
     }
 }
 
-/// Get available Ollama download mirrors
-/// Returns platform-appropriate download URLs
+/// 获取可用的 Ollama 下载镜像源
+/// 返回适配当前平台的下载 URL
 pub fn get_ollama_download_mirrors() -> Vec<OllamaDownloadMirror> {
     let (filename, _) = get_ollama_download_filename();
     let github_base = format!(
@@ -564,7 +564,7 @@ pub fn get_ollama_download_mirrors() -> Vec<OllamaDownloadMirror> {
         description: "GitHub 加速镜像".to_string(),
     });
 
-    // Linux: add official install script as the recommended option
+    // Linux：把官方安装脚本加为推荐选项
     if cfg!(target_os = "linux") {
         mirrors.insert(0, OllamaDownloadMirror {
             id: "install_script".to_string(),
@@ -577,34 +577,34 @@ pub fn get_ollama_download_mirrors() -> Vec<OllamaDownloadMirror> {
     mirrors
 }
 
-/// Parse Ollama version from `ollama --version` output
-/// Handles formats like "ollama version is 0.5.7" or just "0.5.7"
+/// 从 `ollama --version` 的输出中解析出版本号
+/// 兼容 "ollama version is 0.5.7" 这类格式，或者直接就是 "0.5.7"
 fn parse_ollama_version(output: &str) -> String {
     let trimmed = output.trim();
-    // Try to extract version number from common patterns
+    // 尝试从常见格式中提取版本号
     // "ollama version is 0.5.7" -> "0.5.7"
     if let Some(version) = trimmed.rsplit(' ').next() {
-        // Check if it looks like a version number (starts with digit)
+        // 检查它是否像个版本号（以数字开头）
         if version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             return version.to_string();
         }
     }
-    // Fallback: return the whole trimmed output
+    // 兜底：返回整个 trim 过的输出
     trimmed.to_string()
 }
 
-/// Detect Ollama installation on the system
-/// Searches PATH and common install locations
+/// 检测系统上是否安装了 Ollama
+/// 会搜索 PATH 以及常见的安装位置
 #[tauri::command]
 pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
-    // Common Ollama install paths on Windows
+    // Windows 上常见的 Ollama 安装路径
     let search_paths: Vec<PathBuf> = if cfg!(target_os = "windows") {
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
         let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
         vec![
             PathBuf::from(format!("{}\\Programs\\Ollama\\ollama.exe", local_app_data)),
             PathBuf::from(format!("{}\\Ollama\\ollama.exe", program_files)),
-            PathBuf::from("ollama.exe".to_string()), // Check PATH
+            PathBuf::from("ollama.exe".to_string()), // 检查 PATH
         ]
     } else if cfg!(target_os = "macos") {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -625,7 +625,7 @@ pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
     };
 
     for path in &search_paths {
-        // For PATH-based lookup (just "ollama" or "ollama.exe"), use `which`
+        // 对于基于 PATH 的查找（只有 "ollama" 或 "ollama.exe"），用 `which` 的方式来查
         if path.parent().is_none() || path.as_os_str() == "ollama" || path.as_os_str() == "ollama.exe" {
             let mut cmd = tokio::process::Command::new("ollama");
             cmd.arg("--version");
@@ -643,9 +643,9 @@ pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
             continue;
         }
 
-        // For absolute paths, check if file exists
+        // 对于绝对路径，检查文件是否存在
         if path.exists() {
-            // Try to get version
+            // 尝试获取版本号
             let mut cmd = tokio::process::Command::new(path);
             cmd.arg("--version");
             hide_console_window(&mut cmd);
@@ -671,13 +671,13 @@ pub async fn detect_ollama_installation() -> Result<OllamaInstallInfo, String> {
     })
 }
 
-/// Start Ollama service in background
-/// If Ollama is already running, returns success immediately
+/// 在后台启动 Ollama 服务
+/// 如果 Ollama 已经在运行，直接返回成功
 #[tauri::command]
 pub async fn start_ollama_service(
     ollama_base_url: String,
 ) -> Result<OllamaServiceStatus, String> {
-    // First check if already running
+    // 先检查是否已经在运行
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
@@ -695,7 +695,7 @@ pub async fn start_ollama_service(
         }
     }
 
-    // Find ollama executable
+    // 查找 ollama 可执行文件
     let install_info = detect_ollama_installation().await?;
     if !install_info.installed {
         return Err("Ollama is not installed".to_string());
@@ -703,7 +703,7 @@ pub async fn start_ollama_service(
 
     let ollama_path = install_info.install_path.ok_or("Cannot find Ollama executable")?;
 
-    // Start ollama serve in background
+    // 在后台启动 ollama serve
     let mut cmd = tokio::process::Command::new(&ollama_path);
     cmd.arg("serve")
         .stdout(std::process::Stdio::null())
@@ -713,7 +713,7 @@ pub async fn start_ollama_service(
         .spawn()
         .map_err(|e| format!("Failed to start Ollama service: {}", e))?;
 
-    // Store the child process for later management
+    // 保存子进程句柄，供后续管理使用
     {
         let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
         *proc = Some(child);
@@ -721,7 +721,7 @@ pub async fn start_ollama_service(
 
     log::info!("Ollama service started, waiting for it to be ready...");
 
-    // Wait for service to become available (with timeout)
+    // 等待服务变为可用（带超时）
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
@@ -748,7 +748,7 @@ pub async fn start_ollama_service(
         retries += 1;
     }
 
-    // Service didn't start in time, but it might still be starting
+    // 服务没有在规定时间内起来，但可能仍在启动中
     log::warn!("Ollama service didn't respond within timeout, but process was started");
     Ok(OllamaServiceStatus {
         running: false,
@@ -756,7 +756,7 @@ pub async fn start_ollama_service(
     })
 }
 
-/// Stop the Ollama service process managed by our application
+/// 停止由本应用托管的 Ollama 服务进程
 #[tauri::command]
 pub async fn stop_ollama_service() -> Result<(), String> {
     let child = {
@@ -772,26 +772,26 @@ pub async fn stop_ollama_service() -> Result<(), String> {
     Ok(())
 }
 
-/// Get current Ollama service status
+/// 获取当前 Ollama 服务状态
 #[tauri::command]
 pub async fn get_ollama_service_status(
     ollama_base_url: String,
 ) -> Result<OllamaServiceStatus, String> {
-    // Check if our managed process is still alive
+    // 检查我们托管的进程是否还活着
     let managed_by_app = {
         let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
         match proc.as_mut() {
             Some(child) => {
-                // Try to check if the process has exited
+                // 尝试检查进程是否已退出
                 match child.try_wait() {
                     Ok(Some(_status)) => {
-                        // Process has exited, clean up
+                        // 进程已退出，清理掉
                         *proc = None;
                         false
                     }
-                    Ok(None) => true, // Still running
+                    Ok(None) => true, // 仍在运行
                     Err(_) => {
-                        // Can't check, assume still running
+                        // 无法检查，假定仍在运行
                         true
                     }
                 }
@@ -800,7 +800,7 @@ pub async fn get_ollama_service_status(
         }
     };
 
-    // Check if service is actually responding
+    // 检查服务是否真的有响应
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
@@ -820,7 +820,7 @@ pub async fn get_ollama_service_status(
     })
 }
 
-/// Download Ollama installer with progress events
+/// 下载 Ollama 安装包，同时下发进度事件
 #[tauri::command]
 pub async fn download_ollama(
     mirror_id: Option<String>,
@@ -834,11 +834,11 @@ pub async fn download_ollama(
 
     log::info!("Downloading Ollama from: {}", download_url);
 
-    // Determine save path based on platform
+    // 根据平台确定保存路径
     let temp_dir = std::env::temp_dir();
     let (_, raw_filename) = get_ollama_download_filename();
 
-    // For Linux install script mirror, save as .sh instead
+    // 如果是 Linux 的安装脚本镜像，改存为 .sh
     let actual_filename = if download_url.ends_with("/install.sh") {
         "ollama_install.sh"
     } else {
@@ -891,7 +891,7 @@ pub async fn download_ollama(
             .map(|total| (downloaded * 100) / total)
             .unwrap_or(0);
 
-        // Throttle progress events to avoid flooding
+        // 对进度事件做节流，避免刷屏
         if last_progress_emit.elapsed() >= Duration::from_millis(200) {
             let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
                 stage: "downloading".to_string(),
@@ -919,8 +919,8 @@ pub async fn download_ollama(
     Ok(installer_path.to_string_lossy().to_string())
 }
 
-/// Run the Ollama installer
-/// Platform-specific installation logic
+/// 运行 Ollama 安装程序
+/// 按平台执行对应的安装逻辑
 #[tauri::command]
 pub async fn install_ollama(
     installer_path: String,
@@ -975,7 +975,7 @@ pub async fn install_ollama(
     }
 }
 
-/// Windows: run NSIS installer with /S flag for silent install
+/// Windows：带 /S 参数静默运行 NSIS 安装程序
 async fn install_ollama_windows(installer_path: &PathBuf) -> Result<(), String> {
     let output = tokio::process::Command::new(installer_path)
         .arg("/S")
@@ -991,7 +991,7 @@ async fn install_ollama_windows(installer_path: &PathBuf) -> Result<(), String> 
     Ok(())
 }
 
-/// macOS: extract zip and copy Ollama.app to /Applications
+/// macOS：解压 zip 并把 Ollama.app 拷贝到 /Applications
 async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
     let extension = installer_path
         .extension()
@@ -1011,7 +1011,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to create extract dir: {}", e))?;
 
-    // Use ditto to extract (macOS native, preserves resource forks)
+    // 用 ditto 解压（macOS 原生工具，能保留 resource fork）
     let output = tokio::process::Command::new("ditto")
         .arg("-x")
         .arg("-k")
@@ -1026,10 +1026,10 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         return Err(format!("Extraction failed: {}", stderr));
     }
 
-    // Find Ollama.app in the extracted directory
+    // 在解压出来的目录里找 Ollama.app
     let app_path = extract_dir.join("Ollama.app");
     let app_path = if !app_path.exists() {
-        // Search for it
+        // 搜索它
         let find_output = tokio::process::Command::new("find")
             .arg(&extract_dir)
             .arg("-name")
@@ -1049,7 +1049,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         app_path
     };
 
-    // Copy to /Applications
+    // 拷贝到 /Applications
     let dest = PathBuf::from("/Applications/Ollama.app");
     if dest.exists() {
         let _ = tokio::process::Command::new("rm")
@@ -1090,10 +1090,10 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         }
     }
 
-    // Clean up extraction directory
+    // 清理解压目录
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
-    // Ensure the ollama CLI symlink exists
+    // 确保 ollama CLI 的软链接存在
     let ollama_symlink = PathBuf::from("/usr/local/bin/ollama");
     if !ollama_symlink.exists() {
         let cli_path = dest.join("Contents/Resources/ollama");
@@ -1110,7 +1110,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// Linux: use install script or extract tgz to /usr/local/bin
+/// Linux：使用安装脚本，或者把 tgz 解压到 /usr/local/bin
 async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
     let filename = installer_path
         .file_name()
@@ -1118,7 +1118,7 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
         .unwrap_or_default();
 
     if filename.ends_with(".sh") {
-        // Run the official install script
+        // 运行官方安装脚本
         let output = tokio::process::Command::new("sh")
             .arg(installer_path)
             .output()
@@ -1130,7 +1130,7 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
             return Err(format!("Install script failed: {}", stderr));
         }
     } else if filename.ends_with(".tgz") || filename.ends_with(".tar.gz") {
-        // Extract the binary to /usr/local/bin
+        // 把可执行文件解压到 /usr/local/bin
         let output = tokio::process::Command::new("tar")
             .arg("-xzf")
             .arg(installer_path)
@@ -1169,8 +1169,8 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// Search for models in the Ollama library
-/// Uses the Ollama website search to find models matching the query
+/// 在 Ollama 库中搜索模型
+/// 使用 Ollama 网站的搜索功能来找匹配关键词的模型
 #[tauri::command]
 pub async fn search_ollama_models(
     query: String,
@@ -1187,7 +1187,7 @@ pub async fn search_ollama_models(
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?
     );
 
-    // Fetch the Ollama library search page
+    // 拉取 Ollama 库的搜索页面
     let search_url = format!("https://ollama.com/library?q={}", urlencoding::encode(&query));
 
     let response = client.get(&search_url)
@@ -1202,7 +1202,7 @@ pub async fn search_ollama_models(
 
     let html = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
 
-    // Collect unique model series names from library links
+    // 从库链接里收集不重复的模型系列名称
     let mut series_names: Vec<String> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
@@ -1229,7 +1229,7 @@ pub async fn search_ollama_models(
         }
     }
 
-    // For each model series, concurrently fetch its tag list
+    // 对每个模型系列，并发拉取它的标签列表
     let html_ref = std::sync::Arc::new(html);
     let tasks: Vec<_> = series_names.into_iter().map(|name| {
         let client = client.clone();
@@ -1256,8 +1256,8 @@ pub async fn search_ollama_models(
     Ok(results)
 }
 
-/// Fetch the available tags for a model from its Ollama library page.
-/// Returns a list of tag names such as ["1b", "3b", "7b", "70b"].
+/// 从模型在 Ollama 库中的页面获取可用标签。
+/// 返回类似 ["1b", "3b", "7b", "70b"] 这样的标签名列表。
 async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<String> {
     let url = format!("https://ollama.com/library/{}/tags", model_name);
     let Ok(response) = client.get(&url)
@@ -1271,8 +1271,8 @@ async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<Str
 
     let Ok(html) = response.text().await else { return vec![]; };
 
-    // The tags page lists hrefs like /library/{model}:{tag}
-    // We extract only the tag part (after the colon).
+    // 标签页面列出的 href 形如 /library/{model}:{tag}
+    // 这里只提取冒号后面的标签部分。
     let prefix = format!("/library/{}:", model_name);
     let mut tags: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1282,7 +1282,7 @@ async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<Str
         while let Some(pos) = line[search_start..].find(&prefix) {
             let abs_pos = search_start + pos + prefix.len();
             let rest = &line[abs_pos..];
-            // The tag ends at the next `"` or `/`
+            // 标签在遇到下一个 `"` 或 `/` 处结束
             let end = rest.find(|c: char| c == '"' || c == '/' || c == '?').unwrap_or(rest.len());
             let tag = rest[..end].trim();
             if !tag.is_empty() && !seen.contains(tag) {
@@ -1294,35 +1294,35 @@ async fn fetch_model_tags(client: &reqwest::Client, model_name: &str) -> Vec<Str
         }
     }
 
-    // Filter out low-level quantization variants (q2_K, q4_K_M, f16, etc.).
-    // Keep top-level size/type tags that are meaningful for most users.
+    // 过滤掉底层的量化变体标签（q2_K、q4_K_M、f16 等）。
+    // 只保留对大多数用户有意义的顶层体积/类型标签。
     tags.retain(|t| is_top_level_tag(t));
 
     tags
 }
 
-/// Returns true for tags a typical user wants to see:
-///   - bare size tags: "7b", "72b", "0.5b"
-///   - instruction / base / vision / code / tool variants WITHOUT a quantization suffix
-///     e.g. "7b-instruct", "3b-base", "8b-code-instruct"
-///   Filtered out:
-///     - "latest" (alias, not a real version)
-///     - quantization variants: -q2_K, -q4_0, -q4_K_M, -f16, -fp16, -q8_0, etc.
+/// 对典型用户想看到的标签返回 true：
+///   - 单纯的体积标签："7b"、"72b"、"0.5b"
+///   - 不带量化后缀的 instruction / base / vision / code / tool 变体，
+///     例如 "7b-instruct"、"3b-base"、"8b-code-instruct"
+///   会被过滤掉的：
+///     - "latest"（只是个别名，不是真实版本号）
+///     - 量化变体：-q2_K、-q4_0、-q4_K_M、-f16、-fp16、-q8_0 等
 fn is_top_level_tag(tag: &str) -> bool {
     let lower = tag.to_lowercase();
 
-    // Filter out "latest" — it's just an alias, not a real version
+    // 过滤掉 "latest" —— 它只是个别名，不是真实版本号
     if lower == "latest" {
         return false;
     }
 
-    // Quantization suffix patterns used by Ollama
+    // Ollama 使用的量化后缀模式
     let quant_suffixes = [
         "-q2_k", "-q3_k_s", "-q3_k_m", "-q3_k_l",
         "-q4_0", "-q4_1", "-q4_k_s", "-q4_k_m",
         "-q5_0", "-q5_1", "-q5_k_s", "-q5_k_m",
         "-q6_k", "-q8_0", "-f16", "-fp16",
-        // also the bare suffixes without leading dash (shouldn't appear but be safe)
+        // 以及不带前导横线的裸后缀（正常不该出现，但以防万一）
         "q2_k", "q3_k_s", "q3_k_m", "q3_k_l",
         "q4_0", "q4_1", "q4_k_s", "q4_k_m",
         "q5_0", "q5_1", "q5_k_s", "q5_k_m",
@@ -1331,7 +1331,7 @@ fn is_top_level_tag(tag: &str) -> bool {
     !quant_suffixes.iter().any(|suffix| lower.ends_with(suffix))
 }
 
-/// Extract description text near a model name in the HTML
+/// 从 HTML 中提取模型名称附近的描述文本
 fn extract_nearby_text(html: &str, model_name: &str) -> String {
     let search_pattern = format!("/library/{}\"", model_name);
     if let Some(pos) = html.find(&search_pattern) {
@@ -1349,7 +1349,7 @@ fn extract_nearby_text(html: &str, model_name: &str) -> String {
     String::new()
 }
 
-/// Get available Ollama download mirrors
+/// 获取可用的 Ollama 下载镜像源
 #[tauri::command]
 pub async fn get_ollama_download_mirrors_cmd() -> Result<Vec<OllamaDownloadMirror>, String> {
     Ok(get_ollama_download_mirrors())

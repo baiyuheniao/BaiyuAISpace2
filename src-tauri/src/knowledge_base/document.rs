@@ -187,7 +187,7 @@ fn extract_text_from_docx_xml(xml: &str) -> String {
                 result.push_str(&chunk[start + 1..end]);
             }
             let after = &chunk[end..];
-            // Row end takes priority; within a row, cell-end → tab; else paragraph → newline.
+            // 行结束优先级最高；同一行内单元格结束 → 制表符；否则段落结束 → 换行。
             if after.contains(ROW_END) {
                 result.push('\n');
             } else if after.contains(CELL_END) {
@@ -300,14 +300,14 @@ async fn parse_excel(file_path: &str) -> Result<String, KnowledgeBaseError> {
 
 // ============ 通用工具 ============
 
-/// Strip HTML tags and decode common entities, preserving block-element whitespace.
+/// 剥离 HTML 标签并解码常见实体，同时保留块级元素之间应有的空白。
 ///
-/// Handles script/style content removal, block-element newlines, and table cell tabs.
+/// 处理了 script/style 内容的移除、块级元素的换行，以及表格单元格的制表符。
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;
     let mut tag_buf = String::new();
-    let mut skip_content = false; // inside <script> or <style>
+    let mut skip_content = false; // 表示当前处于 <script> 或 <style> 标签内部
 
     for c in html.chars() {
         match c {
@@ -346,7 +346,7 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
 
-    // Decode common HTML entities (single pass, ordered to avoid double-decode)
+    // 解码常见 HTML 实体（单次遍历完成，替换顺序经过安排以避免重复解码）
     result
         .replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -358,7 +358,7 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&#160;", " ")
 }
 
-/// Clean and normalize text
+/// 清理并规范化文本
 fn clean_text(text: &str) -> String {
     text.lines()
         .map(|line| line.trim())
@@ -370,7 +370,7 @@ fn clean_text(text: &str) -> String {
         .join("\n\n")
 }
 
-/// Calculate file hash
+/// 计算文件哈希
 pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBaseError> {
     let bytes = tokio::fs::read(file_path)
         .await
@@ -538,7 +538,7 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
     result
 }
 
-/// Estimate token count (rough approximation)
+/// 估算 token 数量（粗略近似）
 pub fn estimate_tokens(text: &str) -> i32 {
     let char_count = text.chars().count();
     (char_count / 3) as i32

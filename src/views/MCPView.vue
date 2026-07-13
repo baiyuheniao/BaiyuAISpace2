@@ -543,7 +543,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
                 <template #description>
                   <n-text depth="3">
                     通过 DuckDuckGo 搜索网页，获取实时信息。应用内置实现，无需安装 uv/Node.js
-                    等任何依赖，随对话页的"启用 MCP"开关一起生效
+                    等任何依赖，随对话页的"启用 MCP"开关一起生效；Agent Team 里每个 Agent
+                    也默认可用，不需要额外勾选
                   </n-text>
                 </template>
               </n-thing>
@@ -556,7 +557,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
                 <template #description>
                   <n-text depth="3">
                     抓取网页并提取正文文本。应用内置实现，无需安装任何依赖，随对话页的"启用
-                    MCP"开关一起生效
+                    MCP"开关一起生效；Agent Team 里每个 Agent 也默认可用，不需要额外勾选
                   </n-text>
                 </template>
               </n-thing>

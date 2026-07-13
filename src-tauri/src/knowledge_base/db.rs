@@ -4,14 +4,14 @@
 
 use super::types::*;
 
-/// Vector store using SQLite with cosine similarity search
+/// 基于 SQLite、用余弦相似度做检索的向量存储
 pub struct VectorStore {
     db_path: String,
 }
 
 impl VectorStore {
     pub async fn new(db_path: &str) -> Result<Self, KnowledgeBaseError> {
-        // Ensure directory exists
+        // 确保目录存在
         std::fs::create_dir_all(db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
@@ -20,12 +20,12 @@ impl VectorStore {
         })
     }
 
-    /// Create vector table for a knowledge base
+    /// 为某个知识库创建向量表
     #[allow(dead_code)]
     pub async fn create_kb_table(&self, kb_id: &str, dim: i32) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
 
-        // Create vectors table if not exists
+        // 若不存在则创建 vectors 表
         conn.execute(
             r#"
             CREATE TABLE IF NOT EXISTS vectors (
@@ -40,7 +40,7 @@ impl VectorStore {
         )
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Create index for faster lookups
+        // 创建索引以加快查询
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vectors_kb ON vectors(kb_id)",
             [],
@@ -57,8 +57,8 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Insert vectors — wrapped in `spawn_blocking` so batch SQLite writes
-    /// don't stall the async executor during document import.
+    /// 插入向量 —— 包了一层 `spawn_blocking`，避免文档导入时批量 SQLite 写入
+    /// 阻塞异步执行器。
     pub async fn insert_vectors(
         &self,
         kb_id: &str,
@@ -96,19 +96,16 @@ impl VectorStore {
         .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
     }
 
-    /// Above this many vectors in a single knowledge base, log an informational
-    /// note that an exact full scan is being performed. This NEVER excludes any
-    /// data — it only hints that an ANN index might be worthwhile if query
-    /// latency ever becomes user-visible at this scale.
+    /// 单个知识库的向量数超过这个值时，记一条提示日志说明本次是精确全量扫描。
+    /// 这个阈值绝不会排除任何数据 —— 它只是提示：如果查询延迟在这个规模下已经
+    /// 让用户能感知到，或许值得考虑上 ANN 索引。
     const LARGE_KB_SCAN_HINT: u64 = 200_000;
 
-    /// Vector search using exact cosine similarity over ALL vectors in the
-    /// knowledge base (no document is ever excluded from candidacy).
+    /// 在知识库的全部向量上做精确余弦相似度检索（不会有任何文档被预先排除在候选之外）。
     ///
-    /// Wrapped in `spawn_blocking` so blocking SQLite I/O doesn't stall the
-    /// async executor. Memory is bounded to O(top_k) by streaming rows through
-    /// a fixed-size min-heap instead of materializing every scored row into a
-    /// Vec — peak memory no longer scales with the size of the knowledge base.
+    /// 包了一层 `spawn_blocking`，避免阻塞式的 SQLite I/O 卡住异步执行器。内存占用
+    /// 通过固定大小的最小堆流式处理每一行，而不是把所有打分结果都物化进一个 Vec，
+    /// 把峰值内存限制在 O(top_k) —— 不再随知识库规模增长而增长。
     pub async fn search(
         &self,
         kb_id: &str,
@@ -119,7 +116,7 @@ impl VectorStore {
         let kb_id = kb_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            // A non-positive top_k means "no results requested".
+            // top_k 非正数意味着"不需要任何结果"。
             if top_k <= 0 {
                 return Ok(Vec::new());
             }
@@ -144,9 +141,8 @@ impl VectorStore {
                 )
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-            // `query_map` is a lazy cursor — rows arrive one at a time and are
-            // NOT all materialized in memory. We compute each score and keep
-            // only the running top_k in a min-heap, so peak memory stays O(top_k).
+            // `query_map` 是惰性游标 —— 每次只取到一行，不会把所有行都物化进内存。
+            // 我们对每一行算出分数后只在最小堆里保留当前的 top_k，因此峰值内存维持在 O(top_k)。
             let rows = stmt
                 .query_map([&kb_id], |row| {
                     let chunk_id: String = row.get(0)?;
@@ -157,9 +153,8 @@ impl VectorStore {
                 })
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-            // Min-heap of the best top_k so far. `Reverse` makes BinaryHeap (a
-            // max-heap) behave as a min-heap, so the smallest score sits on top
-            // and is the one evicted once we exceed top_k.
+            // 保存当前最好的 top_k 个结果的最小堆。`Reverse` 让 BinaryHeap（本身是
+            // 最大堆）表现得像最小堆，最小的分数会在堆顶，一旦超过 top_k 就淘汰它。
             let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>> =
                 std::collections::BinaryHeap::with_capacity(top_k + 1);
 
@@ -171,7 +166,7 @@ impl VectorStore {
 
                 let vector = bytes_to_vector(&vector_bytes);
                 let score = cosine_similarity(&query_vector, &vector);
-                // `vector` (the largest per-row allocation) is dropped here.
+                // `vector`（每行里占用内存最大的分配）在此处被释放。
 
                 push_capped(
                     &mut heap,
@@ -205,7 +200,7 @@ impl VectorStore {
         .map_err(|e| KnowledgeBaseError::DatabaseError(format!("spawn_blocking failed: {}", e)))?
     }
 
-    /// Delete vectors by document_id
+    /// 按 document_id 删除向量
     pub async fn delete_document_vectors(
         &self,
         kb_id: &str,
@@ -221,7 +216,7 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Drop knowledge base table
+    /// 清空某个知识库的向量数据
     pub async fn drop_kb_table(&self, kb_id: &str) -> Result<(), KnowledgeBaseError> {
         let conn = self.get_conn()?;
         conn.execute("DELETE FROM vectors WHERE kb_id = ?1", [kb_id])
@@ -240,9 +235,9 @@ impl VectorStore {
     }
 }
 
-/// One scored candidate held in the top-k min-heap during a vector search.
-/// Ordered solely by `score`; NaN scores (from malformed embeddings) sort as
-/// the smallest so they are evicted first and never crowd out real results.
+/// 向量检索过程中，top-k 最小堆里保存的一个打分候选项。
+/// 排序只依据 `score`；NaN 分数（来自格式异常的 embedding）会被视为最小值，
+/// 因此总是最先被淘汰，不会挤占正常结果的位置。
 struct ScoredChunk {
     score: f32,
     chunk_id: String,
@@ -264,22 +259,22 @@ impl PartialOrd for ScoredChunk {
 impl Ord for ScoredChunk {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // Treat NaN as strictly the smallest value so a NaN candidate is always
-        // evicted before any real-scored one and never displaces a real result.
+        // 把 NaN 严格当作最小值处理，这样 NaN 候选项总会先于任何有效打分的候选项
+        // 被淘汰，绝不会顶替掉一个真实的结果。
         match self.score.partial_cmp(&other.score) {
             Some(ord) => ord,
             None => match (self.score.is_nan(), other.score.is_nan()) {
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Less,
                 (false, true) => Ordering::Greater,
-                (false, false) => Ordering::Equal, // unreachable for finite f32
+                (false, false) => Ordering::Equal, // 对有限的 f32 而言这个分支不可能走到
             },
         }
     }
 }
 
-/// Push a candidate into a bounded top-k min-heap, evicting the current lowest
-/// score once the heap exceeds `top_k`. Keeps peak memory at O(top_k).
+/// 把一个候选项推入有界的 top-k 最小堆，一旦堆的大小超过 `top_k` 就淘汰当前最低分的那个。
+/// 使峰值内存维持在 O(top_k)。
 fn push_capped(
     heap: &mut std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>>,
     item: ScoredChunk,
@@ -291,7 +286,7 @@ fn push_capped(
     }
 }
 
-/// Drain a top-k min-heap into a Vec sorted by score descending (best first).
+/// 把 top-k 最小堆导出为一个按分数降序排列（最好的排在最前）的 Vec。
 fn drain_sorted_desc(
     heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredChunk>>,
 ) -> Vec<ScoredChunk> {
@@ -300,7 +295,7 @@ fn drain_sorted_desc(
     scored
 }
 
-/// Convert vector (f32 array) to bytes
+/// 把向量（f32 数组）转换为字节序列
 fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
     vector
         .iter()
@@ -308,7 +303,7 @@ fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// Convert bytes back to vector (f32 array)
+/// 把字节序列转换回向量（f32 数组）
 fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
@@ -320,7 +315,7 @@ fn bytes_to_vector(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Calculate cosine similarity between two vectors
+/// 计算两个向量之间的余弦相似度
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
@@ -337,9 +332,9 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot_product / (norm_a * norm_b)
 }
 
-/// SQLite schema for metadata
+/// 元数据用的 SQLite schema
 pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    // Knowledge bases table
+    // 知识库表
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS knowledge_bases (
@@ -357,7 +352,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // Migrate: add chunk_size and chunk_overlap columns if they don't exist
+    // 迁移：若 chunk_size 和 chunk_overlap 列不存在则补上
     let table_info: Vec<String> = conn
         .prepare("PRAGMA table_info(knowledge_bases)")
         .unwrap()
@@ -366,7 +361,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         .filter_map(|r| r.ok())
         .collect();
     
-    // Add embedding_provider if it doesn't exist (old column)
+    // 若不存在则添加 embedding_provider（旧版遗留列）
     if !table_info.contains(&"embedding_provider".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''",
@@ -374,7 +369,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
     
-    // Add embedding_model if it doesn't exist (old column)
+    // 若不存在则添加 embedding_model（旧版遗留列）
     if !table_info.contains(&"embedding_model".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''",
@@ -382,7 +377,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
     
-    // Add embedding_dim if it doesn't exist (old column)
+    // 若不存在则添加 embedding_dim（旧版遗留列）
     if !table_info.contains(&"embedding_dim".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_dim INTEGER NOT NULL DEFAULT 1536",
@@ -390,7 +385,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
     
-    // Add embedding_api_config_id if it doesn't exist
+    // 若不存在则添加 embedding_api_config_id
     if !table_info.contains(&"embedding_api_config_id".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_api_config_id TEXT NOT NULL DEFAULT ''",
@@ -398,7 +393,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
 
-    // Add embedding_base_url if it doesn't exist
+    // 若不存在则添加 embedding_base_url
     if !table_info.contains(&"embedding_base_url".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN embedding_base_url TEXT NOT NULL DEFAULT ''",
@@ -406,7 +401,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
     
-    // Add chunk_size and chunk_overlap if they don't exist
+    // 若不存在则添加 chunk_size 和 chunk_overlap
     if !table_info.contains(&"chunk_size".to_string()) {
         let _ = conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 1000",
@@ -420,7 +415,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         );
     }
 
-    // Documents table
+    // 文档表
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS documents (
@@ -440,7 +435,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // Chunks table - stores actual content for keyword search
+    // chunks 表 —— 存放供关键词检索使用的实际文本内容
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS chunks (
@@ -456,7 +451,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // Vectors table - stores embedding vectors
+    // vectors 表 —— 存放 embedding 向量
     conn.execute(
         r#"
         CREATE TABLE IF NOT EXISTS vectors (
@@ -470,8 +465,8 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // FTS5 virtual table for full-text search (optional, if FTS5 is available)
-    // Fix for #29 and #30: Include kb_id column for knowledge base isolation
+    // 用于全文检索的 FTS5 虚拟表（可选，取决于 FTS5 是否可用）
+    // 对应 #29、#30 的修复：加入 kb_id 列以实现知识库之间的隔离
     let _ = conn.execute(
         r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -484,7 +479,7 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     );
 
-    // Indexes
+    // 索引
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_kb_updated ON knowledge_bases(updated_at DESC)",
         [],
@@ -501,12 +496,12 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         "CREATE INDEX IF NOT EXISTS idx_chunk_kb ON chunks(kb_id)",
         [],
     )?;
-    // Index for keyword search
+    // 关键词检索用的索引
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunk_content ON chunks(content)",
         [],
     )?;
-    // Indexes for vectors
+    // vectors 相关索引
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_vectors_kb ON vectors(kb_id)",
         [],
@@ -524,8 +519,8 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
 mod tests {
     use super::*;
 
-    /// Run the real bounded-heap selection (push_capped + drain_sorted_desc)
-    /// over a set of scores and return the resulting chunk_ids in order.
+    /// 对一组分数运行真正的有界堆筛选逻辑（push_capped + drain_sorted_desc），
+    /// 按顺序返回结果对应的 chunk_id。
     fn heap_top_k(scores: &[f32], top_k: usize) -> Vec<String> {
         let mut heap = std::collections::BinaryHeap::new();
         for (i, &score) in scores.iter().enumerate() {
@@ -543,7 +538,7 @@ mod tests {
         drain_sorted_desc(heap).into_iter().map(|s| s.chunk_id).collect()
     }
 
-    /// Naive reference: score every item, sort descending, take top_k.
+    /// 朴素对照实现：给每一项打分，降序排序，取前 top_k 个。
     fn naive_top_k(scores: &[f32], top_k: usize) -> Vec<String> {
         let mut idx: Vec<usize> = (0..scores.len()).collect();
         idx.sort_by(|&a, &b| {
@@ -554,7 +549,7 @@ mod tests {
 
     #[test]
     fn heap_matches_naive_full_sort() {
-        // Deterministic pseudo-random scores; distinct so ordering is unambiguous.
+        // 确定性的伪随机分数；各不相同，保证排序结果没有歧义。
         let n = 1000usize;
         let scores: Vec<f32> = (0..n)
             .map(|i| {
@@ -572,12 +567,12 @@ mod tests {
 
     #[test]
     fn nan_scores_are_evicted_before_real_results() {
-        // Three real results and several NaN candidates; with top_k=3 the NaNs
-        // must all be evicted and only the real scores survive, in order.
+        // 三个正常结果加若干 NaN 候选项；top_k=3 时所有 NaN 都应被淘汰，
+        // 只留下正常分数的结果，且顺序正确。
         let scores = vec![f32::NAN, 0.9, f32::NAN, 0.1, 0.5, f32::NAN];
         let ids = heap_top_k(&scores, 3);
         assert_eq!(ids, vec!["1".to_string(), "4".to_string(), "3".to_string()]);
-        // indices: 1 -> 0.9, 4 -> 0.5, 3 -> 0.1
+        // 各索引对应关系：1 -> 0.9, 4 -> 0.5, 3 -> 0.1
     }
 
     #[test]

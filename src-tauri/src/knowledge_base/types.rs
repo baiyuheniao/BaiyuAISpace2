@@ -31,13 +31,13 @@ impl Serialize for KnowledgeBaseError {
     }
 }
 
-/// Knowledge base configuration
+/// 知识库配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBase {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub embedding_api_config_id: String,  // Reference to global embedding config
+    pub embedding_api_config_id: String,  // 指向全局 embedding 配置的引用
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_base_url: String,
@@ -48,13 +48,13 @@ pub struct KnowledgeBase {
     pub document_count: i32,
 }
 
-/// Document metadata
+/// 文档元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub id: String,
     pub kb_id: String,
     pub filename: String,
-    pub file_type: String,  // pdf, docx, xlsx, md, html, txt
+    pub file_type: String,  // pdf、docx、xlsx、md、html、txt
     pub file_size: i64,
     pub file_hash: String,
     pub content_preview: String,
@@ -72,7 +72,7 @@ pub enum DocumentStatus {
     Error,
 }
 
-/// Text chunk with metadata
+/// 带元数据的文本块
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
     pub id: String,
@@ -83,7 +83,7 @@ pub struct Chunk {
     pub token_count: i32,
 }
 
-/// Retrieval request
+/// 检索请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrievalRequest {
@@ -92,22 +92,22 @@ pub struct RetrievalRequest {
     pub top_k: i32,
     pub retrieval_mode: RetrievalMode,
     pub similarity_threshold: f32,
-    /// Sentence-window size: fetch this many adjacent chunks on each side of a
-    /// matched chunk and concatenate them as extended context for the LLM.
-    /// 0 = disabled (default). Backward-compatible: missing field deserializes to 0.
+    /// 句子窗口大小：为命中的 chunk 左右各取这么多个相邻 chunk 并拼接起来，
+    /// 作为提供给 LLM 的扩展上下文。
+    /// 0 = 禁用（默认值）。向后兼容：字段缺失时反序列化为 0。
     #[serde(default)]
     pub window_size: i32,
-    /// Reranker config ID (for keyring lookup). When set, retrieved chunks are
-    /// re-ranked by a Cohere-compatible reranker API after initial retrieval.
+    /// Reranker 配置 ID（用于从 keyring 查找）。设置后，初次检索的结果会经过一个
+    /// 兼容 Cohere 接口的 reranker API 重新排序。
     #[serde(default)]
     pub reranker_config_id: Option<String>,
-    /// Reranker base URL (e.g. "https://api.cohere.com")
+    /// Reranker 的 base URL（例如 "https://api.cohere.com"）
     #[serde(default)]
     pub reranker_base_url: Option<String>,
-    /// Reranker model name (e.g. "rerank-multilingual-v3.0")
+    /// Reranker 模型名称（例如 "rerank-multilingual-v3.0"）
     #[serde(default)]
     pub reranker_model: Option<String>,
-    /// How many chunks to keep after reranking. Defaults to top_k if absent.
+    /// 精排后保留的 chunk 数量。缺省时默认为 top_k。
     #[serde(default)]
     pub rerank_top_n: Option<i32>,
 }
@@ -115,12 +115,12 @@ pub struct RetrievalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalMode {
-    Vector,      // Pure vector similarity
-    Keyword,     // Pure keyword search
-    Hybrid,      // Vector + keyword (default)
+    Vector,      // 纯向量相似度
+    Keyword,     // 纯关键词检索
+    Hybrid,      // 向量 + 关键词（默认）
 }
 
-/// Retrieved chunk with score
+/// 带分数的检索结果块
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievedChunk {
     pub chunk: Chunk,
@@ -130,7 +130,7 @@ pub struct RetrievedChunk {
     pub document_filename: String,
 }
 
-/// Retrieval result
+/// 检索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalResult {
     pub query: String,
@@ -138,7 +138,7 @@ pub struct RetrievalResult {
     pub total_chunks: i32,
 }
 
-/// Create knowledge base request
+/// 创建知识库的请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateKnowledgeBaseRequest {
     pub name: String,
@@ -147,8 +147,8 @@ pub struct CreateKnowledgeBaseRequest {
     pub embedding_provider: String,
     pub embedding_model: String,
     pub embedding_base_url: String,
-    pub chunk_size: Option<i32>,     // default: 1000
-    pub chunk_overlap: Option<i32>,  // default: 200
+    pub chunk_size: Option<i32>,     // 默认：1000
+    pub chunk_overlap: Option<i32>,  // 默认：200
 }
 
 impl Default for RetrievalMode {

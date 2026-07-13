@@ -4,14 +4,13 @@
 
 use super::types::{KnowledgeBaseError, RetrievedChunk};
 
-/// Re-rank retrieved chunks using a Cohere-compatible reranker API.
+/// 使用兼容 Cohere 接口的 reranker API 对检索结果重新排序。
 ///
-/// Compatible with: Cohere, Jina, Voyage, and BGE-style rerankers that expose
-/// `POST {base_url}/v1/rerank` with the Cohere request/response schema.
+/// 兼容对象：Cohere、Jina、Voyage，以及暴露 `POST {base_url}/v1/rerank` 接口、
+/// 使用 Cohere 请求/响应格式的 BGE 系列 reranker。
 ///
-/// The returned vec is sorted by relevance_score descending and trimmed to
-/// `top_n` entries. Each chunk's `score` field is replaced with the reranker's
-/// relevance score.
+/// 返回的 vec 按 relevance_score 降序排列，并截断到 `top_n` 条。每个 chunk 的
+/// `score` 字段都会被替换为 reranker 给出的相关性分数。
 pub async fn rerank_chunks(
     query: &str,
     chunks: Vec<RetrievedChunk>,

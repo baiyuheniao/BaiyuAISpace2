@@ -36,8 +36,8 @@ impl From<rusqlite::Error> for WorkspaceError {
     }
 }
 
-/// Whether an agent is the workspace's main agent (negotiates tasks with the
-/// user and proposes new sub-agents) or an ordinary sub-agent.
+/// 标识一个 Agent 是工作组的主 Agent（负责跟用户对接任务、提议创建新的子
+/// Agent）还是普通子 Agent。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
@@ -62,10 +62,10 @@ impl AgentRole {
     }
 }
 
-/// An agent's current high-level state, shown in the frontend as a status
-/// icon. `Sleeping`/`Meeting`/`WaitingApproval`/`WaitingAnswer` are reserved
-/// for Phase 2/3 (休眠, 提问, 会议) and not yet set by the Phase 1 loop, which
-/// only ever moves between `Idle` and `Running` (or `Error`).
+/// Agent 当前的高层状态，在前端展示为状态图标。`Sleeping`/`Meeting`/
+/// `WaitingApproval`/`WaitingAnswer` 是为 Phase 2/3（休眠、提问、会议）预留的，
+/// Phase 1 的循环还不会设置它们，那时只在 `Idle` 和 `Running`（或 `Error`）
+/// 之间切换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
@@ -115,20 +115,18 @@ pub struct Workspace {
     pub id: String,
     pub name: String,
     pub description: String,
-    /// Safety cap on how many agents can exist in this workspace at once,
-    /// so a main agent can't create sub-agents without bound. Configurable
-    /// per-workspace, defaults to a conservative value at creation time.
+    /// 同一工作组里同时能存在的 Agent 数量上限（安全阀），防止主 Agent 无节制
+    /// 地创建子 Agent。按工作组各自配置，创建时默认给一个保守值。
     pub max_agents: i32,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-/// One agent's configuration + persisted runtime status. Deliberately does
-/// not redefine tool/knowledge-base/skill configuration -- it only stores
-/// references (`mcp_server_ids`, `knowledge_base_ids`, `active_skill_ids`)
-/// into the regular chat mode's existing config tables, same as how
-/// `KnowledgeBase` stores `embedding_api_config_id` rather than its own copy
-/// of the embedding provider's secret.
+/// 一个 Agent 的配置 + 持久化的运行时状态。这里刻意不重新定义工具/知识库/
+/// Skill 的配置——只存引用（`mcp_server_ids`、`knowledge_base_ids`、
+/// `active_skill_ids`），指向普通聊天模式已有的配置表，跟 `KnowledgeBase`
+/// 只存 `embedding_api_config_id` 而不另存一份 embedding 服务商密钥是同一个
+/// 思路。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceAgent {
@@ -139,9 +137,9 @@ pub struct WorkspaceAgent {
     pub provider: String,
     pub model: String,
     pub base_url: String,
-    /// References an entry in the frontend's `ApiConfig` list; the actual
-    /// secret is fetched from the OS keyring via this id at call time,
-    /// mirroring `get_embedding_api_key` in `knowledge_base::commands`.
+    /// 指向前端 `ApiConfig` 列表里的一项；真正的密钥在调用时通过这个 id 从
+    /// 操作系统密钥链取出，跟 `knowledge_base::commands` 里的
+    /// `get_embedding_api_key` 是同一套做法。
     pub api_config_id: String,
     pub system_prompt: String,
     pub mcp_server_ids: Vec<String>,
@@ -191,10 +189,9 @@ pub fn default_require_tool_approval() -> bool {
     true
 }
 
-/// One entry in an agent's structured to-do list, distinct from the
-/// free-form `scratchpad` -- covers the "没有任务清单" half of the working-memory
-/// gap, where scratchpad only covers free-text notes. Managed by the
-/// `workspace_task_list` tool (add/complete/remove/list).
+/// Agent 结构化待办清单里的一项，跟自由格式的 `scratchpad` 不是一回事——
+/// scratchpad 只能记自由文本笔记，覆盖不了"没有任务清单"这半个工作记忆缺口，
+/// 这里补上。由 `workspace_task_list` 工具管理（增加/完成/删除/列出）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceAgentTask {
@@ -206,9 +203,9 @@ pub struct WorkspaceAgentTask {
     pub updated_at: i64,
 }
 
-/// One message in a workspace's shared inbox. `from_agent_id`/`to_agent_id`
-/// hold either a real agent id, the literal `"user"`, or the literal `"all"`
-/// (broadcast to every agent in the workspace).
+/// 工作组共享收件箱里的一条消息。`from_agent_id`/`to_agent_id` 的取值要么是
+/// 真实的 agent id，要么是字面量 `"user"`，要么是字面量 `"all"`（广播给工作组
+/// 里所有 Agent）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceMessage {
@@ -220,8 +217,8 @@ pub struct WorkspaceMessage {
     pub created_at: i64,
 }
 
-/// One shared timeline entry (message sent, agent created, status changed,
-/// tool called, etc.), shown to the user as a single chronological log.
+/// 共享时间线上的一条记录（消息发送、Agent 创建、状态变化、工具调用等），
+/// 作为一份按时间排序的日志展示给用户。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceLogEntry {
@@ -241,10 +238,9 @@ pub struct CreateWorkspaceRequest {
     pub max_agents: Option<i32>,
 }
 
-/// Shared by both creation paths: the manual-creation Tauri command and the
-/// main agent's `workspace_create_agent` tool (the latter only reaches
-/// `spawn_agent_internal` after the user approves the proposed values via
-/// the frontend confirmation card).
+/// 两条创建路径共用这个结构：手动创建的 Tauri command，以及主 Agent 的
+/// `workspace_create_agent` 工具（后者要等用户在前端确认卡片里批准了提议的
+/// 值之后，才会走到 `spawn_agent_internal`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAgentRequest {
@@ -289,12 +285,11 @@ pub fn default_rag_retrieval_mode() -> String {
     "hybrid".to_string()
 }
 
-/// Editable fields for an existing agent (`workspace_update_agent`). Deliberately
-/// omits `role`/`workspace_id` -- switching a running agent between main/sub
-/// makes its already-issued tool-availability assumptions stale, and moving it
-/// to another workspace has no defined semantics; delete-and-recreate covers
-/// those rare cases. Everything else here is safe to change live because
-/// `process_agent_wake` reloads the agent's row fresh from the DB every wake.
+/// 一个已存在 Agent 的可编辑字段（`workspace_update_agent`）。刻意不包含
+/// `role`/`workspace_id`——把一个运行中的 Agent 在 main/sub 之间切换，会让它
+/// 已经发出的"工具是否可用"这类假设失效；把它挪到另一个工作组也没有明确
+/// 语义定义；这些少见场景直接删了重建即可。其余字段都可以放心热更新，因为
+/// `process_agent_wake` 每次唤醒都会重新从数据库读一遍这个 Agent 的行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAgentRequest {
@@ -330,12 +325,11 @@ pub struct UpdateAgentRequest {
     pub enable_thinking: bool,
 }
 
-/// A `workspace_create_agent` proposal / `workspace_sleep` request /
-/// `workspace_asks` question that's waiting on a human decision, persisted so
-/// it survives an app restart or a user simply not having the page open when
-/// it fired (previously these lived only as in-memory oneshot channels plus a
-/// fire-and-forget frontend event -- miss the event and the request was gone
-/// for good even though the agent was still blocked waiting on it).
+/// 一个正在等待人工决策的 `workspace_create_agent` 提议 / `workspace_sleep`
+/// 请求 / `workspace_asks` 问题，需要持久化，这样即便应用重启、或者事件触发时
+/// 用户根本没打开这个页面，请求也不会丢（早先这些东西只存在于内存里的
+/// oneshot channel 加一次性前端事件——一旦错过那个事件，请求就永久消失了，
+/// 即便对应的 Agent 其实还卡在原地等结果）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePendingEvent {
@@ -345,8 +339,8 @@ pub struct WorkspacePendingEvent {
     pub agent_name: String,
     /// "proposal" | "sleep" | "question"
     pub kind: String,
-    /// Type-specific fields as JSON: proposal carries `draft`; sleep carries
-    /// `reason`; question carries `question`.
+    /// 按类型不同而不同的字段，以 JSON 形式存放：proposal 带 `draft`；sleep 带
+    /// `reason`；question 带 `question`。
     pub payload: serde_json::Value,
     pub created_at: i64,
     pub resolved_at: Option<i64>,

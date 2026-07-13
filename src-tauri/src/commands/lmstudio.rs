@@ -2,26 +2,24 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! LM Studio local server integration
+//! LM Studio 本地服务器集成
 //!
-//! LM Studio runs its own local inference server (default
-//! `http://localhost:1234`) with both an OpenAI-compatible surface
-//! (`/v1/chat/completions`, `/v1/models`) and a native v1 management API
-//! (`/api/v1/models/download`, `/load`, `/unload`) used here for model
-//! management, plus a richer v0 listing endpoint (`/api/v0/models`) that
-//! reports per-model publisher/arch/quantization/load-state. Unlike Ollama,
-//! LM Studio is a closed-source GUI desktop app with no documented
-//! headless/silent install, so this module only ever talks to an
-//! already-running server -- it never tries to install or launch LM Studio
-//! itself.
+//! LM Studio 会跑自己的本地推理服务器（默认是 `http://localhost:1234`），
+//! 同时提供兼容 OpenAI 的接口面（`/v1/chat/completions`、`/v1/models`）和
+//! 一套原生的 v1 管理 API（`/api/v1/models/download`、`/load`、`/unload`），
+//! 本模块用后者做模型管理；此外还有一个信息更丰富的 v0 列表接口
+//! （`/api/v0/models`），会报告每个模型的发布者/架构/量化方式/加载状态。
+//! 与 Ollama 不同，LM Studio 是闭源的 GUI 桌面应用，没有官方文档记载的
+//! 无头/静默安装方式，所以本模块自始至终只跟一个已经在运行的服务器通信——
+//! 它从不尝试安装或启动 LM Studio 本身。
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-// ============ Types ============
+// ============ 类型定义 ============
 
-/// A model as reported by LM Studio's `/api/v0/models` endpoint.
+/// LM Studio `/api/v0/models` 接口返回的模型信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LMStudioModelInfo {
@@ -54,7 +52,7 @@ struct LMStudioModelEntry {
     max_context_length: Option<u64>,
 }
 
-/// Download progress event emitted to the frontend.
+/// 下发给前端的下载进度事件。
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LMStudioDownloadProgress {
@@ -65,16 +63,15 @@ pub struct LMStudioDownloadProgress {
     pub total_size_bytes: Option<u64>,
 }
 
-// ============ Helpers ============
+// ============ 辅助函数 ============
 
 fn create_lmstudio_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
-        // This client only ever talks to the user's own already-running LM
-        // Studio server, never a remote host -- routing it through a system
-        // proxy (as reqwest does by default) can add seconds of detour when
-        // the user has a global-mode proxy running for other providers.
+        // 这个客户端访问的永远是用户自己已经在运行的 LM Studio 服务器，
+        // 绝不是远程主机 -- 如果按 reqwest 默认行为走系统代理，在用户为
+        // 其他服务商开着全局代理模式时，会平白多绕几秒钟。
         .no_proxy()
         .build()
 }
@@ -84,9 +81,8 @@ fn build_lmstudio_url(base_url: &str, endpoint: &str) -> String {
     format!("{}{}", base, endpoint)
 }
 
-/// LM Studio's local server has no auth by default; an API token is only
-/// needed if the user explicitly enabled "Require API key" in its settings,
-/// so this header is only added when one is actually configured.
+/// LM Studio 的本地服务器默认没有鉴权；只有用户在其设置里显式开启了
+/// "Require API key" 才需要 API token，所以只有真正配置了密钥时才会加这个请求头。
 fn auth_headers(api_key: &Option<String>) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(key) = api_key {
@@ -99,9 +95,9 @@ fn auth_headers(api_key: &Option<String>) -> reqwest::header::HeaderMap {
     headers
 }
 
-// ============ Tauri Commands ============
+// ============ Tauri 命令 ============
 
-/// Check whether an LM Studio server is reachable at `base_url`.
+/// 检查 `base_url` 处的 LM Studio 服务器是否可达。
 #[tauri::command]
 pub async fn check_lmstudio_status(base_url: String) -> Result<bool, String> {
     let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -116,7 +112,7 @@ pub async fn check_lmstudio_status(base_url: String) -> Result<bool, String> {
     }
 }
 
-/// List models known to LM Studio (downloaded and/or currently loaded).
+/// 列出 LM Studio 已知的模型（已下载和/或当前已加载的）。
 #[tauri::command]
 pub async fn list_lmstudio_models(
     base_url: String,
@@ -157,9 +153,8 @@ pub async fn list_lmstudio_models(
         .collect())
 }
 
-/// Download a model by catalog identifier (e.g. `"qwen2.5-7b-instruct"`) or
-/// Hugging Face reference, emitting `lmstudio-download-progress` events
-/// while polling the returned job until it completes or fails.
+/// 通过目录标识符（如 `"qwen2.5-7b-instruct"`）或 Hugging Face 引用下载模型，
+/// 在轮询返回的任务直到完成或失败的过程中，持续下发 `lmstudio-download-progress` 事件。
 #[tauri::command]
 pub async fn pull_lmstudio_model(
     model_id: String,
@@ -190,7 +185,7 @@ pub async fn pull_lmstudio_model(
         .await
         .map_err(|e| format!("Failed to parse download response: {}", e))?;
 
-    // The model may already be on disk, in which case there's no job to poll.
+    // 模型可能已经在磁盘上了，这种情况下没有任务需要轮询。
     let initial_status = job["status"].as_str().unwrap_or("").to_string();
     if initial_status == "already_downloaded" || initial_status == "completed" {
         let _ = app_handle.emit("lmstudio-download-progress", LMStudioDownloadProgress {
@@ -251,12 +246,12 @@ pub async fn pull_lmstudio_model(
             "failed" => {
                 return Err(format!("Download failed for model: {}", model_id));
             }
-            _ => continue, // "downloading" / "paused" -- keep polling
+            _ => continue, // "downloading" / "paused" -- 继续轮询
         }
     }
 }
 
-/// Load a downloaded model into memory so it's ready for inference.
+/// 把已下载的模型加载进内存，使其可用于推理。
 #[tauri::command]
 pub async fn load_lmstudio_model(
     model_id: String,
@@ -283,7 +278,7 @@ pub async fn load_lmstudio_model(
     Ok(())
 }
 
-/// Unload a loaded model to free memory.
+/// 卸载已加载的模型以释放内存。
 #[tauri::command]
 pub async fn unload_lmstudio_model(
     model_id: String,

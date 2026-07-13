@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Barrier-style meeting coordination for Agent Team Mode.
+//! Agent Team Mode 的屏障式（barrier-style）会议协调。
 //!
 //! 会议采用"集合点"同步协议：所有与会 Agent 都挂起在
 //! `workspace_meeting_checkin` 工具调用上，协调器等人到齐后统一放行，把新

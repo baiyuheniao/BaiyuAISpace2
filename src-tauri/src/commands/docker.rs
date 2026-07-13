@@ -2,10 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Docker container management for local AI model deployment.
+//! 用于本地 AI 模型部署的 Docker 容器管理。
 //!
-//! Wraps the `docker` CLI to provide container lifecycle management
-//! and image pulling with real-time progress events.
+//! 封装 `docker` CLI，提供容器生命周期管理，
+//! 以及带实时进度事件的镜像拉取功能。
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::local_model::hide_console_window;
 
-// ============ Types ============
+// ============ 类型定义 ============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,7 +45,7 @@ pub struct DockerImage {
     pub created: String,
 }
 
-/// A predefined AI model deployment profile using a Docker image.
+/// 基于 Docker 镜像的预定义 AI 模型部署方案。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerProfile {
@@ -53,19 +53,19 @@ pub struct DockerProfile {
     pub name: String,
     pub image: String,
     pub description: String,
-    /// Port mappings in "host:container" format, e.g. "11434:11434"
+    /// 端口映射，格式为 "host:container"，如 "11434:11434"
     pub ports: Vec<String>,
-    /// Named volume mounts in "volume_name:container_path" format
+    /// 具名数据卷挂载，格式为 "volume_name:container_path"
     pub volumes: Vec<String>,
-    /// OpenAI-compatible API base URL after the container is running
+    /// 容器运行起来后，兼容 OpenAI 的 API base URL
     pub api_url: String,
-    /// "ollama" or "openai" — which client path to use in the chat module
+    /// "ollama" 或 "openai" —— 决定聊天模块走哪条客户端路径
     pub api_type: String,
-    /// Whether to pass `--gpus all` to `docker run`
+    /// 是否给 `docker run` 传 `--gpus all`
     pub gpu: bool,
 }
 
-/// Progress event emitted to the frontend while `docker pull` is running.
+/// `docker pull` 执行期间下发给前端的进度事件。
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerPullProgress {
@@ -75,7 +75,7 @@ pub struct DockerPullProgress {
     pub message: String,
 }
 
-// ============ Predefined profiles ============
+// ============ 预定义方案 ============
 
 pub fn get_docker_profiles() -> Vec<DockerProfile> {
     vec![
@@ -115,19 +115,19 @@ pub fn get_docker_profiles() -> Vec<DockerProfile> {
     ]
 }
 
-// ============ Helpers ============
+// ============ 辅助函数 ============
 
-/// Build a `tokio::process::Command` for `docker` with the no-console-window
-/// flag already applied on Windows.
+/// 构建一个 `docker` 的 `tokio::process::Command`，在 Windows 上已经预先
+/// 应用了不弹控制台窗口的标志位。
 fn docker_cmd() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("docker");
     hide_console_window(&mut cmd);
     cmd
 }
 
-// ============ Tauri Commands ============
+// ============ Tauri 命令 ============
 
-/// Check whether Docker is installed and the Docker daemon is reachable.
+/// 检查是否安装了 Docker，以及 Docker 守护进程是否可达。
 #[tauri::command]
 pub async fn check_docker_status() -> Result<DockerStatus, String> {
     let mut cmd = docker_cmd();
@@ -146,8 +146,8 @@ pub async fn check_docker_status() -> Result<DockerStatus, String> {
         Ok(o) => o,
     };
 
-    // `docker version` exits non-zero when the daemon is unreachable but still
-    // prints the client version to stdout.
+    // 守护进程不可达时 `docker version` 会以非零码退出，但仍会把客户端
+    // 版本号打印到 stdout。
     let version_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let version = if version_raw.is_empty() {
         None
@@ -163,7 +163,7 @@ pub async fn check_docker_status() -> Result<DockerStatus, String> {
         });
     }
 
-    // Confirm the daemon is reachable with a fast `docker info` call.
+    // 用一次快速的 `docker info` 调用确认守护进程确实可达。
     let mut info_cmd = docker_cmd();
     info_cmd.args(["info", "--format", "{{.ServerVersion}}"]);
     info_cmd.stdout(std::process::Stdio::null());
@@ -181,7 +181,7 @@ pub async fn check_docker_status() -> Result<DockerStatus, String> {
     })
 }
 
-/// List Docker images on the local machine.
+/// 列出本机上的 Docker 镜像。
 #[tauri::command]
 pub async fn list_docker_images() -> Result<Vec<DockerImage>, String> {
     let mut cmd = docker_cmd();
@@ -218,7 +218,7 @@ pub async fn list_docker_images() -> Result<Vec<DockerImage>, String> {
     Ok(images)
 }
 
-/// List Docker containers. When `all` is true, stopped containers are included.
+/// 列出 Docker 容器。当 `all` 为 true 时，也会包含已停止的容器。
 #[tauri::command]
 pub async fn list_docker_containers(all: Option<bool>) -> Result<Vec<DockerContainer>, String> {
     let mut cmd = docker_cmd();
@@ -261,7 +261,7 @@ pub async fn list_docker_containers(all: Option<bool>) -> Result<Vec<DockerConta
     Ok(containers)
 }
 
-/// Pull a Docker image, streaming stdout/stderr as `docker-pull-progress` events.
+/// 拉取一个 Docker 镜像，把 stdout/stderr 以 `docker-pull-progress` 事件的形式持续下发。
 #[tauri::command]
 pub async fn pull_docker_image(image: String, app_handle: AppHandle) -> Result<(), String> {
     let _ = app_handle.emit(
@@ -355,10 +355,10 @@ pub async fn pull_docker_image(image: String, app_handle: AppHandle) -> Result<(
     }
 }
 
-/// Start a Docker container from a predefined profile.
+/// 根据预定义方案启动一个 Docker 容器。
 ///
-/// If a container with the generated name already exists (stopped or running)
-/// it is started rather than re-created.  Returns the container ID.
+/// 如果生成的名字对应的容器已经存在（无论已停止还是正在运行），
+/// 会直接启动它而不是重新创建。返回容器 ID。
 #[tauri::command]
 pub async fn start_docker_container(
     profile_id: String,
@@ -372,8 +372,7 @@ pub async fn start_docker_container(
 
     let name = container_name.unwrap_or_else(|| format!("baiyu-{}", profile_id));
 
-    // Check if a container with this name already exists by listing all
-    // containers and matching on the Names field.
+    // 通过列出全部容器并匹配 Names 字段，检查这个名字的容器是否已经存在。
     let existing_id: String = {
         let mut cmd = docker_cmd();
         cmd.args(["ps", "-a", "--format", "{{json .}}"]);
@@ -410,7 +409,7 @@ pub async fn start_docker_container(
         return Ok(existing_id);
     }
 
-    // Build `docker run` arguments.
+    // 构建 `docker run` 的参数。
     let mut args: Vec<String> = vec![
         "run".to_string(),
         "-d".to_string(),
@@ -461,7 +460,7 @@ pub async fn start_docker_container(
     Ok(container_id)
 }
 
-/// Stop a running Docker container.
+/// 停止一个正在运行的 Docker 容器。
 #[tauri::command]
 pub async fn stop_docker_container(container_id: String) -> Result<(), String> {
     let mut cmd = docker_cmd();
@@ -483,7 +482,7 @@ pub async fn stop_docker_container(container_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Force-remove a Docker container (works whether it is stopped or running).
+/// 强制删除一个 Docker 容器（无论它是已停止还是正在运行都能用）。
 #[tauri::command]
 pub async fn remove_docker_container(container_id: String) -> Result<(), String> {
     let mut cmd = docker_cmd();
@@ -505,7 +504,7 @@ pub async fn remove_docker_container(container_id: String) -> Result<(), String>
     Ok(())
 }
 
-/// Return the list of predefined Docker AI deployment profiles.
+/// 返回预定义的 Docker AI 部署方案列表。
 #[tauri::command]
 pub fn get_docker_profiles_cmd() -> Vec<DockerProfile> {
     get_docker_profiles()

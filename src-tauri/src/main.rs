@@ -196,7 +196,7 @@ fn main() {
             // LLM 相关命令
             commands::llm::stream_message,
             commands::llm::cancel_stream,
-            // Auth commands
+            // 认证相关命令
             commands::auth::get_baidu_access_token,
             // 检测最新版本(设置页手动检测按钮)
             commands::app_update::check_latest_releases,
@@ -228,7 +228,7 @@ fn main() {
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
-            // Local model commands
+            // 本地模型相关命令
             commands::local_model::check_ollama_status,
             commands::local_model::list_local_models,
             commands::local_model::show_local_model,
@@ -236,7 +236,7 @@ fn main() {
             commands::local_model::delete_local_model,
             commands::local_model::get_model_sources_cmd,
             commands::local_model::get_ollama_version,
-            // Ollama installation & service management
+            // Ollama 安装与服务管理
             commands::local_model::detect_ollama_installation,
             commands::local_model::start_ollama_service,
             commands::local_model::stop_ollama_service,
@@ -245,13 +245,13 @@ fn main() {
             commands::local_model::install_ollama,
             commands::local_model::search_ollama_models,
             commands::local_model::get_ollama_download_mirrors_cmd,
-            // LM Studio commands
+            // LM Studio 相关命令
             commands::lmstudio::check_lmstudio_status,
             commands::lmstudio::list_lmstudio_models,
             commands::lmstudio::pull_lmstudio_model,
             commands::lmstudio::load_lmstudio_model,
             commands::lmstudio::unload_lmstudio_model,
-            // Docker commands
+            // Docker 相关命令
             commands::docker::check_docker_status,
             commands::docker::list_docker_images,
             commands::docker::list_docker_containers,
@@ -260,7 +260,7 @@ fn main() {
             commands::docker::stop_docker_container,
             commands::docker::remove_docker_container,
             commands::docker::get_docker_profiles_cmd,
-            // Skill commands
+            // Skill 相关命令
             commands::skills::save_skill,
             commands::skills::list_skills,
             commands::skills::delete_skill,
@@ -499,7 +499,7 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-// Database command wrappers
+// 数据库命令的包装函数
 #[tauri::command]
 async fn save_session_cmd(
     session: ChatSession,

@@ -12,10 +12,10 @@ use super::types::*;
 use super::db;
 use crate::workspace::commands::{send_workspace_message, insert_workspace_log};
 
-// ─── next_run_at computation ────────────────────────────────────────────────
+// ─── next_run_at 计算 ────────────────────────────────────────────────
 
-/// Compute the first (or next) `next_run_at` for a freshly created schedule.
-/// Returns `None` only when data is inconsistent (e.g., `Once` without `once_at`).
+/// 为新创建的定时任务计算首次（或下一次）的 `next_run_at`。
+/// 仅当数据不一致时（例如 `Once` 类型却没有 `once_at`）才会返回 `None`。
 pub fn compute_initial_next_run_at(req: &CreateScheduleRequest) -> Option<i64> {
     let now = chrono::Utc::now().timestamp_millis();
     match req.kind {
@@ -36,7 +36,7 @@ pub fn compute_initial_next_run_at(req: &CreateScheduleRequest) -> Option<i64> {
     }
 }
 
-/// Next occurrence of `HH:MM` (local time), at or after `after_ms`.
+/// 在 `after_ms` 之后（含）最近一次到达 `HH:MM`（本地时间）的时刻。
 fn next_daily_occurrence(at_time: &str, after_ms: i64) -> Option<i64> {
     let t = NaiveTime::parse_from_str(at_time, "%H:%M").ok()?;
     let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
@@ -51,7 +51,7 @@ fn next_daily_occurrence(at_time: &str, after_ms: i64) -> Option<i64> {
     }
 }
 
-/// Next occurrence of weekday `wd` (0=Mon…6=Sun) at `HH:MM` local time.
+/// 下一次到达星期 `wd`（0=周一…6=周日）本地时间 `HH:MM` 的时刻。
 fn next_weekly_occurrence(at_time: &str, wd: u32, after_ms: i64) -> Option<i64> {
     let t = NaiveTime::parse_from_str(at_time, "%H:%M").ok()?;
     let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
@@ -69,10 +69,10 @@ fn next_weekly_occurrence(at_time: &str, wd: u32, after_ms: i64) -> Option<i64> 
     }
 }
 
-/// Compute `next_run_at` after a schedule has just fired.
+/// 在定时任务刚刚触发之后，计算下一次的 `next_run_at`。
 pub fn compute_next_run_at(schedule: &Schedule, fired_at_ms: i64) -> Option<i64> {
     match schedule.kind {
-        ScheduleKind::Once => None, // will be disabled
+        ScheduleKind::Once => None, // 触发后会被禁用
         ScheduleKind::Interval => {
             let mins = schedule.interval_minutes.unwrap_or(60);
             Some(fired_at_ms + mins * 60_000)
@@ -101,7 +101,7 @@ pub fn compute_next_run_at(schedule: &Schedule, fired_at_ms: i64) -> Option<i64>
     }
 }
 
-// ─── Background scheduler loop ──────────────────────────────────────────────
+// ─── 后台调度循环 ──────────────────────────────────────────────
 
 pub async fn run_scheduler_loop(app_handle: AppHandle, cancel: CancellationToken) {
     log::info!("[scheduler] 调度循环已启动，每 30 秒检查一次");
@@ -162,7 +162,7 @@ async fn fire_schedule(app_handle: &AppHandle, schedule: &Schedule, now_ms: i64,
     }
 }
 
-// ─── Tauri commands ─────────────────────────────────────────────────────────
+// ─── Tauri 命令 ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn schedule_create(

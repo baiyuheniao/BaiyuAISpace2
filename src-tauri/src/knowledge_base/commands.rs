@@ -18,13 +18,13 @@ pub struct KbState {
     pub db_path: String,
 }
 
-/// Initialize knowledge base tables
+/// 初始化知识库相关数据表
 pub fn init_knowledge_base(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     init_sqlite_tables(conn)
 }
 
-/// Retrieve API key from system keyring using embedding config ID
-/// The keyring entry format is: emb_{config_id}
+/// 根据 embedding 配置 ID 从系统 keyring 中取出对应的 API Key
+/// keyring 条目格式为：emb_{config_id}
 fn get_embedding_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
     let entry = Entry::new(
         "BaiyuAISpace",
@@ -44,7 +44,7 @@ fn get_embedding_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> 
     }
 }
 
-/// Create a new knowledge base
+/// 创建新知识库
 #[tauri::command]
 pub async fn create_knowledge_base(
     request: CreateKnowledgeBaseRequest,
@@ -58,7 +58,7 @@ pub async fn create_knowledge_base(
         ));
     }
 
-    // Validate chunk_overlap < chunk_size
+    // 校验 chunk_overlap 必须小于 chunk_size
     let chunk_size = request.chunk_size.unwrap_or(1000);
     let chunk_overlap = request.chunk_overlap.unwrap_or(200);
     if chunk_overlap >= chunk_size {
@@ -87,7 +87,7 @@ pub async fn create_knowledge_base(
             &request.description,
             &request.embedding_provider,
             &request.embedding_model,
-            1536i32,     // embedding_dim - default 1536
+            1536i32,     // embedding_dim —— 默认 1536
             &request.embedding_api_config_id,
             &request.embedding_base_url,
             chunk_size,
@@ -125,7 +125,7 @@ pub async fn create_knowledge_base(
     })
 }
 
-/// List all knowledge bases
+/// 列出所有知识库
 #[tauri::command]
 pub async fn list_knowledge_bases(
     kb_state: State<'_, KbState>,
@@ -165,7 +165,7 @@ pub async fn list_knowledge_bases(
     Ok(bases)
 }
 
-/// Delete knowledge base
+/// 删除知识库
 #[tauri::command]
 pub async fn delete_knowledge_base(
     kb_id: String,
@@ -174,7 +174,7 @@ pub async fn delete_knowledge_base(
     let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-    // Check if knowledge base exists
+    // 检查知识库是否存在
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM knowledge_bases WHERE id = ?1",
         [&kb_id],
@@ -185,22 +185,21 @@ pub async fn delete_knowledge_base(
         return Err(KnowledgeBaseError::NotFound(format!("Knowledge base not found: {}", kb_id)));
     }
 
-    // Delete from SQLite (cascade will delete documents and chunks)
+    // 从 SQLite 中删除（级联删除会自动清掉关联的 documents 和 chunks）
     conn.execute(
         "DELETE FROM knowledge_bases WHERE id = ?1",
         [&kb_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-    // Delete vector table
+    // 删除向量表
     kb_state.vector_store.drop_kb_table(&kb_id).await?;
 
     log::info!("Deleted knowledge base: {}", kb_id);
     Ok(())
 }
 
-/// Mark a document as failed and clean up any chunks/FTS5 rows already
-/// written for it in Phase 1, so it never gets stuck showing "processing"
-/// forever with orphaned rows left behind (see #import_document Phase 2 failures).
+/// 把文档标记为失败，并清理掉阶段一（Phase 1）里已经写入的 chunks/FTS5 记录，
+/// 避免文档卡在“处理中”状态却留下一堆孤儿数据（对应 import_document 阶段二失败的情况）。
 async fn mark_document_failed(
     db_state: &State<'_, crate::db::DbState>,
     doc_id: &str,
@@ -217,7 +216,7 @@ async fn mark_document_failed(
         rusqlite::params![error_msg, doc_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-    // Clean up FTS5 entries BEFORE deleting chunks (need rowid from chunks)
+    // 必须在删除 chunks 之前先清理 FTS5 条目（需要用到 chunks 里的 rowid）
     if let Err(cleanup_err) = conn.execute(
         "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
         rusqlite::params![doc_id],
@@ -225,7 +224,7 @@ async fn mark_document_failed(
         log::warn!("[KB] Failed to clean up FTS5 entries: {}", cleanup_err);
     }
 
-    // Clean up orphan chunks (after FTS5 cleanup)
+    // 清理孤儿 chunks（在 FTS5 清理之后进行）
     if let Err(cleanup_err) = conn.execute(
         "DELETE FROM chunks WHERE document_id = ?1",
         rusqlite::params![doc_id],
@@ -236,17 +235,17 @@ async fn mark_document_failed(
     Ok(())
 }
 
-/// Import document to knowledge base
+/// 向知识库导入文档
 ///
-/// # Fix for #33 and #34:
-/// - Phase 1 (DB lock held): Read KB config, create document record, parse file, write chunks + FTS
-/// - Phase 2 (DB lock released): Generate embeddings via network (no lock held)
-/// - Phase 3 (DB lock re-acquired): Write vectors, update document status
-/// - If Phase 2 fails, Phase 3 marks document as "error" and cleans up orphan chunks
+/// # 对应 #33、#34 的修复：
+/// - 阶段一（持有 DB 锁）：读取知识库配置、创建文档记录、解析文件、写入 chunks + FTS
+/// - 阶段二（释放 DB 锁）：通过网络请求生成 embedding（不持锁）
+/// - 阶段三（重新获取 DB 锁）：写入向量、更新文档状态
+/// - 如果阶段二失败，阶段三会把文档标记为 "error" 并清理孤儿 chunks
 ///
-/// # Fix for #32:
-/// - API key is retrieved from secure storage (keyring) using embedding_api_config_id
-/// - Frontend no longer passes api_key parameter
+/// # 对应 #32 的修复：
+/// - API Key 改为通过 embedding_api_config_id 从安全存储（keyring）中读取
+/// - 前端不再传递 api_key 参数
 #[tauri::command]
 pub async fn import_document(
     kb_id: String,
@@ -254,13 +253,13 @@ pub async fn import_document(
     db_state: State<'_, crate::db::DbState>,
     kb_state: State<'_, KbState>,
 ) -> Result<Document, KnowledgeBaseError> {
-    // ===== Phase 1: Database operations (lock held) =====
+    // ===== 阶段一：数据库操作（持有锁） =====
     let (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks) = {
         let db = db_state.0.lock().await;
         let conn = rusqlite::Connection::open(&db.path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Get knowledge base config
+        // 获取知识库配置
         let kb: KnowledgeBase = conn.query_row(
             "SELECT id, name, description, embedding_api_config_id,
              chunk_size, chunk_overlap, created_at, updated_at, document_count,
@@ -285,7 +284,7 @@ pub async fn import_document(
             }
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Create document record
+        // 创建文档记录
         let doc_id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp_millis();
         let file_hash = calculate_file_hash(&file_path).await?;
@@ -300,7 +299,7 @@ pub async fn import_document(
             .unwrap_or("txt")
             .to_lowercase();
 
-        // Get file size
+        // 获取文件大小
         let file_size = match tokio::fs::metadata(&file_path).await {
             Ok(m) => m.len() as i64,
             Err(e) => {
@@ -319,7 +318,7 @@ pub async fn import_document(
             rusqlite::params![&doc_id, &kb_id, &file_name, &file_type, file_size, &file_hash, now],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Parse document
+        // 解析文档
         let content = match parse_document(&file_path).await {
             Ok(c) => c,
             Err(e) => {
@@ -331,17 +330,17 @@ pub async fn import_document(
             }
         };
 
-        // Store preview
+        // 存储预览内容
         let preview: String = content.chars().take(500).collect();
         conn.execute(
             "UPDATE documents SET content_preview = ?1 WHERE id = ?2",
             rusqlite::params![&preview, &doc_id],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Split into chunks
+        // 切分为多个 chunk
         let chunks = split_text(&content, kb.chunk_size as usize, kb.chunk_overlap as usize);
 
-        // Write chunks to SQLite and FTS5
+        // 把 chunk 写入 SQLite 和 FTS5
         let mut all_chunk_ids = Vec::new();
         for (i, chunk_text) in chunks.iter().enumerate() {
             let chunk_id = Uuid::new_v4().to_string();
@@ -355,7 +354,7 @@ pub async fn import_document(
                 rusqlite::params![&chunk_id, &doc_id, &kb_id, chunk_text, i as i32, tokens, now],
             ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-            // Insert into FTS5 - log error instead of ignoring
+            // 写入 FTS5 —— 出错时记日志而不是直接忽略
             if let Err(e) = conn.execute(
                 "INSERT INTO chunks_fts (rowid, kb_id, content) VALUES (last_insert_rowid(), ?1, ?2)",
                 rusqlite::params![&kb_id, chunk_text],
@@ -368,10 +367,10 @@ pub async fn import_document(
 
         (doc_id, kb, file_name, file_type, file_size, file_hash, preview, chunks)
     };
-    // ===== Phase 1 END: DB lock released =====
+    // ===== 阶段一结束：释放 DB 锁 =====
 
-    // ===== Phase 2: Network operation (no DB lock held) =====
-    // Retrieve API key from secure storage instead of receiving from frontend (#32)
+    // ===== 阶段二：网络请求（不持有 DB 锁） =====
+    // 从安全存储中读取 API Key，而不再由前端传入（#32）
     let api_key = match get_embedding_api_key(&kb.embedding_api_config_id) {
         Ok(key) => key,
         Err(e) => {
@@ -381,10 +380,9 @@ pub async fn import_document(
         }
     };
 
-    // Use the embedding provider/model/base_url stored on the knowledge base
-    // itself (set at creation time from the selected Embedding API config).
-    // Fall back to OpenAI defaults only for knowledge bases created before
-    // this field was populated.
+    // 使用知识库自身保存的 embedding provider/model/base_url
+    // （这些字段在创建知识库时，根据所选的 Embedding API 配置写入）。
+    // 仅对创建于该字段引入之前的旧知识库，才回退到 OpenAI 默认值。
     let (embedding_provider, embedding_model, embedding_base_url) =
         if !kb.embedding_provider.is_empty() && !kb.embedding_model.is_empty() {
             (kb.embedding_provider.clone(), kb.embedding_model.clone(), kb.embedding_base_url.clone())
@@ -400,7 +398,7 @@ pub async fn import_document(
         &embedding_base_url,
     ).await;
 
-    // Handle embedding failure: mark document as error and clean up orphan chunks
+    // 处理 embedding 生成失败的情况：把文档标记为 error 并清理孤儿 chunks
     let embeddings = match embeddings_result {
         Ok(emb) => emb,
         Err(e) => {
@@ -410,17 +408,17 @@ pub async fn import_document(
         }
     };
 
-    // ===== Phase 3: Finalize in DB =====
-    // rusqlite::Connection is not Send, so we cannot hold it across .await points.
-    // Split into sub-phases: sync DB work → async vector insert → sync DB update.
+    // ===== 阶段三：在数据库中收尾 =====
+    // rusqlite::Connection 不是 Send 的，不能跨越 .await 持有它。
+    // 因此拆成几个子阶段：同步的 DB 操作 → 异步的向量插入 → 同步的 DB 更新。
 
-    // Phase 3a: Query chunk IDs and build vectors (synchronous, no await)
+    // 阶段 3a：查询 chunk ID 并构建向量（同步，不涉及 await）
     let (vectors_to_insert, chunk_count_actual): (Vec<_>, usize) = {
         let db = db_state.0.lock().await;
         let conn = rusqlite::Connection::open(&db.path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Query chunk IDs from DB
+        // 从数据库中查询 chunk ID
         let mut stmt = conn.prepare(
             "SELECT id FROM chunks WHERE document_id = ?1 ORDER BY chunk_index ASC"
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -429,7 +427,7 @@ pub async fn import_document(
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
-        // stmt is dropped here
+        // stmt 在此处被释放
 
         let count = chunk_ids.len();
 
@@ -450,14 +448,14 @@ pub async fn import_document(
                 .collect();
             (vectors, count)
         }
-    }; // db lock released here
+    }; // db 锁在此处释放
 
-    // Phase 3b: Insert vectors (async, no DB lock held)
+    // 阶段 3b：插入向量（异步，不持有 DB 锁）
     if !vectors_to_insert.is_empty() {
         kb_state.vector_store.insert_vectors(&kb_id, vectors_to_insert).await?;
     }
 
-    // Phase 3c: Update document status (re-acquire DB lock)
+    // 阶段 3c：更新文档状态（重新获取 DB 锁）
     {
         let db = db_state.0.lock().await;
         let conn = rusqlite::Connection::open(&db.path)
@@ -473,7 +471,7 @@ pub async fn import_document(
             "UPDATE knowledge_bases SET document_count = document_count + 1, updated_at = ?1 WHERE id = ?2",
             rusqlite::params![now, &kb_id],
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
-    } // db lock released
+    } // db 锁已释放
 
     log::info!("Imported document {} with {} chunks", file_name, chunk_count_actual);
 
@@ -492,7 +490,7 @@ pub async fn import_document(
     })
 }
 
-/// List documents in knowledge base
+/// 列出知识库中的文档
 #[tauri::command]
 pub async fn list_documents(
     kb_id: String,
@@ -538,12 +536,12 @@ pub async fn list_documents(
     Ok(docs)
 }
 
-/// Delete document
+/// 删除文档
 ///
-/// # Fix for #35:
-/// - Verify document exists and belongs to the specified knowledge base
-/// - Use safe document count decrement (MAX(count - 1, 0))
-/// - Use transaction for atomicity
+/// # 对应 #35 的修复：
+/// - 校验文档存在，且确实属于指定的知识库
+/// - 使用安全的方式递减文档计数（MAX(count - 1, 0)，不会变负数）
+/// - 用事务保证操作的原子性
 #[tauri::command]
 pub async fn delete_document(
     doc_id: String,
@@ -553,7 +551,7 @@ pub async fn delete_document(
     let conn = rusqlite::Connection::open(&kb_state.db_path)
         .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-    // Verify document exists and belongs to the specified knowledge base
+    // 校验文档存在，且属于指定的知识库
     let doc_exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM documents WHERE id = ?1 AND kb_id = ?2",
         rusqlite::params![&doc_id, &kb_id],
@@ -566,10 +564,10 @@ pub async fn delete_document(
         ));
     }
 
-    // Delete vectors
+    // 删除向量
     kb_state.vector_store.delete_document_vectors(&kb_id, &doc_id).await?;
 
-    // Delete from FTS5 (must delete before deleting chunks since we need rowid)
+    // 从 FTS5 中删除（必须在删除 chunks 之前进行，因为需要用到 rowid）
     if let Err(e) = conn.execute(
         "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE document_id = ?1)",
         rusqlite::params![&doc_id],
@@ -577,13 +575,13 @@ pub async fn delete_document(
         log::warn!("[KB] FTS5 cleanup failed for document {}: {}", doc_id, e);
     }
 
-    // Delete from SQLite (cascade will delete chunks)
+    // 从 SQLite 中删除（级联删除会自动清掉 chunks）
     conn.execute(
         "DELETE FROM documents WHERE id = ?1",
         rusqlite::params![&doc_id],
     ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-    // Update knowledge base document count safely (never go below 0)
+    // 安全地更新知识库的文档计数（保证永远不会小于 0）
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "UPDATE knowledge_bases SET document_count = MAX(document_count - 1, 0), updated_at = ?1 WHERE id = ?2",
@@ -594,16 +592,16 @@ pub async fn delete_document(
     Ok(())
 }
 
-/// Search knowledge base
+/// 检索知识库
 ///
-/// # Fix for #32:
-/// - API key is retrieved from secure storage using embedding_api_config_id
+/// # 对应 #32 的修复：
+/// - API Key 改为通过 embedding_api_config_id 从安全存储中读取
 #[tauri::command]
 pub async fn search_knowledge_base(
     request: RetrievalRequest,
     kb_state: State<'_, KbState>,
 ) -> Result<RetrievalResult, KnowledgeBaseError> {
-    // Get embedding API config from the knowledge base
+    // 从知识库中获取 embedding API 配置
     let (embedding_api_config_id, embedding_provider, embedding_model, embedding_base_url) = {
         let conn = rusqlite::Connection::open(&kb_state.db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
@@ -614,8 +612,8 @@ pub async fn search_knowledge_base(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        // Fall back to OpenAI defaults only for knowledge bases created
-        // before embedding_provider/model were populated.
+        // 仅对创建于 embedding_provider/model 字段引入之前的旧知识库，
+        // 才回退到 OpenAI 默认值。
         if provider.is_empty() || model.is_empty() {
             (config_id, "openai".to_string(), "text-embedding-3-small".to_string(), String::new())
         } else {
@@ -623,13 +621,13 @@ pub async fn search_knowledge_base(
         }
     };
 
-    // Retrieve API key from secure storage (#32)
+    // 从安全存储中读取 API Key（#32）
     let api_key = get_embedding_api_key(&embedding_api_config_id)?;
 
     let retriever = Retriever::new(kb_state.vector_store.clone(), kb_state.db_path.clone());
     let mut result = retriever.retrieve(request.clone(), &embedding_provider, &embedding_model, &embedding_base_url, &api_key).await?;
 
-    // Optional reranker pass
+    // 可选的 reranker 精排环节
     if let Some(ref config_id) = request.reranker_config_id {
         if !result.chunks.is_empty() {
             match get_reranker_api_key(config_id) {
@@ -666,7 +664,7 @@ pub async fn search_knowledge_base(
     Ok(result)
 }
 
-/// Retrieve reranker API key from system keyring
+/// 从系统 keyring 中取出 reranker 的 API Key
 fn get_reranker_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
     let entry = Entry::new(
         "BaiyuAISpace",
@@ -684,7 +682,7 @@ fn get_reranker_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
     }
 }
 
-/// Get available embedding models
+/// 获取可用的 embedding 模型列表
 #[tauri::command]
 pub fn get_embedding_models() -> Vec<(String, String, i32)> {
     super::embedding::get_available_embedding_models()
