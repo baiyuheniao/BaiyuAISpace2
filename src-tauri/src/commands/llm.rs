@@ -1845,65 +1845,12 @@ pub async fn run_turn(
     system_prompt: Option<&str>,
     native_messages: &[serde_json::Value],
     tools: &[MCPTool],
+    max_tokens: Option<u32>,
+    enable_thinking: bool,
 ) -> Result<TurnOutcome, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client(&url)?;
-
-    let body = match provider {
-        "anthropic" => {
-            let mut b = serde_json::json!({
-                "model": model, "messages": native_messages, "max_tokens": 4096, "stream": false,
-            });
-            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
-                b["system"] = serde_json::json!(sys);
-            }
-            if !tools.is_empty() {
-                let tools_json: Vec<_> = tools
-                    .iter()
-                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
-                    .collect();
-                b["tools"] = serde_json::json!(tools_json);
-            }
-            b
-        }
-        "google" => {
-            let mut b = serde_json::json!({
-                "contents": native_messages, "generationConfig": { "maxOutputTokens": 4096 },
-            });
-            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
-                b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
-            }
-            if !tools.is_empty() {
-                let declarations: Vec<_> = tools
-                    .iter()
-                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "parameters": t.input_schema }))
-                    .collect();
-                b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
-            }
-            b
-        }
-        _ => {
-            let mut all_messages = Vec::with_capacity(native_messages.len() + 1);
-            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
-                all_messages.push(serde_json::json!({ "role": "system", "content": sys }));
-            }
-            all_messages.extend_from_slice(native_messages);
-            let mut b = serde_json::json!({ "model": model, "messages": all_messages, "stream": false });
-            if !tools.is_empty() {
-                let tools_json: Vec<_> = tools
-                    .iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "type": "function",
-                            "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
-                        })
-                    })
-                    .collect();
-                b["tools"] = serde_json::json!(tools_json);
-            }
-            b
-        }
-    };
+    let body = build_run_turn_body(provider, model, system_prompt, native_messages, tools, max_tokens, enable_thinking);
 
     let headers = build_headers(provider, api_key);
     let response = client.post(&url).headers(headers).json(&body).send().await?;
@@ -1992,6 +1939,152 @@ pub async fn run_turn(
             }
             let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
             Ok(TurnOutcome::Text(text))
+        }
+    }
+}
+
+/// Pure request-body construction for `run_turn`, factored out so the
+/// per-provider max_tokens/thinking/cache-breakpoint shaping can be unit
+/// tested without a live HTTP round-trip -- same split as
+/// `build_stream_request_body` for the streaming path.
+fn build_run_turn_body(
+    provider: &str,
+    model: &str,
+    system_prompt: Option<&str>,
+    native_messages: &[serde_json::Value],
+    tools: &[MCPTool],
+    max_tokens: Option<u32>,
+    enable_thinking: bool,
+) -> serde_json::Value {
+    match provider {
+        "anthropic" => {
+            // Same reasoning as build_stream_request_body: max_tokens is a
+            // required field for Anthropic, and legacy thinking needs the
+            // ceiling to exceed its own 8000-token budget.
+            let is_legacy_thinking =
+                enable_thinking && (model.contains("claude-3") || model.contains("4-5") || model.contains("4.5"));
+            let max_tokens_val = match max_tokens {
+                Some(v) if is_legacy_thinking => v.max(9000),
+                Some(v) => v,
+                None => 32000,
+            };
+
+            // Prompt caching: mark the last content block of the
+            // second-to-last message as a cache breakpoint, same strategy as
+            // the streaming path -- everything up to and including it gets
+            // cached server-side, so a growing conversation only pays full
+            // price for the newest turn. `native_messages` already grows in
+            // place across rounds (see `append_tool_round`/`append_text_reply`),
+            // so this is recomputed fresh on every call within a wake, same
+            // as the streaming path recomputes it on every request.
+            let cache_breakpoint_idx = native_messages.len().checked_sub(2);
+            let msgs: Vec<serde_json::Value> = native_messages
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    if cache_breakpoint_idx != Some(i) {
+                        return m.clone();
+                    }
+                    let mut m = m.clone();
+                    match m.get("content") {
+                        // Plain string content (the common case from
+                        // build_native_messages/append_text_reply) -> wrap as
+                        // a single text block so cache_control has somewhere
+                        // to attach; Anthropic accepts either shape.
+                        Some(serde_json::Value::String(text)) => {
+                            m["content"] = serde_json::json!([{
+                                "type": "text", "text": text, "cache_control": {"type": "ephemeral"}
+                            }]);
+                        }
+                        // Already block-array content (a tool_use/tool_result
+                        // round from append_tool_round) -> mark its last block.
+                        Some(serde_json::Value::Array(_)) => {
+                            if let Some(blocks) = m.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                if let Some(last) = blocks.last_mut() {
+                                    last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    m
+                })
+                .collect();
+
+            let mut b = serde_json::json!({
+                "model": model, "messages": msgs, "max_tokens": max_tokens_val, "stream": false,
+            });
+            if enable_thinking {
+                if is_legacy_thinking {
+                    b["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 8000});
+                } else {
+                    b["thinking"] = serde_json::json!({"type": "adaptive"});
+                }
+            }
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
+                // System prompt is identical on every request for a given
+                // Agent, so it's the single best thing to cache -- always mark it.
+                b["system"] = serde_json::json!([{ "type": "text", "text": sys, "cache_control": {"type": "ephemeral"} }]);
+            }
+            if !tools.is_empty() {
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
+                    .collect();
+                b["tools"] = serde_json::json!(tools_json);
+            }
+            b
+        }
+        "google" => {
+            let mut generation_config = serde_json::json!({});
+            if let Some(v) = max_tokens {
+                generation_config["maxOutputTokens"] = serde_json::json!(v);
+            }
+            if enable_thinking {
+                generation_config["thinkingConfig"] = serde_json::json!({"thinkingBudget": 8000});
+            }
+            let mut b = serde_json::json!({
+                "contents": native_messages, "generationConfig": generation_config,
+            });
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
+                b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
+            }
+            if !tools.is_empty() {
+                let declarations: Vec<_> = tools
+                    .iter()
+                    .map(|t| serde_json::json!({ "name": t.name, "description": t.description, "parameters": t.input_schema }))
+                    .collect();
+                b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
+            }
+            b
+        }
+        _ => {
+            let mut all_messages = Vec::with_capacity(native_messages.len() + 1);
+            if let Some(sys) = system_prompt.filter(|s| !s.trim().is_empty()) {
+                all_messages.push(serde_json::json!({ "role": "system", "content": sys }));
+            }
+            all_messages.extend_from_slice(native_messages);
+            let mut b = serde_json::json!({ "model": model, "messages": all_messages, "stream": false });
+            if let Some(v) = max_tokens {
+                b["max_tokens"] = serde_json::json!(v);
+            }
+            if enable_thinking && provider == "siliconflow" {
+                b["enable_thinking"] = serde_json::json!(true);
+                b["thinking_budget"] = serde_json::json!(8000);
+            }
+            if !tools.is_empty() {
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
+                        })
+                    })
+                    .collect();
+                b["tools"] = serde_json::json!(tools_json);
+            }
+            b
         }
     }
 }
@@ -2544,5 +2637,116 @@ mod provider_tool_calling_tests {
         assert_eq!(tool_msgs.len(), 2, "both rounds' tool results must both be present in the second follow-up request");
         assert_eq!(tool_msgs[0]["tool_call_id"], "call_1");
         assert_eq!(tool_msgs[1]["tool_call_id"], "call_2");
+    }
+
+    fn native_msg(role: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({ "role": role, "content": text })
+    }
+
+    #[test]
+    fn run_turn_body_max_tokens_defaults_match_streaming_path_per_provider() {
+        let msgs = vec![native_msg("user", "hi")];
+        // Anthropic requires the field -- unset falls back to a generous default.
+        let anthropic = build_run_turn_body("anthropic", "claude-3-5-sonnet", None, &msgs, &[], None, false);
+        assert_eq!(anthropic["max_tokens"], 32000);
+        let anthropic_set = build_run_turn_body("anthropic", "claude-3-5-sonnet", None, &msgs, &[], Some(1000), false);
+        assert_eq!(anthropic_set["max_tokens"], 1000);
+
+        // Google/OpenAI-compatible: omit entirely when unset rather than
+        // guessing a small ceiling that would truncate long replies.
+        let google = build_run_turn_body("google", "gemini-2.5-pro", None, &msgs, &[], None, false);
+        assert!(google["generationConfig"].get("maxOutputTokens").is_none());
+        let google_set = build_run_turn_body("google", "gemini-2.5-pro", None, &msgs, &[], Some(2048), false);
+        assert_eq!(google_set["generationConfig"]["maxOutputTokens"], 2048);
+
+        let openai = build_run_turn_body("deepseek", "deepseek-chat", None, &msgs, &[], None, false);
+        assert!(openai.get("max_tokens").is_none());
+        let openai_set = build_run_turn_body("deepseek", "deepseek-chat", None, &msgs, &[], Some(4096), false);
+        assert_eq!(openai_set["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn run_turn_body_legacy_thinking_forces_anthropic_max_tokens_floor() {
+        let msgs = vec![native_msg("user", "hi")];
+        // Claude 3.x legacy thinking requires max_tokens > 8000 for budget_tokens
+        // to be valid -- a small explicit value must be bumped up, not honored as-is.
+        let body = build_run_turn_body("anthropic", "claude-3-5-sonnet", None, &msgs, &[], Some(2000), true);
+        assert_eq!(body["max_tokens"], 9000);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8000);
+
+        // Newer (non-legacy) models use the adaptive form instead, no budget_tokens.
+        let adaptive = build_run_turn_body("anthropic", "claude-opus-4-6", None, &msgs, &[], Some(2000), true);
+        assert_eq!(adaptive["max_tokens"], 2000, "adaptive thinking doesn't force the 9000 floor");
+        assert_eq!(adaptive["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn run_turn_body_thinking_only_applied_to_siliconflow_among_openai_compatible() {
+        let msgs = vec![native_msg("user", "hi")];
+        let sf = build_run_turn_body("siliconflow", "qwen3", None, &msgs, &[], None, true);
+        assert_eq!(sf["enable_thinking"], true);
+        assert_eq!(sf["thinking_budget"], 8000);
+
+        // Every other OpenAI-compatible provider silently no-ops rather than
+        // sending a field the API doesn't understand.
+        let deepseek = build_run_turn_body("deepseek", "deepseek-chat", None, &msgs, &[], None, true);
+        assert!(deepseek.get("enable_thinking").is_none());
+
+        let google = build_run_turn_body("google", "gemini-2.5-pro", None, &msgs, &[], None, true);
+        assert_eq!(google["generationConfig"]["thinkingConfig"]["thinkingBudget"], 8000);
+    }
+
+    #[test]
+    fn run_turn_body_anthropic_marks_cache_breakpoint_on_second_to_last_message() {
+        // 3 messages: breakpoint should land on index 1 (len - 2), wrapping its
+        // plain-string content into a cache-marked block; the newest message
+        // (index 2) and the very first one (index 0) must stay unmarked.
+        let msgs = vec![native_msg("user", "first"), native_msg("assistant", "second"), native_msg("user", "third")];
+        let body = build_run_turn_body("anthropic", "claude-3-5-sonnet", Some("be helpful"), &msgs, &[], None, false);
+        let sent_msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(sent_msgs[0]["content"], "first", "message before the breakpoint stays a plain string");
+        assert_eq!(sent_msgs[1]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sent_msgs[1]["content"][0]["text"], "second");
+        assert_eq!(sent_msgs[2]["content"], "third", "newest message must not be cache-marked");
+
+        // System prompt is always cache-marked when present.
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["system"][0]["text"], "be helpful");
+    }
+
+    #[test]
+    fn run_turn_body_anthropic_cache_breakpoint_marks_last_block_of_tool_round_message() {
+        // A message already shaped as content blocks (e.g. a tool_result round
+        // appended by append_tool_round) must get its *last* block marked,
+        // not have its whole content replaced.
+        let tool_result_msg = serde_json::json!({
+            "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "42" }]
+        });
+        let msgs = vec![native_msg("user", "first"), tool_result_msg, native_msg("assistant", "reply")];
+        let body = build_run_turn_body("anthropic", "claude-3-5-sonnet", None, &msgs, &[], None, false);
+        let sent_msgs = body["messages"].as_array().unwrap();
+
+        let marked_block = &sent_msgs[1]["content"][0];
+        assert_eq!(marked_block["type"], "tool_result");
+        assert_eq!(marked_block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn run_turn_body_tools_use_correct_shape_per_provider() {
+        let msgs = vec![native_msg("user", "hi")];
+        let tool = sample_tool();
+
+        let anthropic = build_run_turn_body("anthropic", "claude-3-5-sonnet", None, &msgs, &[tool.clone()], None, false);
+        assert!(anthropic["tools"][0].get("input_schema").is_some());
+
+        let google = build_run_turn_body("google", "gemini-2.5-pro", None, &msgs, &[tool.clone()], None, false);
+        assert!(google["tools"][0]["functionDeclarations"][0].get("parameters").is_some());
+
+        let openai = build_run_turn_body("openai", "gpt-4o", None, &msgs, &[tool], None, false);
+        assert_eq!(openai["tools"][0]["type"], "function");
+        assert!(openai["tools"][0]["function"].get("parameters").is_some());
     }
 }

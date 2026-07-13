@@ -103,7 +103,25 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
 
     conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspace_agent_tasks (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            done INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        "#,
+        [],
+    )?;
+
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace ON workspace_agents(workspace_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspace_agent_tasks_agent ON workspace_agent_tasks(agent_id, created_at)",
         [],
     )?;
     conn.execute(
@@ -143,6 +161,27 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     if !agent_columns.contains(&"scratchpad".to_string()) {
         conn.execute("ALTER TABLE workspace_agents ADD COLUMN scratchpad TEXT NOT NULL DEFAULT ''", [])?;
+    }
+    if !agent_columns.contains(&"rag_reranker_config_id".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN rag_reranker_config_id TEXT", [])?;
+    }
+    if !agent_columns.contains(&"rag_reranker_base_url".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN rag_reranker_base_url TEXT", [])?;
+    }
+    if !agent_columns.contains(&"rag_reranker_model".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN rag_reranker_model TEXT", [])?;
+    }
+    if !agent_columns.contains(&"rag_rerank_top_n".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN rag_rerank_top_n INTEGER", [])?;
+    }
+    if !agent_columns.contains(&"require_tool_approval".to_string()) {
+        conn.execute(
+            "ALTER TABLE workspace_agents ADD COLUMN require_tool_approval INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    if !agent_columns.contains(&"enable_thinking".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN enable_thinking INTEGER NOT NULL DEFAULT 0", [])?;
     }
 
     log::info!("Workspace SQLite tables initialized");
@@ -199,6 +238,10 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Option<Workspace>, W
 /// rather than reusing `Database::init`'s long-lived one, so whether cascade
 /// actually fires isn't something this module should depend on.
 pub fn delete_workspace(conn: &Connection, id: &str) -> Result<(), WorkspaceError> {
+    conn.execute(
+        "DELETE FROM workspace_agent_tasks WHERE agent_id IN (SELECT id FROM workspace_agents WHERE workspace_id = ?1)",
+        [id],
+    )?;
     conn.execute("DELETE FROM workspace_messages WHERE workspace_id = ?1", [id])?;
     conn.execute("DELETE FROM workspace_logs WHERE workspace_id = ?1", [id])?;
     conn.execute("DELETE FROM workspace_pending_events WHERE workspace_id = ?1", [id])?;
@@ -242,6 +285,12 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
         rag_retrieval_mode: row.get(16)?,
         scratchpad: row.get(17)?,
         deleted_at: row.get(18)?,
+        rag_reranker_config_id: row.get(19)?,
+        rag_reranker_base_url: row.get(20)?,
+        rag_reranker_model: row.get(21)?,
+        rag_rerank_top_n: row.get(22)?,
+        require_tool_approval: row.get::<_, i64>(23)? != 0,
+        enable_thinking: row.get::<_, i64>(24)? != 0,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -249,15 +298,19 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
 
 const AGENT_SELECT_COLUMNS: &str = "id, workspace_id, name, role, provider, model, base_url, api_config_id, \
      mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at, \
-     rag_top_k, rag_retrieval_mode, scratchpad, deleted_at";
+     rag_top_k, rag_retrieval_mode, scratchpad, deleted_at, \
+     rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval, \
+     enable_thinking";
 
 pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), WorkspaceError> {
     conn.execute(
         "INSERT INTO workspace_agents
          (id, workspace_id, name, role, provider, model, base_url, api_config_id,
           system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at,
-          rag_top_k, rag_retrieval_mode, scratchpad, deleted_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+          rag_top_k, rag_retrieval_mode, scratchpad, deleted_at,
+          rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval,
+          enable_thinking)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         rusqlite::params![
             agent.id,
             agent.workspace_id,
@@ -278,6 +331,12 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
             agent.rag_retrieval_mode,
             agent.scratchpad,
             agent.deleted_at,
+            agent.rag_reranker_config_id,
+            agent.rag_reranker_base_url,
+            agent.rag_reranker_model,
+            agent.rag_rerank_top_n,
+            agent.require_tool_approval as i64,
+            agent.enable_thinking as i64,
         ],
     )?;
     Ok(())
@@ -340,8 +399,10 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
     let rows = conn.execute(
         "UPDATE workspace_agents SET name = ?1, provider = ?2, model = ?3, base_url = ?4, api_config_id = ?5, \
          system_prompt = ?6, mcp_server_ids = ?7, knowledge_base_ids = ?8, active_skill_ids = ?9, \
-         rag_top_k = ?10, rag_retrieval_mode = ?11, updated_at = ?12 \
-         WHERE id = ?13 AND deleted_at IS NULL",
+         rag_top_k = ?10, rag_retrieval_mode = ?11, \
+         rag_reranker_config_id = ?12, rag_reranker_base_url = ?13, rag_reranker_model = ?14, rag_rerank_top_n = ?15, \
+         require_tool_approval = ?16, enable_thinking = ?17, updated_at = ?18 \
+         WHERE id = ?19 AND deleted_at IS NULL",
         rusqlite::params![
             req.name,
             req.provider,
@@ -354,6 +415,12 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
             serde_json::to_string(&req.active_skill_ids).unwrap_or_else(|_| "[]".to_string()),
             req.rag_top_k,
             req.rag_retrieval_mode,
+            req.rag_reranker_config_id,
+            req.rag_reranker_base_url,
+            req.rag_reranker_model,
+            req.rag_rerank_top_n,
+            req.require_tool_approval as i64,
+            req.enable_thinking as i64,
             chrono::Utc::now().timestamp_millis(),
             req.id,
         ],
@@ -382,6 +449,53 @@ pub fn set_scratchpad(conn: &Connection, agent_id: &str, content: &str) -> Resul
         "UPDATE workspace_agents SET scratchpad = ?1 WHERE id = ?2",
         rusqlite::params![content, agent_id],
     )?;
+    Ok(())
+}
+
+fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgentTask> {
+    Ok(WorkspaceAgentTask {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        content: row.get(2)?,
+        done: row.get::<_, i64>(3)? != 0,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+pub fn insert_task(conn: &Connection, task: &WorkspaceAgentTask) -> Result<(), WorkspaceError> {
+    conn.execute(
+        "INSERT INTO workspace_agent_tasks (id, agent_id, content, done, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![task.id, task.agent_id, task.content, task.done as i64, task.created_at, task.updated_at],
+    )?;
+    Ok(())
+}
+
+/// All of an agent's tasks, oldest first -- open items naturally sort before
+/// ones completed later since `done` doesn't reorder the row.
+pub fn list_tasks(conn: &Connection, agent_id: &str) -> Result<Vec<WorkspaceAgentTask>, WorkspaceError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, content, done, created_at, updated_at
+         FROM workspace_agent_tasks WHERE agent_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([agent_id], row_to_task)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn set_task_done(conn: &Connection, task_id: &str, done: bool) -> Result<(), WorkspaceError> {
+    let rows = conn.execute(
+        "UPDATE workspace_agent_tasks SET done = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![done as i64, chrono::Utc::now().timestamp_millis(), task_id],
+    )?;
+    if rows == 0 {
+        return Err(WorkspaceError::NotFound(format!("任务 {} 不存在", task_id)));
+    }
+    Ok(())
+}
+
+pub fn delete_task(conn: &Connection, task_id: &str) -> Result<(), WorkspaceError> {
+    conn.execute("DELETE FROM workspace_agent_tasks WHERE id = ?1", [task_id])?;
     Ok(())
 }
 
@@ -565,7 +679,13 @@ mod tests {
             status: AgentStatus::Idle,
             rag_top_k: 5,
             rag_retrieval_mode: "hybrid".to_string(),
+            rag_reranker_config_id: None,
+            rag_reranker_base_url: None,
+            rag_reranker_model: None,
+            rag_rerank_top_n: None,
             scratchpad: String::new(),
+            require_tool_approval: true,
+            enable_thinking: false,
             deleted_at: None,
             created_at: 1000,
             updated_at: 1000,
@@ -757,6 +877,12 @@ mod tests {
                 active_skill_ids: vec![],
                 rag_top_k: 8,
                 rag_retrieval_mode: "vector".to_string(),
+                rag_reranker_config_id: Some("rerank-cfg-1".to_string()),
+                rag_reranker_base_url: Some("https://api.cohere.com".to_string()),
+                rag_reranker_model: Some("rerank-multilingual-v3.0".to_string()),
+                rag_rerank_top_n: Some(3),
+                require_tool_approval: false,
+                enable_thinking: true,
             },
         )
         .unwrap();
@@ -767,6 +893,10 @@ mod tests {
         assert_eq!(fetched.rag_top_k, 8);
         assert_eq!(fetched.rag_retrieval_mode, "vector");
         assert_eq!(fetched.knowledge_base_ids, vec!["kb-1".to_string()]);
+        assert_eq!(fetched.rag_reranker_config_id, Some("rerank-cfg-1".to_string()));
+        assert_eq!(fetched.rag_rerank_top_n, Some(3));
+        assert!(!fetched.require_tool_approval);
+        assert!(fetched.enable_thinking);
         // Status untouched by an edit -- the live loop reloads config, not status.
         assert_eq!(fetched.status, AgentStatus::Running);
 
@@ -786,6 +916,12 @@ mod tests {
                     active_skill_ids: vec![],
                     rag_top_k: 5,
                     rag_retrieval_mode: "hybrid".to_string(),
+                    rag_reranker_config_id: None,
+                    rag_reranker_base_url: None,
+                    rag_reranker_model: None,
+                    rag_rerank_top_n: None,
+                    require_tool_approval: true,
+                    enable_thinking: false,
                 },
             ),
             Err(WorkspaceError::AgentNotFound(_))
@@ -835,5 +971,51 @@ mod tests {
 
         resolve_pending_event(&conn, "evt-1").unwrap();
         assert!(list_unresolved_pending_events(&conn, "ws-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tasks_round_trip_ordered_and_toggle_done() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+        let agent = sample_agent("ws-1", AgentRole::Sub, "A");
+        insert_agent(&conn, &agent).unwrap();
+
+        insert_task(&conn, &WorkspaceAgentTask { id: "t1".into(), agent_id: agent.id.clone(), content: "查资料".into(), done: false, created_at: 1, updated_at: 1 }).unwrap();
+        insert_task(&conn, &WorkspaceAgentTask { id: "t2".into(), agent_id: agent.id.clone(), content: "写总结".into(), done: false, created_at: 2, updated_at: 2 }).unwrap();
+
+        let tasks = list_tasks(&conn, &agent.id).unwrap();
+        assert_eq!(tasks.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), vec!["查资料", "写总结"]);
+        assert!(tasks.iter().all(|t| !t.done));
+
+        set_task_done(&conn, "t1", true).unwrap();
+        let tasks = list_tasks(&conn, &agent.id).unwrap();
+        assert!(tasks[0].done);
+        assert!(!tasks[1].done);
+
+        delete_task(&conn, "t2").unwrap();
+        assert_eq!(list_tasks(&conn, &agent.id).unwrap().len(), 1);
+
+        assert!(matches!(set_task_done(&conn, "missing", true), Err(WorkspaceError::NotFound(_))));
+    }
+
+    #[test]
+    fn delete_workspace_also_removes_agent_tasks() {
+        let conn = setup();
+        insert_workspace(
+            &conn,
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+        )
+        .unwrap();
+        let agent = sample_agent("ws-1", AgentRole::Sub, "A");
+        insert_agent(&conn, &agent).unwrap();
+        insert_task(&conn, &WorkspaceAgentTask { id: "t1".into(), agent_id: agent.id.clone(), content: "任务".into(), done: false, created_at: 1, updated_at: 1 }).unwrap();
+
+        delete_workspace(&conn, "ws-1").unwrap();
+
+        assert!(list_tasks(&conn, &agent.id).unwrap().is_empty());
     }
 }

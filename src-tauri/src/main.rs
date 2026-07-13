@@ -36,7 +36,10 @@ use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
 use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
-use workspace::commands::{WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, init_workspace_tables};
+use workspace::commands::{
+    WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingToolApprovals,
+    WakeRateState, init_workspace_tables,
+};
 use workspace::meeting::MeetingsState;
 use scheduler::init_scheduler_tables;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,13 +275,18 @@ fn main() {
             workspace::commands::workspace_list_agents,
             workspace::commands::workspace_update_agent,
             workspace::commands::workspace_delete_agent,
+            workspace::commands::workspace_pause_agent,
+            workspace::commands::workspace_resume_agent,
             workspace::commands::workspace_send_user_message,
             workspace::commands::workspace_list_messages,
             workspace::commands::workspace_list_logs,
             workspace::commands::workspace_resolve_proposal,
             workspace::commands::workspace_resolve_sleep_request,
             workspace::commands::workspace_resolve_question,
+            workspace::commands::workspace_resolve_tool_approval,
             workspace::commands::workspace_list_pending_events,
+            workspace::commands::workspace_list_agent_tasks,
+            workspace::commands::workspace_set_task_done,
             // 定时任务命令
             scheduler::commands::schedule_create,
             scheduler::commands::schedule_list,
@@ -308,7 +316,12 @@ fn main() {
                     return Err(Box::new(e) as Box<dyn std::error::Error>);
                 }
             };
-            
+            // 与 workspace::db::open_conn 保持一致的 busy_timeout 设置 -- 这个连接
+            // 除了做初始化，后面也被 Agent 循环自动恢复扫描复用，同样可能撞上并发写。
+            if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+                log::warn!("设置数据库 busy_timeout 失败: {}", e);
+            }
+
             if let Err(e) = init_knowledge_base(&conn) {
                 log::error!("Failed to initialize knowledge base tables: {}", e);
             }
@@ -396,6 +409,8 @@ fn main() {
             app.manage(PendingProposals::default());
             app.manage(PendingSleepRequests::default());
             app.manage(PendingQuestions::default());
+            app.manage(PendingToolApprovals::default());
+            app.manage(WakeRateState::default());
             app.manage(MeetingsState::default());
             app.manage(CloseToTrayState(Arc::new(AtomicBool::new(true))));
             log::info!("Database and vector store initialized");
