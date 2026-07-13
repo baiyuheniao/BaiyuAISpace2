@@ -639,6 +639,25 @@ pub fn list_unresolved_pending_events(conn: &Connection, workspace_id: &str) -> 
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// 把**所有**未解决的待处理事项统一标记为已解决（过期），返回每个工作组
+/// 被过期的条数。只该在应用启动时调用：这些事项对应的等待通道（oneshot）
+/// 已随上一个进程消亡，永远不可能再被批准或拒绝——不清掉它们，前端每次
+/// 选中工作组都会把它们拉出来，变成一批点了就报错、又永远不消失的僵尸卡片。
+pub fn expire_unresolved_pending_events(conn: &Connection) -> Result<Vec<(String, i64)>, WorkspaceError> {
+    let mut stmt = conn.prepare(
+        "SELECT workspace_id, COUNT(*) FROM workspace_pending_events WHERE resolved_at IS NULL GROUP BY workspace_id",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    let expired: Vec<(String, i64)> = rows.filter_map(|r| r.ok()).collect();
+    if !expired.is_empty() {
+        conn.execute(
+            "UPDATE workspace_pending_events SET resolved_at = ?1 WHERE resolved_at IS NULL",
+            rusqlite::params![chrono::Utc::now().timestamp_millis()],
+        )?;
+    }
+    Ok(expired)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

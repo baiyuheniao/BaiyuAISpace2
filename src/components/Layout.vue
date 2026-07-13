@@ -17,7 +17,7 @@
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed, onMounted, onBeforeUnmount } from "vue";
+import { computed, onMounted, onBeforeUnmount, watch } from "vue";
 
 // 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
@@ -28,6 +28,7 @@ import { useNotification } from "naive-ui";
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
+import { useWorkspaceStore } from "@/stores/workspace";
 
 // 导入快捷键匹配工具
 import { eventMatchesAccelerator } from "@/utils/hotkey";
@@ -51,6 +52,20 @@ const settings = useSettingsStore();
 
 // 聊天 Store
 const chat = useChatStore();
+
+// 协作团队 Store：事件监听在这里（App 布局层）注册，而不是等用户第一次打开
+// 协作团队页面——否则 Agent 在别的页面提问/申请审批时整个应用毫无反应，
+// 后端只能干等 10 分钟超时。
+const workspace = useWorkspaceStore();
+
+// 所有工作组加总的待人工处理事项数：侧边栏徽标 + 新增时左下角弹提醒。
+const workspacePendingCount = computed(
+  () =>
+    workspace.proposals.length +
+    workspace.sleepRequests.length +
+    workspace.questions.length +
+    workspace.toolApprovals.length
+);
 
 // 当前激活的菜单项
 const activeKey = computed(() => route.name as string);
@@ -96,12 +111,26 @@ const handleNewSessionHotkey = (e: KeyboardEvent) => {
 // 通知 API (供更新提示弹窗使用)
 const notification = useNotification();
 
-onMounted(() => {
+// 待处理事项新增、且用户没停在协作团队页面时，左下角弹一条提醒（在页面上
+// 时卡片本身就是提醒，不重复弹）。
+watch(workspacePendingCount, (count, prev) => {
+  if (count > prev && route.name !== "AgentTeam") {
+    notification.info({
+      title: "协作团队有新的待处理事项",
+      content: `当前共有 ${count} 件事项等待你处理（Agent 提议 / 休眠申请 / 提问 / 工具审批）。`,
+      duration: 8000,
+    });
+  }
+});
+
+onMounted(async () => {
   window.addEventListener("keydown", handleNewSessionHotkey);
   // 延迟几秒再检测更新，避免和启动初始化抢时间
   setTimeout(() => {
     void checkForAppUpdate(notification);
   }, 3000);
+  // 全局注册协作团队事件监听（幂等，AgentTeamView 里再调用也不会重复注册）
+  await workspace.initListeners();
 });
 
 onBeforeUnmount(() => {
@@ -148,6 +177,10 @@ onBeforeUnmount(() => {
         >
           <span class="nav-index">{{ String(index + 1).padStart(2, "0") }}</span>
           <span class="nav-name">{{ item.name }}</span>
+          <span
+            v-if="item.key === 'AgentTeam' && workspacePendingCount > 0"
+            class="nav-badge"
+          >{{ workspacePendingCount > 99 ? "99+" : workspacePendingCount }}</span>
           <span class="nav-label">{{ item.label }}</span>
         </button>
       </nav>
@@ -335,6 +368,22 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   color: $ink-faint;
   transition: color $duration $ease;
+}
+
+// 协作团队待处理事项计数徽标：黑底白字直角小方块，激活项（黑底）上反转。
+.nav-badge {
+  font-family: $font-mono;
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 2px 5px;
+  background: $ink;
+  color: $bg;
+  flex-shrink: 0;
+}
+
+.nav-item.is-active .nav-badge {
+  background: $bg;
+  color: $ink;
 }
 
 // ---------- 底部装饰 ----------

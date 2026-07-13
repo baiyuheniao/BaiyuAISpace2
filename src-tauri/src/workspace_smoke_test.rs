@@ -184,12 +184,11 @@ pub async fn run(app_handle: AppHandle) {
             let Some(question_id) = value.get("questionId").and_then(|v| v.as_str()) else { return };
             log::info!("[smoke_test] 监听到提问事件，自动代用户回答: {}", question_id);
             let pending = handle.state::<PendingQuestions>();
-            let db_state = handle.state::<DbState>();
             if let Err(e) = crate::workspace::commands::workspace_resolve_question(
                 question_id.to_string(),
                 "可以，辛苦了，批准休息。".to_string(),
                 pending,
-                db_state,
+                handle.clone(),
             )
             .await
             {
@@ -212,8 +211,7 @@ pub async fn run(app_handle: AppHandle) {
             log::info!("[smoke_test] 监听到休眠申请事件: {}，给主 Agent 30s 自行批准的机会", request_id);
             tokio::time::sleep(Duration::from_secs(30)).await;
             let pending = handle.state::<PendingSleepRequests>();
-            let db_state = handle.state::<DbState>();
-            match crate::workspace::commands::workspace_resolve_sleep_request(request_id.clone(), true, pending, db_state).await {
+            match crate::workspace::commands::workspace_resolve_sleep_request(request_id.clone(), true, pending, handle.clone()).await {
                 Ok(()) => log::info!("[smoke_test] 主 Agent 30s 内没批准，已通过用户代为批准覆盖: {}", request_id),
                 Err(_) => log::info!("[smoke_test] 主 Agent 已经自己处理过这个休眠申请: {}", request_id),
             }

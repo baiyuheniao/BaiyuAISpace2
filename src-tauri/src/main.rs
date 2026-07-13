@@ -287,6 +287,7 @@ fn main() {
             workspace::commands::workspace_list_pending_events,
             workspace::commands::workspace_list_agent_tasks,
             workspace::commands::workspace_set_task_done,
+            workspace::commands::workspace_set_scratchpad,
             // 定时任务命令
             scheduler::commands::schedule_create,
             scheduler::commands::schedule_list,
@@ -378,6 +379,35 @@ fn main() {
             {
                 use workspace::db as ws_db;
                 use workspace::types::AgentStatus;
+
+                // 上一次运行遗留的未决事项（提议/休眠/提问/工具审批）对应的等待
+                // 通道已随旧进程消亡，永远不可能再被批准或拒绝——统一标记过期，
+                // 否则前端每次选中工作组都会把它们拉出来，变成一批点了就报错、
+                // 又永远不消失的僵尸卡片。给对应工作组各写一条时间线日志，让
+                // 用户知道这些事项去哪了。
+                match ws_db::expire_unresolved_pending_events(&conn) {
+                    Ok(expired) => {
+                        for (workspace_id, count) in expired {
+                            log::info!("应用启动：工作组 {} 有 {} 件重启前的待处理事项已过期", workspace_id, count);
+                            let entry = workspace::types::WorkspaceLogEntry {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                workspace_id,
+                                agent_id: None,
+                                kind: "pending_expired".to_string(),
+                                content: format!(
+                                    "应用重启，重启前遗留的 {} 件待处理事项已自动过期失效；如仍需要，请让对应 Agent 重新发起",
+                                    count
+                                ),
+                                created_at: chrono::Utc::now().timestamp_millis(),
+                            };
+                            if let Err(e) = ws_db::insert_log(&conn, &entry) {
+                                log::error!("写入待处理事项过期日志失败: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("清理重启前遗留的待处理事项失败: {}", e),
+                }
+
                 match ws_db::list_workspaces(&conn) {
                     Ok(workspaces) => {
                         let mut resumed = 0;
@@ -403,6 +433,18 @@ fn main() {
                         log::info!("应用启动：已恢复 {} 个 Agent 的后台循环", resumed);
                     }
                     Err(e) => log::error!("恢复 Agent 循环失败（列出工作组）: {}", e),
+                }
+
+                // 补处理停机前积压的消息：恢复的循环只是重新挂上了，不会自己去
+                // 翻旧账——上次关掉应用时还没来得及回复的消息会一直没人理，
+                // 直到未来某条不相关的消息碰巧再唤醒它。这里全员 notify 一次：
+                // 虚假唤醒去重让没有积压的 Agent 以零成本（不发起任何模型调用）
+                // 跳过，休眠/暂停中的 Agent 状态也不会被这次探测动到。
+                {
+                    let handles = workspace_state.0.lock().unwrap();
+                    for handle in handles.values() {
+                        handle.notify.notify_one();
+                    }
                 }
             }
             app.manage(workspace_state);
