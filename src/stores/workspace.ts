@@ -150,6 +150,8 @@ export interface AgentProposalEvent {
   proposedByAgentId: string;
   proposedByAgentName: string;
   draft: CreateAgentRequest;
+  /** 事项发起时间，用于展示"还剩多久超时"的倒计时。 */
+  createdAt: number;
 }
 
 export interface SleepRequestEvent {
@@ -158,6 +160,7 @@ export interface SleepRequestEvent {
   agentId: string;
   agentName: string;
   reason: string;
+  createdAt: number;
 }
 
 export interface QuestionEvent {
@@ -166,6 +169,7 @@ export interface QuestionEvent {
   agentId: string;
   agentName: string;
   question: string;
+  createdAt: number;
 }
 
 interface AgentStatusEvent {
@@ -180,6 +184,7 @@ export interface ToolApprovalEvent {
   agentName: string;
   toolName: string;
   arguments: Record<string, unknown>;
+  createdAt: number;
 }
 
 /** 持久化的待处理事项，用于补齐"页面没开着 / App 重启前发生"而错过的一次性事件。 */
@@ -207,9 +212,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const messages = ref<WorkspaceMessage[]>([]);
   const logs = ref<WorkspaceLogEntry[]>([]);
 
-  // 主 Agent 提议创建子 Agent / 申请休眠 / 向用户提问，都需要用户在前端处理。
-  // 不按当前选中的工作组过滤 -- 后端只是触发一次性事件，没有"列出所有待处理事项"
-  // 的命令，错过事件就再也找不回来了，所以哪怕用户当下没看着对应工作组，也要留着。
+  // 主 Agent 提议创建子 Agent / 申请休眠 / 向用户提问 / 高危工具审批，都需要
+  // 用户在前端处理。不按当前选中的工作组过滤——哪怕用户当下没看着对应工作组
+  // 也要留着（全局徽标要统计所有工作组的待办数）；错过实时事件也没关系，
+  // 事项已持久化，selectWorkspace 时会用 loadPendingEvents 补拉回来。
   const proposals = ref<AgentProposalEvent[]>([]);
   const sleepRequests = ref<SleepRequestEvent[]>([]);
   const questions = ref<QuestionEvent[]>([]);
@@ -219,6 +225,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const inactiveAgentNotices = ref<AgentInactiveEvent[]>([]);
 
   const currentWorkspace = computed(() => workspaces.value.find((w) => w.id === currentWorkspaceId.value) ?? null);
+
+  // 任务清单变更信号：视图层 watch tasksVersion，命中当前选中 Agent 时重拉。
+  const tasksVersion = ref(0);
+  const lastTaskUpdateAgentId = ref<string | null>(null);
 
   let unlistenFns: UnlistenFn[] = [];
 
@@ -262,6 +272,21 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       listen<ToolApprovalEvent>("workspace://tool-approval", (e) => {
         console.log(`[Workspace] 工具调用审批请求: approvalId=${e.payload.approvalId} agent=${e.payload.agentName} tool=${e.payload.toolName}`);
         toolApprovals.value.push(e.payload);
+      }),
+      // 待处理事项被"别人"解决时（主 Agent 用工具批准了休眠、10 分钟超时
+      // 自动收场、应用判定过期），把还挂在界面上的卡片撤掉——否则用户对着
+      // 一张已经处理完的卡片再点一次，只会收到一句"不存在或已被处理"。
+      listen<{ id: string }>("workspace://pending-resolved", (e) => {
+        const id = e.payload.id;
+        proposals.value = proposals.value.filter((p) => p.proposalId !== id);
+        sleepRequests.value = sleepRequests.value.filter((r) => r.requestId !== id);
+        questions.value = questions.value.filter((q) => q.questionId !== id);
+        toolApprovals.value = toolApprovals.value.filter((t) => t.approvalId !== id);
+      }),
+      // Agent 自己增删改了任务清单：通知视图层重新拉取，别让用户看着旧清单。
+      listen<{ agentId: string }>("workspace://tasks-updated", (e) => {
+        lastTaskUpdateAgentId.value = e.payload.agentId;
+        tasksVersion.value += 1;
       }),
       listen<AgentInactiveEvent>("workspace://agent-inactive", (e) => {
         console.log(`[Workspace] Agent 未在运行: agentId=${e.payload.agentId} name=${e.payload.agentName}`);
@@ -343,15 +368,16 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     for (const e of events) {
       if (e.kind === "proposal" && !proposals.value.some((p) => p.proposalId === e.id)) {
         const draft = e.payload.draft as CreateAgentRequest;
-        proposals.value.push({ proposalId: e.id, workspaceId: e.workspaceId, proposedByAgentId: e.agentId, proposedByAgentName: e.agentName, draft });
+        proposals.value.push({ proposalId: e.id, workspaceId: e.workspaceId, proposedByAgentId: e.agentId, proposedByAgentName: e.agentName, draft, createdAt: e.createdAt });
       } else if (e.kind === "sleep" && !sleepRequests.value.some((r) => r.requestId === e.id)) {
-        sleepRequests.value.push({ requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, reason: (e.payload.reason as string) ?? "" });
+        sleepRequests.value.push({ requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, reason: (e.payload.reason as string) ?? "", createdAt: e.createdAt });
       } else if (e.kind === "question" && !questions.value.some((q) => q.questionId === e.id)) {
-        questions.value.push({ questionId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, question: (e.payload.question as string) ?? "" });
+        questions.value.push({ questionId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, question: (e.payload.question as string) ?? "", createdAt: e.createdAt });
       } else if (e.kind === "tool_approval" && !toolApprovals.value.some((t) => t.approvalId === e.id)) {
         toolApprovals.value.push({
           approvalId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName,
           toolName: (e.payload.toolName as string) ?? "", arguments: (e.payload.arguments as Record<string, unknown>) ?? {},
+          createdAt: e.createdAt,
         });
       }
     }
@@ -430,6 +456,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     await invoke("workspace_set_task_done", { taskId, done });
   };
 
+  /** 用户直接编辑/清空某个 Agent 的工作备忘（scratchpad）；传空字符串即清空。 */
+  const setScratchpad = async (agentId: string, content: string) => {
+    await invoke("workspace_set_scratchpad", { agentId, content });
+    await loadAgents();
+  };
+
   /** 这个 Agent 最近一条错误日志的内容——用于在花名册上直接展示出错原因，
    *  而不是只有一个"异常"标签、需要用户自己去时间线里翻。 */
   const latestErrorFor = (agentId: string): string | null => {
@@ -494,7 +526,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     resumeAgent,
     listAgentTasks,
     setTaskDone,
+    setScratchpad,
+    tasksVersion,
+    lastTaskUpdateAgentId,
     latestErrorFor,
     agentName,
   };
+},
+{
+  persist: {
+    key: "baiyu-aispace-workspace",
+    // 只记住"上次看的是哪个工作组"，重启后不用重新选一遍；agents/messages
+    // 等列表都是选中时现拉的，持久化它们只会带来一屏过期数据。
+    paths: ["currentWorkspaceId"],
+  },
 });

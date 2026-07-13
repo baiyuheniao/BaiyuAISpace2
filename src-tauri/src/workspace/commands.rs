@@ -323,15 +323,19 @@ pub async fn workspace_resolve_proposal(
     approved: bool,
     request: Option<CreateAgentRequest>,
     pending: State<'_, PendingProposals>,
-    db_state: State<'_, DbState>,
+    app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
         map.remove(&proposal_id)
     };
-    let sender = sender.ok_or_else(|| {
-        WorkspaceError::NotFound(format!("提议 {} 不存在或已被处理/超时", proposal_id))
-    })?;
+    let Some(sender) = sender else {
+        // 发起这条等待的阻塞调用已经不在了（超时收场、被别人抢先处理，或者
+        // 应用重启过）。顺手把数据库里的记录也标掉并广播移除，免得它变成一张
+        // 永远点不动的僵尸卡片。
+        mark_pending_event_resolved(&app_handle, &proposal_id).await;
+        return Err(WorkspaceError::NotFound(format!("提议 {} 已过期或已被处理", proposal_id)));
+    };
 
     let decision = if approved {
         match request {
@@ -347,7 +351,7 @@ pub async fn workspace_resolve_proposal(
     };
 
     let _ = sender.send(decision);
-    mark_pending_event_resolved(&db_state, &proposal_id).await;
+    mark_pending_event_resolved(&app_handle, &proposal_id).await;
     Ok(())
 }
 
@@ -360,17 +364,18 @@ pub async fn workspace_resolve_sleep_request(
     request_id: String,
     approved: bool,
     pending: State<'_, PendingSleepRequests>,
-    db_state: State<'_, DbState>,
+    app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
         map.remove(&request_id)
     };
-    let sender = sender.ok_or_else(|| {
-        WorkspaceError::NotFound(format!("休眠请求 {} 不存在或已被处理/超时", request_id))
-    })?;
+    let Some(sender) = sender else {
+        mark_pending_event_resolved(&app_handle, &request_id).await;
+        return Err(WorkspaceError::NotFound(format!("休眠请求 {} 已过期或已被处理", request_id)));
+    };
     let _ = sender.send(approved);
-    mark_pending_event_resolved(&db_state, &request_id).await;
+    mark_pending_event_resolved(&app_handle, &request_id).await;
     Ok(())
 }
 
@@ -380,17 +385,18 @@ pub async fn workspace_resolve_question(
     question_id: String,
     answer: String,
     pending: State<'_, PendingQuestions>,
-    db_state: State<'_, DbState>,
+    app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
         map.remove(&question_id)
     };
-    let sender = sender.ok_or_else(|| {
-        WorkspaceError::NotFound(format!("问题 {} 不存在或已被处理/超时", question_id))
-    })?;
+    let Some(sender) = sender else {
+        mark_pending_event_resolved(&app_handle, &question_id).await;
+        return Err(WorkspaceError::NotFound(format!("问题 {} 已过期或已被处理", question_id)));
+    };
     let _ = sender.send(answer);
-    mark_pending_event_resolved(&db_state, &question_id).await;
+    mark_pending_event_resolved(&app_handle, &question_id).await;
     Ok(())
 }
 
@@ -413,15 +419,18 @@ pub async fn workspace_resolve_tool_approval(
     approval_id: String,
     approved: bool,
     pending: State<'_, PendingToolApprovals>,
-    db_state: State<'_, DbState>,
+    app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
     let sender = {
         let mut map = pending.0.lock().unwrap();
         map.remove(&approval_id)
     };
-    let sender = sender.ok_or_else(|| WorkspaceError::NotFound(format!("工具调用审批 {} 不存在或已被处理/超时", approval_id)))?;
+    let Some(sender) = sender else {
+        mark_pending_event_resolved(&app_handle, &approval_id).await;
+        return Err(WorkspaceError::NotFound(format!("工具调用审批 {} 已过期或已被处理", approval_id)));
+    };
     let _ = sender.send(approved);
-    mark_pending_event_resolved(&db_state, &approval_id).await;
+    mark_pending_event_resolved(&app_handle, &approval_id).await;
     Ok(())
 }
 
@@ -448,20 +457,38 @@ pub async fn workspace_set_task_done(
     db::set_task_done(&conn, &task_id, done)
 }
 
-async fn mark_pending_event_resolved(db_state: &DbState, id: &str) {
+/// 让用户能直接查看/编辑/清空一个 Agent 的工作备忘（scratchpad），而不是只能
+/// 任由 Agent 自己通过 workspace_scratchpad 工具维护——Agent 记了什么、记错了
+/// 什么，用户得看得见也改得动，这是"透明可控"的底线。传空字符串即清空。
+#[tauri::command]
+pub async fn workspace_set_scratchpad(
+    agent_id: String,
+    content: String,
+    db_state: State<'_, DbState>,
+) -> Result<(), WorkspaceError> {
     let db = db_state.0.lock().await;
-    match db::open_conn(&db.path) {
-        Ok(conn) => {
-            if let Err(e) = db::resolve_pending_event(&conn, id) {
-                log::error!("[workspace] 标记待处理事项已解决失败: {}", e);
-            }
-        }
-        Err(e) => log::error!("[workspace] 打开数据库连接失败（标记待处理事项）: {}", e),
-    }
+    let conn = db::open_conn(&db.path)?;
+    db::set_scratchpad(&conn, &agent_id, &content)
 }
 
-async fn mark_pending_event_resolved_via_handle(app_handle: &AppHandle, id: &str) {
-    mark_pending_event_resolved(&app_handle.state::<DbState>(), id).await;
+/// 标记一条待处理事项已解决，并广播 `workspace://pending-resolved` 事件让
+/// 前端移除对应卡片——不管它是被用户点的、被主 Agent 用工具处理的、还是
+/// 超时/取消自动收场的。没有这个事件，凡是"不经前端的手"解决的事项，卡片
+/// 都会在界面上一直挂着，用户再点一次就报"不存在或已被处理"。
+async fn mark_pending_event_resolved(app_handle: &AppHandle, id: &str) {
+    {
+        let db_state = app_handle.state::<DbState>();
+        let db = db_state.0.lock().await;
+        match db::open_conn(&db.path) {
+            Ok(conn) => {
+                if let Err(e) = db::resolve_pending_event(&conn, id) {
+                    log::error!("[workspace] 标记待处理事项已解决失败: {}", e);
+                }
+            }
+            Err(e) => log::error!("[workspace] 打开数据库连接失败（标记待处理事项）: {}", e),
+        }
+    }
+    let _ = app_handle.emit("workspace://pending-resolved", serde_json::json!({ "id": id }));
 }
 
 async fn record_pending_event(
@@ -563,10 +590,10 @@ pub async fn insert_workspace_log(
 }
 
 /// 落库一条消息，并唤醒它指向的那个（或那些）Agent。`to_agent_id` 为
-/// `"all"` 时，会广播给当前注册在 `WorkspaceState` 里的每一个其他 Agent
-/// （不只是这个工作组里的——Phase 1 里这样可以接受，因为 handle 是按 id
-/// 查找的，唤醒一个不相关的 Agent 只是一次空操作的开销；但如果以后
-/// `WorkspaceState` 需要直接跟踪工作组归属关系，这里就该按工作组收窄范围了）。
+/// `"all"` 时，只唤醒**这个工作组**的成员——启动时全量恢复循环之后，注册表
+/// 里挂着所有工作组的 Agent，按注册表广播会把别的工作组吵醒：多数情况下
+/// 虚假唤醒去重能兜住，但一个历史停在未回复消息上的 Agent 会凭空开始推理，
+/// 休眠中的 Agent 也会被无谓打扰。
 pub async fn send_workspace_message(
     app_handle: &AppHandle,
     workspace_id: &str,
@@ -630,16 +657,28 @@ async fn send_workspace_message_impl(
     if !wake {
         return;
     }
-    let workspace_state = app_handle.state::<WorkspaceState>();
-    let handles = workspace_state.0.lock().unwrap();
     if to_agent_id == "all" {
-        for (id, handle) in handles.iter() {
+        // 先查成员名单再锁 handle 表——std::sync::Mutex 的锁不能跨 await 持有。
+        let member_ids: Vec<String> = list_agents_for_workspace(app_handle, workspace_id)
+            .await
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        let workspace_state = app_handle.state::<WorkspaceState>();
+        let handles = workspace_state.0.lock().unwrap();
+        for id in &member_ids {
             if id != from_agent_id {
-                handle.notify.notify_one();
+                if let Some(handle) = handles.get(id) {
+                    handle.notify.notify_one();
+                }
             }
         }
-    } else if let Some(handle) = handles.get(to_agent_id) {
-        handle.notify.notify_one();
+    } else {
+        let workspace_state = app_handle.state::<WorkspaceState>();
+        let handles = workspace_state.0.lock().unwrap();
+        if let Some(handle) = handles.get(to_agent_id) {
+            handle.notify.notify_one();
+        }
     }
 }
 
@@ -660,27 +699,45 @@ async fn find_main_agent_id(app_handle: &AppHandle, workspace_id: &str) -> Optio
         .map(|a| a.id)
 }
 
-/// 一个子 Agent 的休眠请求被批准之后，检查这个工作组里是不是所有子 Agent
-/// 都已经进入 `Sleeping` 状态；如果是，给主 Agent 发消息（同时也会唤醒它），
-/// 请它验收一下任务是否已经完成。
+/// 一个子 Agent 的休眠请求被批准（或有子 Agent 进入 Error 状态）之后，检查
+/// 这个工作组里是不是所有子 Agent 都已停止推进；如果是，给主 Agent 发消息
+/// （同时也会唤醒它），请它验收一下任务是否已经完成。
+///
+/// Error 也算"不会再自己推进"的终态——只认 Sleeping 的话，一个报错卡死的
+/// 子 Agent 会让验收永远无法触发，任务无声烂尾。但要求至少有一个真的在
+/// 休眠：全员报错的场景由逐个的出错上报（`notify_main_agent_of_error`）
+/// 覆盖，再发一条"请验收"只会误导主 Agent 以为有成果可验。
 async fn maybe_trigger_main_agent_review(app_handle: &AppHandle, workspace_id: &str) {
     let agents = list_agents_for_workspace(app_handle, workspace_id).await;
     let subs: Vec<_> = agents.iter().filter(|a| a.role == AgentRole::Sub).collect();
-    if subs.is_empty() || !subs.iter().all(|a| a.status == AgentStatus::Sleeping) {
+    if subs.is_empty() {
+        return;
+    }
+    let sleeping = subs.iter().filter(|a| a.status == AgentStatus::Sleeping).count();
+    let errored = subs.iter().filter(|a| a.status == AgentStatus::Error).count();
+    if sleeping == 0 || sleeping + errored < subs.len() {
         return;
     }
     let Some(main) = agents.iter().find(|a| a.role == AgentRole::Main) else {
         return;
     };
 
+    let status_brief = if errored > 0 {
+        format!("（休眠 {} 个，异常 {} 个）", sleeping, errored)
+    } else {
+        String::new()
+    };
     send_workspace_message(
         app_handle,
         workspace_id,
         "system",
         &main.id,
-        "工作组内所有子 Agent 都已进入休眠状态，请验收当前任务进度：如果任务已经完成，用 workspace_message \
-         告知用户；如果还没完成，可以用 workspace_message 叫醒某个子 Agent 继续推进，或者用 workspace_create_agent \
-         创建新的 Agent。",
+        &format!(
+            "工作组内所有子 Agent 都已停止推进{}，请验收当前任务进度：如果任务已经完成，用 workspace_message \
+             告知用户；如果还没完成，可以用 workspace_message 叫醒某个子 Agent 继续推进（给异常状态的 Agent \
+             发消息也会让它重试），或者用 workspace_create_agent 创建新的 Agent。",
+            status_brief
+        ),
     )
     .await;
     insert_workspace_log(
@@ -688,7 +745,36 @@ async fn maybe_trigger_main_agent_review(app_handle: &AppHandle, workspace_id: &
         workspace_id,
         None,
         "acceptance_review",
-        "所有子 Agent 已休眠，已唤醒主 Agent 验收任务进度".to_string(),
+        format!("所有子 Agent 已停止推进{}，已唤醒主 Agent 验收任务进度", status_brief),
+    )
+    .await;
+}
+
+/// 子 Agent 进入 Error 状态时，把出错的事实和原因告知主 Agent（同时唤醒它），
+/// 让它决定重试、换人还是上报用户——否则一个悄悄倒下的 Agent 只会留下一条
+/// 日志，任务无声烂尾。主 Agent 自己出错时没有更上级可通知，状态标签和
+/// 错误日志的悬浮提示已经能让用户看到。
+async fn notify_main_agent_of_error(app_handle: &AppHandle, workspace_id: &str, agent_id: &str, error: &str) {
+    let agents = list_agents_for_workspace(app_handle, workspace_id).await;
+    let Some(errored) = agents.iter().find(|a| a.id == agent_id) else {
+        return;
+    };
+    if errored.role == AgentRole::Main {
+        return;
+    }
+    let Some(main) = agents.iter().find(|a| a.role == AgentRole::Main) else {
+        return;
+    };
+    send_workspace_message(
+        app_handle,
+        workspace_id,
+        "system",
+        &main.id,
+        &format!(
+            "Agent「{}」处理消息时出错：{}。请决定下一步：给它发消息让它重试、用 workspace_message 告知用户\
+             检查它的配置、或安排其他 Agent 接手它的工作。",
+            errored.name, error
+        ),
     )
     .await;
 }
@@ -806,6 +892,9 @@ async fn run_agent_loop(
     notify: Arc<Notify>,
     cancel: CancellationToken,
 ) {
+    // 只在"进入 Error"的那一刻通知主 Agent 一次，连续出错不重复刷屏；
+    // 成功跑完一轮就复位，之后再出错会重新通知。
+    let mut error_notified = false;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
@@ -815,10 +904,30 @@ async fn run_agent_loop(
             break;
         }
 
-        if let Err(e) = process_agent_wake(&app_handle, &workspace_id, &agent_id, &cancel).await {
-            log::error!("Workspace agent {} 处理失败: {}", agent_id, e);
-            set_agent_status(&app_handle, &agent_id, AgentStatus::Error).await;
-            insert_workspace_log(&app_handle, &workspace_id, Some(agent_id.clone()), "error", e.to_string()).await;
+        match process_agent_wake(&app_handle, &workspace_id, &agent_id, &cancel).await {
+            Ok(()) => {
+                error_notified = false;
+            }
+            Err(e) => {
+                log::error!("Workspace agent {} 处理失败: {}", agent_id, e);
+                insert_workspace_log(&app_handle, &workspace_id, Some(agent_id.clone()), "error", e.to_string()).await;
+                // 用户已手动暂停的 Agent 保持 Paused，别用 Error 覆盖掉这个
+                // 明确的人为决定；也不再向主 Agent 上报（用户已经介入了）。
+                let paused = matches!(
+                    load_agent(&app_handle, &agent_id).await,
+                    Ok(Some(a)) if a.status == AgentStatus::Paused
+                );
+                if !paused {
+                    set_agent_status(&app_handle, &agent_id, AgentStatus::Error).await;
+                    if !error_notified {
+                        error_notified = true;
+                        notify_main_agent_of_error(&app_handle, &workspace_id, &agent_id, &e.to_string()).await;
+                        // Error 属于验收条件里的终态之一：这个 Agent 一倒，
+                        // 可能恰好凑齐"全员停止推进"。
+                        maybe_trigger_main_agent_review(&app_handle, &workspace_id).await;
+                    }
+                }
+            }
         }
     }
     log::info!("Workspace agent {} 循环已停止", agent_id);
@@ -886,16 +995,13 @@ async fn process_agent_wake(
         agent.name, agent_id, workspace.name, agent.provider, agent.model
     );
 
-    // Agent 在轮转发言时保持 Meeting 状态可见；只有开始一次普通（非会议）
-    // 唤醒时，才把状态提升为 Running。
-    if agent.status != AgentStatus::Meeting {
-        set_agent_status(app_handle, agent_id, AgentStatus::Running).await;
-    }
-
+    // 注意：确认"确实有新内容要处理"之前不碰状态。以前这里先把状态改成
+    // Running、空转检查不通过再改成 Idle——一次虚假唤醒（比如广播的余波）就
+    // 会把休眠中 Agent 的 Sleeping 状态洗成 Idle，"全员休眠→触发验收"的
+    // 条件随之被无声破坏。
     let chat_history = build_chat_history(app_handle, workspace_id, &agent).await;
     if chat_history.is_empty() {
-        log::debug!("[workspace] Agent「{}」历史消息为空，跳过本次唤醒", agent.name);
-        set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
+        log::debug!("[workspace] Agent「{}」历史消息为空，跳过本次唤醒（状态保持 {:?}）", agent.name, agent.status);
         return Ok(());
     }
     // 虚假唤醒去重：`Notify` 的 permit 语义下，处理期间收到的通知会在处理结束
@@ -903,9 +1009,14 @@ async fn process_agent_wake(
     // 没有任何人在这之后说过话，没有新内容可回应，直接跳过，避免对着同一段
     // 历史重新推理一遍、很可能又重复回复一次。
     if chat_history.last().map(|m| m.role.as_str()) == Some("assistant") {
-        log::debug!("[workspace] Agent「{}」自上次发言后没有新消息，跳过本次唤醒", agent.name);
-        set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
+        log::debug!("[workspace] Agent「{}」自上次发言后没有新消息，跳过本次唤醒（状态保持 {:?}）", agent.name, agent.status);
         return Ok(());
+    }
+
+    // Agent 在轮转发言时保持 Meeting 状态可见；只有开始一次普通（非会议）
+    // 唤醒时，才把状态提升为 Running。
+    if agent.status != AgentStatus::Meeting {
+        set_agent_status(app_handle, agent_id, AgentStatus::Running).await;
     }
     let latest_query = chat_history
         .iter()
@@ -1046,11 +1157,16 @@ async fn process_agent_wake(
         );
     }
 
-    // 别覆盖掉 Sleeping（由 workspace_sleep 设置）或 Meeting（由会议协调器
-    // 管理，会议结束时协调器自己会把与会者状态复位成 Idle）。
+    // 别覆盖掉 Sleeping（由 workspace_sleep 设置）、Meeting（由会议协调器
+    // 管理，散会时协调器自己会还原与会者状态），也别覆盖 Paused——用户在
+    // 这轮进行中按下的"暂停"是紧急停止，如果这里照旧复位成 Idle，暂停就
+    // 会在当前轮跑完的瞬间自动失效，下一条消息照常把它唤醒。
     let blocking = matches!(
         load_agent(app_handle, agent_id).await,
-        Ok(Some(WorkspaceAgent { status: AgentStatus::Sleeping | AgentStatus::Meeting, .. }))
+        Ok(Some(WorkspaceAgent {
+            status: AgentStatus::Sleeping | AgentStatus::Meeting | AgentStatus::Paused,
+            ..
+        }))
     );
     if !blocking {
         set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
@@ -1292,8 +1408,8 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         server_name: "workspace".to_string(),
         name: "workspace_meeting".to_string(),
         description: "发起一次工作组会议（每个工作组同时只能有一场）。组内其他 Agent 会被邀请参会，\
-            大家轮流发言，每条发言都会实时同步给所有与会者。你是本场会议的主持人：想散会时，\
-            在签到（workspace_meeting_checkin）时把 end_meeting 设为 true。"
+            大家轮流发言；轮到某位与会者发言时，它会一次性收到此前错过的全部发言。你是本场会议的\
+            主持人：想散会时，在签到（workspace_meeting_checkin）时把 end_meeting 设为 true。"
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1309,8 +1425,9 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         server_id: "workspace".to_string(),
         server_name: "workspace".to_string(),
         name: "workspace_meeting_checkin".to_string(),
-        description: "会议签到/发言工具。收到会议邀请后立即调用它签到（content 留空）；之后每次收到\
-            本工具的结果，都按结果里的 instruction 再次调用：轮到你发言时把发言写进 content。\
+        description: "会议签到/发言工具。收到会议邀请后立即调用它签到（content 留空）；签到后工具会\
+            挂起等待，轮到你发言或会议结束时才返回结果（附上你错过的全部发言）。每次收到本工具的结果，\
+            都按结果里的 instruction 再次调用：轮到你发言时把发言写进 content。\
             主持人可以在任意一次签到时把 end_meeting 设为 true 结束会议。"
             .to_string(),
         input_schema: serde_json::json!({
@@ -1495,8 +1612,7 @@ async fn dispatch_tool_call(
             match sender {
                 Some(tx) => {
                     let _ = tx.send(approved);
-                    let db_state = app_handle.state::<DbState>();
-                    mark_pending_event_resolved(&db_state, &request_id).await;
+                    mark_pending_event_resolved(app_handle, &request_id).await;
                     serde_json::json!({ "status": "ok" })
                 }
                 None => serde_json::json!({ "error": format!("休眠请求 {} 不存在或已被处理/超时", request_id) }),
@@ -1574,6 +1690,9 @@ async fn dispatch_tool_call(
                     if let Err(e) = db::insert_task(&conn, &task) {
                         return serde_json::json!({ "error": format!("新增任务失败: {}", e) });
                     }
+                    // 告诉前端这个 Agent 的任务清单变了——否则用户面板上看到的
+                    // 一直是旧清单，只能靠手动刷新按钮兜底。
+                    let _ = app_handle.emit("workspace://tasks-updated", serde_json::json!({ "agentId": agent.id }));
                     serde_json::json!({ "status": "added", "taskId": task.id })
                 }
                 "complete" | "reopen" => {
@@ -1583,6 +1702,7 @@ async fn dispatch_tool_call(
                     if let Err(e) = db::set_task_done(&conn, task_id, action == "complete") {
                         return serde_json::json!({ "error": e.to_string() });
                     }
+                    let _ = app_handle.emit("workspace://tasks-updated", serde_json::json!({ "agentId": agent.id }));
                     serde_json::json!({ "status": "ok" })
                 }
                 "remove" => {
@@ -1592,6 +1712,7 @@ async fn dispatch_tool_call(
                     if let Err(e) = db::delete_task(&conn, task_id) {
                         return serde_json::json!({ "error": format!("删除任务失败: {}", e) });
                     }
+                    let _ = app_handle.emit("workspace://tasks-updated", serde_json::json!({ "agentId": agent.id }));
                     serde_json::json!({ "status": "removed" })
                 }
                 "list" => match db::list_tasks(&conn, &agent.id) {
@@ -1650,6 +1771,14 @@ async fn dispatch_tool_call(
                 .chain(others.iter().map(|a| (a.id.clone(), a.name.clone())))
                 .collect();
             let order_display = participants.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" → ");
+            // 记住入场前正在休眠的与会者：散会时还原成休眠而不是一律复位待命。
+            // 开会把人叫起来没问题（会议邀请也是消息），但不能顺手吞掉它们
+            // "任务已完成"的声明，否则"全员休眠→触发验收"的机制会被开会打断。
+            let sleeping_before: std::collections::HashSet<String> = others
+                .iter()
+                .filter(|a| a.status == AgentStatus::Sleeping)
+                .map(|a| a.id.clone())
+                .collect();
 
             for (id, _) in &participants {
                 set_agent_status(app_handle, id, AgentStatus::Meeting).await;
@@ -1674,8 +1803,9 @@ async fn dispatch_tool_call(
                     &a.id,
                     &format!(
                         "【会议邀请】「{}」发起了会议，议题：「{}」。请立即调用 workspace_meeting_checkin \
-                         工具签到参会：meeting_id 填 \"{}\"，content 留空。之后每次收到该工具的结果，都按\
-                         结果里的 instruction 再次调用；轮到你发言时，把发言写进 content 参数。",
+                         工具签到参会：meeting_id 填 \"{}\"，content 留空。签到后工具会挂起等待，轮到你\
+                         发言或会议结束时才会返回结果（结果里会附上你错过的全部发言）；返回后按结果里的 \
+                         instruction 继续。",
                         agent.name, topic, meeting_id
                     ),
                 )
@@ -1689,6 +1819,7 @@ async fn dispatch_tool_call(
                 initiator_id: agent.id.clone(),
                 participants,
                 max_speeches,
+                sleeping_before,
             };
             let coordinator_app = app_handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -1817,6 +1948,7 @@ async fn propose_agent_creation(
             "proposedByAgentId": proposing_agent.id,
             "proposedByAgentName": proposing_agent.name,
             "draft": draft,
+            "createdAt": Utc::now().timestamp_millis(),
         }),
     );
 
@@ -1853,7 +1985,7 @@ async fn propose_agent_creation(
 
     let response = match outcome {
         None => {
-            mark_pending_event_resolved_via_handle(app_handle, &proposal_id).await;
+            mark_pending_event_resolved(app_handle, &proposal_id).await;
             return serde_json::json!({ "status": "cancelled", "message": "工作组已被删除" });
         }
         Some(Ok(Ok(ProposalDecision::Approved(final_request)))) => {
@@ -1870,7 +2002,7 @@ async fn propose_agent_creation(
             serde_json::json!({ "status": "timed_out", "message": "用户在 10 分钟内没有响应，提议已取消" })
         }
     };
-    mark_pending_event_resolved_via_handle(app_handle, &proposal_id).await;
+    mark_pending_event_resolved(app_handle, &proposal_id).await;
     response
 }
 
@@ -1898,6 +2030,7 @@ async fn request_sleep_approval(
         serde_json::json!({
             "requestId": request_id, "workspaceId": workspace_id,
             "agentId": agent.id, "agentName": agent.name, "reason": reason,
+            "createdAt": Utc::now().timestamp_millis(),
         }),
     );
 
@@ -1939,7 +2072,7 @@ async fn request_sleep_approval(
 
     let approved = match outcome {
         None => {
-            mark_pending_event_resolved_via_handle(app_handle, &request_id).await;
+            mark_pending_event_resolved(app_handle, &request_id).await;
             return false;
         }
         Some(Ok(Ok(approved))) => approved,
@@ -1949,7 +2082,7 @@ async fn request_sleep_approval(
             false
         }
     };
-    mark_pending_event_resolved_via_handle(app_handle, &request_id).await;
+    mark_pending_event_resolved(app_handle, &request_id).await;
     approved
 }
 
@@ -1975,6 +2108,7 @@ async fn request_user_answer(
         serde_json::json!({
             "questionId": question_id, "workspaceId": workspace_id,
             "agentId": agent.id, "agentName": agent.name, "question": question,
+            "createdAt": Utc::now().timestamp_millis(),
         }),
     );
     record_pending_event(
@@ -1999,17 +2133,40 @@ async fn request_user_answer(
 
     let answer = match outcome {
         None => {
-            mark_pending_event_resolved_via_handle(app_handle, &question_id).await;
+            mark_pending_event_resolved(app_handle, &question_id).await;
             return "（工作组已被删除）".to_string();
         }
-        Some(Ok(Ok(answer))) => answer,
+        Some(Ok(Ok(answer))) => {
+            // 把回答落库成一条静默消息（不触发唤醒——回答已经通过工具结果送进
+            // 当前这次唤醒了）：时间线上问答俱全，Agent 之后的唤醒按消息表重建
+            // 历史时，用户说过的话也不会凭空消失。
+            let brief: String = question.chars().take(40).collect();
+            let ellipsis = if question.chars().count() > 40 { "…" } else { "" };
+            send_workspace_message_silent(
+                app_handle,
+                workspace_id,
+                "user",
+                &agent.id,
+                &format!("（回答提问「{}{}」）{}", brief, ellipsis, answer),
+            )
+            .await;
+            answer
+        }
         Some(Ok(Err(_))) => "（用户没有回答）".to_string(),
         Some(Err(_)) => {
             app_handle.state::<PendingQuestions>().0.lock().unwrap().remove(&question_id);
+            insert_workspace_log(
+                app_handle,
+                workspace_id,
+                Some(agent.id.clone()),
+                "question",
+                format!("{} 的提问超时未获回答", agent.name),
+            )
+            .await;
             "（用户在限定时间内没有回答）".to_string()
         }
     };
-    mark_pending_event_resolved_via_handle(app_handle, &question_id).await;
+    mark_pending_event_resolved(app_handle, &question_id).await;
     answer
 }
 
@@ -2029,7 +2186,27 @@ const DANGEROUS_TOOL_KEYWORDS: &[&str] = &[
 
 fn is_dangerous_tool(name: &str, description: &str) -> bool {
     let haystack = format!("{} {}", name, description).to_lowercase();
-    DANGEROUS_TOOL_KEYWORDS.iter().any(|kw| haystack.contains(kw))
+    DANGEROUS_TOOL_KEYWORDS.iter().any(|kw| {
+        if kw.is_ascii() {
+            // 英文关键词要求整词命中："skill" 不该因为包含 "kill" 被拦下，
+            // "commands" 也不该被 "command" 误伤。下划线/连字符/空格/中文
+            // 字符都算词边界，所以 "kill_process"、"write_file" 照常命中。
+            contains_ascii_word(&haystack, kw)
+        } else {
+            // 中文没有词边界可言，维持子串匹配。
+            haystack.contains(kw)
+        }
+    })
+}
+
+fn contains_ascii_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(word).any(|(pos, _)| {
+        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let end = pos + word.len();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        before_ok && after_ok
+    })
 }
 
 /// 注册一条待处理的 MCP 工具调用审批，通知前端，然后阻塞等待，直到用户
@@ -2058,6 +2235,7 @@ async fn request_tool_approval(
             "approvalId": approval_id, "workspaceId": workspace_id,
             "agentId": agent.id, "agentName": agent.name,
             "toolName": tool_name, "arguments": arguments,
+            "createdAt": Utc::now().timestamp_millis(),
         }),
     );
     record_pending_event(
@@ -2089,7 +2267,7 @@ async fn request_tool_approval(
 
     let approved = match outcome {
         None => {
-            mark_pending_event_resolved_via_handle(app_handle, &approval_id).await;
+            mark_pending_event_resolved(app_handle, &approval_id).await;
             return false;
         }
         Some(Ok(Ok(approved))) => approved,
@@ -2099,7 +2277,7 @@ async fn request_tool_approval(
             false
         }
     };
-    mark_pending_event_resolved_via_handle(app_handle, &approval_id).await;
+    mark_pending_event_resolved(app_handle, &approval_id).await;
     approved
 }
 
@@ -2122,5 +2300,16 @@ mod danger_classifier_tests {
         assert!(!is_dangerous_tool("search_web", "Search the web for a query"));
         assert!(!is_dangerous_tool("get_weather", "查询天气预报"));
         assert!(!is_dangerous_tool("read_file", "读取文件内容"));
+    }
+
+    #[test]
+    fn word_boundary_avoids_substring_false_positives() {
+        // "skill" 里包含 "kill"、"commands" 里包含 "command"——整词匹配后
+        // 这些不该再被误判成危险工具。
+        assert!(!is_dangerous_tool("list_skills", "List all available skills"));
+        assert!(!is_dangerous_tool("get_commands_help", "Show available commands reference"));
+        // 但下划线/空格分隔的真实危险动词照常命中。
+        assert!(is_dangerous_tool("kill_process", "Kill a running process by pid"));
+        assert!(is_dangerous_tool("run_command", "Run a shell command"));
     }
 }
