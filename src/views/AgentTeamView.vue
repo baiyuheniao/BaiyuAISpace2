@@ -19,15 +19,19 @@ import { useRouter } from "vue-router";
 import {
   NButton, NIcon, NSpace, NSelect, NEmpty, NModal, NForm, NFormItem, NInput, NInputNumber,
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
-  NTag, NTimeline, NTimelineItem, NPopconfirm, useMessage,
+  NTag, NTimeline, NTimelineItem, NPopconfirm, NSwitch, NTooltip, useMessage,
 } from "naive-ui";
-import { Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline } from "@vicons/ionicons5";
+import {
+  Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline,
+  PauseOutline, PlayOutline, RefreshOutline,
+} from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
 import {
   useWorkspaceStore, AGENT_GUIDELINES_BASE, AGENT_GUIDELINES_SUB,
   type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest,
-  type UpdateAgentRequest, type WorkspaceAgent, type WorkspaceLogEntry,
+  type UpdateAgentRequest, type WorkspaceAgent, type WorkspaceAgentTask, type WorkspaceLogEntry,
+  type ToolApprovalEvent,
 } from "@/stores/workspace";
 import { useSettingsStore } from "@/stores/settings";
 import { useMCPStore } from "@/stores/mcp";
@@ -111,6 +115,12 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   activeSkillIds: [],
   ragTopK: 5,
   ragRetrievalMode: "hybrid",
+  ragRerankerConfigId: null,
+  ragRerankerBaseUrl: null,
+  ragRerankerModel: null,
+  ragRerankTopN: null,
+  requireToolApproval: true,
+  enableThinking: false,
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
 
@@ -119,6 +129,18 @@ const retrievalModeOptions = [
   { label: "纯向量检索", value: "vector" },
   { label: "纯关键词检索", value: "keyword" },
 ];
+
+/** 把选中的 reranker 配置 id 解析为 baseUrl/model 一并存到 Agent 上——Rust 后端
+ *  只存 id 用于取密钥，base_url/model 得跟主聊天一样由前端 settings store 解析后传过去。 */
+const resolveReranker = (configId: string | null) => {
+  if (!configId) return { ragRerankerConfigId: null, ragRerankerBaseUrl: null, ragRerankerModel: null };
+  const cfg = settings.rerankerApiConfigs.find((c) => c.id === configId);
+  return {
+    ragRerankerConfigId: configId,
+    ragRerankerBaseUrl: cfg?.baseUrl ?? null,
+    ragRerankerModel: cfg?.model ?? null,
+  };
+};
 
 // 切换角色时，如果提示词还是另一个角色的默认准则（用户没改过），跟着换成
 // 当前角色的版本；用户已经自己写过内容就不动。
@@ -157,6 +179,7 @@ const handleCreateAgent = async () => {
       provider: config.provider,
       model: config.model,
       baseUrl: config.baseUrl,
+      ...resolveReranker(agentForm.value.ragRerankerConfigId ?? null),
     });
     showCreateAgentModal.value = false;
     message.success("Agent 已创建");
@@ -184,6 +207,12 @@ const openEditAgentModal = (agent: WorkspaceAgent) => {
     activeSkillIds: [...agent.activeSkillIds],
     ragTopK: agent.ragTopK,
     ragRetrievalMode: agent.ragRetrievalMode,
+    ragRerankerConfigId: agent.ragRerankerConfigId,
+    ragRerankerBaseUrl: agent.ragRerankerBaseUrl,
+    ragRerankerModel: agent.ragRerankerModel,
+    ragRerankTopN: agent.ragRerankTopN,
+    requireToolApproval: agent.requireToolApproval,
+    enableThinking: agent.enableThinking,
   };
   showEditAgentModal.value = true;
 };
@@ -205,7 +234,13 @@ const handleUpdateAgent = async () => {
     return;
   }
   try {
-    await workspace.updateAgent({ ...form, provider: config.provider, model: config.model, baseUrl: config.baseUrl });
+    await workspace.updateAgent({
+      ...form,
+      provider: config.provider,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      ...resolveReranker(form.ragRerankerConfigId),
+    });
     showEditAgentModal.value = false;
     message.success("Agent 已更新");
   } catch (e) {
@@ -240,6 +275,61 @@ const handleDeleteAgent = async (agentId: string) => {
   }
 };
 
+// ============ 暂停 / 恢复（紧急停止手段） ============
+
+const handlePauseAgent = async (agentId: string) => {
+  try {
+    await workspace.pauseAgent(agentId);
+    message.success("已暂停");
+  } catch (e) {
+    message.error(`暂停失败: ${e}`);
+  }
+};
+
+const handleResumeAgent = async (agentId: string) => {
+  try {
+    await workspace.resumeAgent(agentId);
+    message.success("已恢复运行");
+  } catch (e) {
+    message.error(`恢复失败: ${e}`);
+  }
+};
+
+// ============ 待处理事项：MCP 工具调用审批 ============
+
+const handleResolveToolApproval = async (t: ToolApprovalEvent, approved: boolean) => {
+  try {
+    await workspace.resolveToolApproval(t.approvalId, approved);
+  } catch (e) {
+    message.error(`处理失败: ${e}`);
+  }
+};
+
+// ============ 选中 Agent 的结构化任务清单 ============
+
+const agentTasks = ref<WorkspaceAgentTask[]>([]);
+const loadAgentTasks = async () => {
+  if (!selectedAgentId.value) {
+    agentTasks.value = [];
+    return;
+  }
+  try {
+    agentTasks.value = await workspace.listAgentTasks(selectedAgentId.value);
+  } catch (e) {
+    message.error(`读取任务清单失败: ${e}`);
+  }
+};
+watch(selectedAgentId, loadAgentTasks, { immediate: true });
+
+const handleToggleTask = async (taskId: string, done: boolean) => {
+  try {
+    await workspace.setTaskDone(taskId, done);
+    await loadAgentTasks();
+  } catch (e) {
+    message.error(`更新任务状态失败: ${e}`);
+  }
+};
+
 const statusMeta: Record<AgentStatus, { label: string; type: "default" | "success" | "warning" | "error" | "info" }> = {
   idle: { label: "空闲", type: "default" },
   running: { label: "运行中", type: "success" },
@@ -247,6 +337,7 @@ const statusMeta: Record<AgentStatus, { label: string; type: "default" | "succes
   waiting_answer: { label: "等待回答", type: "warning" },
   sleeping: { label: "已休眠", type: "info" },
   meeting: { label: "会议中", type: "info" },
+  paused: { label: "已暂停", type: "warning" },
   error: { label: "异常", type: "error" },
 };
 
@@ -291,12 +382,16 @@ const logKindLabels: Record<string, string> = {
   meeting: "会议",
   agent_note: "Agent 备注",
   error: "错误",
+  auto_paused: "自动暂停",
+  paused: "手动暂停",
+  resumed: "恢复运行",
+  tool_approval: "工具调用审批",
 };
 
 const logTimelineType = (kind: string): "default" | "success" | "warning" | "error" | "info" => {
   if (kind === "error") return "error";
-  if (kind === "agent_created") return "success";
-  if (kind === "sleep_request" || kind === "agent_proposal") return "warning";
+  if (kind === "agent_created" || kind === "resumed") return "success";
+  if (kind === "sleep_request" || kind === "agent_proposal" || kind === "auto_paused" || kind === "paused" || kind === "tool_approval") return "warning";
   if (kind === "scheduled_trigger") return "info";
   return "info";
 };
@@ -480,7 +575,7 @@ onMounted(async () => {
     <n-empty v-if="!workspace.currentWorkspaceId" description="选择或新建一个工作组开始" style="margin-top: 120px" />
 
     <template v-else>
-      <div v-if="workspace.proposals.length || workspace.sleepRequests.length || workspace.questions.length" class="pending-section">
+      <div v-if="workspace.proposals.length || workspace.sleepRequests.length || workspace.questions.length || workspace.toolApprovals.length" class="pending-section">
         <n-card
           v-for="p in workspace.proposals"
           :key="p.proposalId"
@@ -543,6 +638,14 @@ onMounted(async () => {
             <n-button type="primary" @click="handleAnswer(q.questionId)">提交回答</n-button>
           </n-space>
         </n-card>
+
+        <n-card v-for="t in workspace.toolApprovals" :key="t.approvalId" class="pending-card" :title="`${t.agentName} 请求执行工具「${t.toolName}」`">
+          <pre class="tool-args">{{ JSON.stringify(t.arguments, null, 2) }}</pre>
+          <n-space justify="end">
+            <n-button @click="handleResolveToolApproval(t, false)">拒绝</n-button>
+            <n-button type="primary" @click="handleResolveToolApproval(t, true)">批准执行</n-button>
+          </n-space>
+        </n-card>
       </div>
 
       <n-grid :cols="3" :x-gap="16" class="main-grid">
@@ -578,8 +681,20 @@ onMounted(async () => {
                 </n-thing>
                 <template #suffix>
                   <n-space vertical align="end" size="small">
-                    <n-tag size="small" :type="statusMeta[agent.status].type">{{ statusMeta[agent.status].label }}</n-tag>
+                    <n-tooltip v-if="agent.status === 'error'" trigger="hover">
+                      <template #trigger>
+                        <n-tag size="small" :type="statusMeta[agent.status].type">{{ statusMeta[agent.status].label }}</n-tag>
+                      </template>
+                      {{ workspace.latestErrorFor(agent.id) ?? "未知错误，请查看活动时间线" }}
+                    </n-tooltip>
+                    <n-tag v-else size="small" :type="statusMeta[agent.status].type">{{ statusMeta[agent.status].label }}</n-tag>
                     <n-space size="small">
+                      <n-button v-if="agent.status === 'paused'" quaternary circle size="tiny" @click.stop="handleResumeAgent(agent.id)" title="恢复运行">
+                        <template #icon><n-icon><PlayOutline /></n-icon></template>
+                      </n-button>
+                      <n-button v-else quaternary circle size="tiny" @click.stop="handlePauseAgent(agent.id)" title="暂停（紧急停止）">
+                        <template #icon><n-icon><PauseOutline /></n-icon></template>
+                      </n-button>
                       <n-button quaternary circle size="tiny" @click.stop="openEditAgentModal(agent)" title="编辑">
                         <template #icon><n-icon><PencilOutline /></n-icon></template>
                       </n-button>
@@ -602,8 +717,19 @@ onMounted(async () => {
 
         <n-gi>
           <n-card title="对话" class="panel-card" :bordered="false">
+            <template #header-extra>
+              <n-button v-if="selectedAgent" size="small" quaternary @click="loadAgentTasks" title="刷新任务清单">
+                <template #icon><n-icon><RefreshOutline /></n-icon></template>
+              </n-button>
+            </template>
             <n-empty v-if="!selectedAgent" description="选择一个 Agent 查看/发起对话" />
             <template v-else>
+              <div v-if="agentTasks.length > 0" class="task-list">
+                <div v-for="t in agentTasks" :key="t.id" class="task-item">
+                  <n-checkbox :checked="t.done" @update:checked="(v: boolean) => handleToggleTask(t.id, v)" />
+                  <span :class="{ 'task-done': t.done }">{{ t.content }}</span>
+                </div>
+              </div>
               <div class="message-scroll">
                 <n-button v-if="workspace.hasMoreMessages" size="tiny" quaternary block @click="workspace.loadMoreMessages" class="load-more-btn">
                   加载更早的消息
@@ -684,12 +810,24 @@ onMounted(async () => {
         <n-form-item label="系统提示词">
           <n-input v-model:value="agentForm.systemPrompt" type="textarea" :rows="4" placeholder="这个 Agent 的职责说明..." />
         </n-form-item>
+        <n-form-item label="思考模式">
+          <n-space align="center">
+            <n-switch v-model:value="agentForm.enableThinking" />
+            <n-text depth="3" style="font-size: 12px">开启后模型会先深度思考再回复，更费时间和 token，复杂任务再开</n-text>
+          </n-space>
+        </n-form-item>
         <n-form-item label="MCP 工具" v-if="mcp.servers.length > 0">
           <n-checkbox-group v-model:value="agentForm.mcpServerIds">
             <n-space vertical size="small">
               <n-checkbox v-for="s in mcp.servers" :key="s.id" :value="s.id" :label="s.name" />
             </n-space>
           </n-checkbox-group>
+        </n-form-item>
+        <n-form-item v-if="mcp.servers.length > 0" label="高风险工具需批准">
+          <n-space align="center">
+            <n-switch v-model:value="agentForm.requireToolApproval" />
+            <n-text depth="3" style="font-size: 12px">开启后（默认），删除/写入/执行命令等高风险工具调用前需要你批准，其余工具照常自动放行；关闭则全部自动放行，风险自担</n-text>
+          </n-space>
         </n-form-item>
         <n-form-item label="知识库" v-if="kb.knowledgeBases.length > 0">
           <n-checkbox-group v-model:value="agentForm.knowledgeBaseIds">
@@ -704,6 +842,12 @@ onMounted(async () => {
           </n-form-item>
           <n-form-item label="检索模式">
             <n-select v-model:value="agentForm.ragRetrievalMode" :options="retrievalModeOptions" />
+          </n-form-item>
+          <n-form-item label="Reranker" v-if="settings.rerankerApiConfigOptions.length > 0">
+            <n-select v-model:value="agentForm.ragRerankerConfigId" :options="settings.rerankerApiConfigOptions" clearable placeholder="不启用精排（可选）" />
+          </n-form-item>
+          <n-form-item label="精排保留条数" v-if="agentForm.ragRerankerConfigId">
+            <n-input-number v-model:value="agentForm.ragRerankTopN" :min="1" :max="agentForm.ragTopK" placeholder="默认等于 top_k" />
           </n-form-item>
         </template>
         <n-form-item label="Skill" v-if="skills.skills.length > 0">
@@ -734,12 +878,24 @@ onMounted(async () => {
         <n-form-item label="系统提示词">
           <n-input v-model:value="editAgentForm.systemPrompt" type="textarea" :rows="4" placeholder="这个 Agent 的职责说明..." />
         </n-form-item>
+        <n-form-item label="思考模式">
+          <n-space align="center">
+            <n-switch v-model:value="editAgentForm.enableThinking" />
+            <n-text depth="3" style="font-size: 12px">开启后模型会先深度思考再回复，更费时间和 token，复杂任务再开</n-text>
+          </n-space>
+        </n-form-item>
         <n-form-item label="MCP 工具" v-if="mcp.servers.length > 0">
           <n-checkbox-group v-model:value="editAgentForm.mcpServerIds">
             <n-space vertical size="small">
               <n-checkbox v-for="s in mcp.servers" :key="s.id" :value="s.id" :label="s.name" />
             </n-space>
           </n-checkbox-group>
+        </n-form-item>
+        <n-form-item v-if="mcp.servers.length > 0" label="高风险工具需批准">
+          <n-space align="center">
+            <n-switch v-model:value="editAgentForm.requireToolApproval" />
+            <n-text depth="3" style="font-size: 12px">开启后（默认），删除/写入/执行命令等高风险工具调用前需要你批准，其余工具照常自动放行；关闭则全部自动放行，风险自担</n-text>
+          </n-space>
         </n-form-item>
         <n-form-item label="知识库" v-if="kb.knowledgeBases.length > 0">
           <n-checkbox-group v-model:value="editAgentForm.knowledgeBaseIds">
@@ -754,6 +910,12 @@ onMounted(async () => {
           </n-form-item>
           <n-form-item label="检索模式">
             <n-select v-model:value="editAgentForm.ragRetrievalMode" :options="retrievalModeOptions" />
+          </n-form-item>
+          <n-form-item label="Reranker" v-if="settings.rerankerApiConfigOptions.length > 0">
+            <n-select v-model:value="editAgentForm.ragRerankerConfigId" :options="settings.rerankerApiConfigOptions" clearable placeholder="不启用精排（可选）" />
+          </n-form-item>
+          <n-form-item label="精排保留条数" v-if="editAgentForm.ragRerankerConfigId">
+            <n-input-number v-model:value="editAgentForm.ragRerankTopN" :min="1" :max="editAgentForm.ragTopK" placeholder="默认等于 top_k" />
           </n-form-item>
         </template>
         <n-form-item label="Skill" v-if="skills.skills.length > 0">
@@ -867,6 +1029,39 @@ onMounted(async () => {
   font-size: $label-size;
   color: $ink-faint;
   transition: opacity $duration $ease;
+}
+
+.tool-args {
+  font-family: $font-mono;
+  font-size: 0.75rem;
+  color: $ink-soft;
+  background: $surface;
+  padding: 8px;
+  margin: 0 0 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-list {
+  border-bottom: $border-faint;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  max-height: 8rem;
+  overflow-y: auto;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 0.85rem;
+}
+
+.task-done {
+  color: $ink-faint;
+  text-decoration: line-through;
 }
 
 .agent-list {

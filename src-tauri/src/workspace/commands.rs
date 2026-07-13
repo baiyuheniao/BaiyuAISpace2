@@ -16,7 +16,7 @@ use crate::knowledge_base::retrieval::build_context as build_rag_context;
 use crate::knowledge_base::types::{RetrievalMode, RetrievalRequest};
 use crate::secure_storage;
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::Mutex;
@@ -31,6 +31,11 @@ const MAX_ROUNDS_PER_WAKE: u32 = 8;
 /// 工具轮上限拦腰截断；这个总轮数是防失控的兜底保险丝。
 const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
 const MAX_HISTORY_MESSAGES: i64 = 40;
+/// 唤醒频率护栏：滑动窗口内唤醒次数超过这个数就自动暂停这个 Agent，防止
+/// Agent 间来回搭话失控、无节制消耗 API 调用（多 Agent 自主互聊没有刹车的
+/// 那个风险）。正常使用（人工来回对话、一场会议）远远达不到这个频率。
+const WAKE_RATE_WINDOW_SECS: i64 = 300;
+const MAX_WAKES_PER_WINDOW: usize = 20;
 
 /// One running agent's wake signal + stop switch. Lives only in memory, but
 /// `main.rs`'s `setup()` calls `start_agent_loop` again for every active
@@ -71,6 +76,21 @@ pub struct PendingSleepRequests(pub Arc<Mutex<HashMap<String, oneshot::Sender<bo
 /// Resolved by the user answering via `workspace_resolve_question`.
 #[derive(Default)]
 pub struct PendingQuestions(pub Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>);
+
+/// A pending MCP tool-call approval, keyed by a generated approval id.
+/// Only raised when the calling agent's `require_tool_approval` is true --
+/// see `dispatch_tool_call`'s fallback arm.
+#[derive(Default)]
+pub struct PendingToolApprovals(pub Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
+
+/// Recent wake timestamps (ms) per agent, in a fixed-size sliding window --
+/// the guardrail against runaway ping-pong: if an agent gets woken more than
+/// `MAX_WAKES_PER_WINDOW` times within `WAKE_RATE_WINDOW_SECS`, it's
+/// automatically paused. Deliberately in-memory only (not persisted) since a
+/// restart naturally resets the count, which is fine -- the guardrail only
+/// needs to catch runaway behavior within a single running session.
+#[derive(Default)]
+pub struct WakeRateState(pub Arc<Mutex<HashMap<String, VecDeque<i64>>>>);
 
 pub fn init_workspace_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     db::init_workspace_tables(conn)
@@ -206,6 +226,40 @@ pub async fn workspace_delete_agent(
     let db = db_state.0.lock().await;
     let conn = db::open_conn(&db.path)?;
     db::delete_agent(&conn, &agent_id)?;
+    Ok(())
+}
+
+/// Manual emergency-stop: immediately marks the agent Paused so its loop
+/// no-ops on every future wake until resumed. Does not cancel work already
+/// in flight for the current wake (that finishes normally); it only stops
+/// the *next* one from starting.
+#[tauri::command]
+pub async fn workspace_pause_agent(
+    agent_id: String,
+    app_handle: AppHandle,
+) -> Result<(), WorkspaceError> {
+    let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
+    set_agent_status(&app_handle, &agent_id, AgentStatus::Paused).await;
+    insert_workspace_log(&app_handle, &agent.workspace_id, Some(agent_id.clone()), "paused", format!("「{}」已手动暂停", agent.name)).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_resume_agent(
+    agent_id: String,
+    app_handle: AppHandle,
+    workspace_state: State<'_, WorkspaceState>,
+) -> Result<(), WorkspaceError> {
+    let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
+    set_agent_status(&app_handle, &agent_id, AgentStatus::Idle).await;
+    insert_workspace_log(&app_handle, &agent.workspace_id, Some(agent_id.clone()), "resumed", format!("「{}」已恢复运行", agent.name)).await;
+    // Any message that arrived while paused already consumed its `Notify`
+    // permit on the wake that then no-op'd on the paused check -- without an
+    // explicit notify here, a backlogged message would sit unanswered until
+    // some unrelated future message happens to wake the loop again.
+    if let Some(handle) = workspace_state.0.lock().unwrap().get(&agent_id) {
+        handle.notify.notify_one();
+    }
     Ok(())
 }
 
@@ -366,6 +420,48 @@ pub async fn workspace_list_pending_events(
     let db = db_state.0.lock().await;
     let conn = db::open_conn(&db.path)?;
     db::list_unresolved_pending_events(&conn, &workspace_id)
+}
+
+/// The frontend calls this after the user approves/rejects a
+/// `workspace://tool-approval` card.
+#[tauri::command]
+pub async fn workspace_resolve_tool_approval(
+    approval_id: String,
+    approved: bool,
+    pending: State<'_, PendingToolApprovals>,
+    db_state: State<'_, DbState>,
+) -> Result<(), WorkspaceError> {
+    let sender = {
+        let mut map = pending.0.lock().unwrap();
+        map.remove(&approval_id)
+    };
+    let sender = sender.ok_or_else(|| WorkspaceError::NotFound(format!("工具调用审批 {} 不存在或已被处理/超时", approval_id)))?;
+    let _ = sender.send(approved);
+    mark_pending_event_resolved(&db_state, &approval_id).await;
+    Ok(())
+}
+
+/// Lets the frontend show/manage an agent's structured to-do list directly,
+/// not just let the agent itself manage it via `workspace_task_list`.
+#[tauri::command]
+pub async fn workspace_list_agent_tasks(
+    agent_id: String,
+    db_state: State<'_, DbState>,
+) -> Result<Vec<WorkspaceAgentTask>, WorkspaceError> {
+    let db = db_state.0.lock().await;
+    let conn = db::open_conn(&db.path)?;
+    db::list_tasks(&conn, &agent_id)
+}
+
+#[tauri::command]
+pub async fn workspace_set_task_done(
+    task_id: String,
+    done: bool,
+    db_state: State<'_, DbState>,
+) -> Result<(), WorkspaceError> {
+    let db = db_state.0.lock().await;
+    let conn = db::open_conn(&db.path)?;
+    db::set_task_done(&conn, &task_id, done)
 }
 
 async fn mark_pending_event_resolved(db_state: &DbState, id: &str) {
@@ -660,7 +756,13 @@ async fn spawn_agent_internal(
             status: AgentStatus::Idle,
             rag_top_k: request.rag_top_k,
             rag_retrieval_mode: request.rag_retrieval_mode.clone(),
+            rag_reranker_config_id: request.rag_reranker_config_id.clone(),
+            rag_reranker_base_url: request.rag_reranker_base_url.clone(),
+            rag_reranker_model: request.rag_reranker_model.clone(),
+            rag_rerank_top_n: request.rag_rerank_top_n,
             scratchpad: String::new(),
+            require_tool_approval: request.require_tool_approval,
+            enable_thinking: request.enable_thinking,
             deleted_at: None,
             created_at: now,
             updated_at: now,
@@ -759,6 +861,47 @@ async fn process_agent_wake(
         .await?
         .ok_or_else(|| WorkspaceError::NotFound(workspace_id.to_string()))?;
 
+    // 暂停中：用户手动暂停过，或已经被下面的唤醒频率护栏自动暂停过，静默
+    // 跳过，直到用户手动 workspace_resume_agent。
+    if agent.status == AgentStatus::Paused {
+        log::debug!("[workspace] Agent「{}」处于暂停状态，跳过本次唤醒", agent.name);
+        return Ok(());
+    }
+
+    // 唤醒频率护栏：滑动窗口内唤醒次数超阈值就自动暂停，防止 Agent 间来回
+    // 搭话失控、无节制消耗 API 调用。这一次触发阈值的唤醒本身也不处理。
+    {
+        let rate_state = app_handle.state::<WakeRateState>();
+        let now = Utc::now().timestamp_millis();
+        let window_start = now - WAKE_RATE_WINDOW_SECS * 1000;
+        let exceeded = {
+            let mut map = rate_state.0.lock().unwrap();
+            let entry = map.entry(agent_id.to_string()).or_default();
+            entry.retain(|&t| t >= window_start);
+            entry.push_back(now);
+            entry.len() > MAX_WAKES_PER_WINDOW
+        };
+        if exceeded {
+            log::warn!(
+                "[workspace] Agent「{}」{} 秒内被唤醒超过 {} 次，自动暂停以防失控",
+                agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW
+            );
+            set_agent_status(app_handle, agent_id, AgentStatus::Paused).await;
+            insert_workspace_log(
+                app_handle,
+                workspace_id,
+                Some(agent_id.to_string()),
+                "auto_paused",
+                format!(
+                    "「{}」{} 秒内被唤醒超过 {} 次，已自动暂停（防止无节制消耗 API 调用），需要手动恢复",
+                    agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW
+                ),
+            )
+            .await;
+            return Ok(());
+        }
+    }
+
     log::info!(
         "[workspace] 唤醒 Agent「{}」({}) - workspace: {} model: {}/{}",
         agent.name, agent_id, workspace.name, agent.provider, agent.model
@@ -801,7 +944,13 @@ async fn process_agent_wake(
     } else {
         secure_storage::get_api_key(agent.api_config_id.clone())
             .map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?
-            .ok_or_else(|| WorkspaceError::InvalidConfig(format!("Agent「{}」未配置 API 密钥", agent.name)))?
+            .ok_or_else(|| {
+                WorkspaceError::InvalidConfig(format!(
+                    "Agent「{}」找不到可用的 API 密钥（原本引用的 API 配置可能已在设置页被删除，或从未设置过密钥）；\
+                     请在设置页重新配置对应的 API 密钥，或编辑这个 Agent 换一个 API 配置",
+                    agent.name
+                ))
+            })?
     };
 
     let mut tools = workspace_tool_defs(&agent);
@@ -842,6 +991,11 @@ async fn process_agent_wake(
             Some(&system_prompt),
             &native_messages,
             &tools,
+            // None -- let each provider apply its own generous default
+            // (32000 for Anthropic, model ceiling for the rest) instead of
+            // the old hardcoded 4096 that silently truncated long replies.
+            None,
+            agent.enable_thinking,
         )
         .await
         .map_err(|e| WorkspaceError::LlmError(e.to_string()))?;
@@ -988,6 +1142,25 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
         ));
     }
 
+    {
+        let db_state = app_handle.state::<DbState>();
+        let db = db_state.0.lock().await;
+        if let Ok(conn) = db::open_conn(&db.path) {
+            if let Ok(tasks) = db::list_tasks(&conn, &agent.id) {
+                if !tasks.is_empty() {
+                    let lines: Vec<String> = tasks
+                        .iter()
+                        .map(|t| format!("- [{}] {} (id: {})", if t.done { "x" } else { " " }, t.content, t.id))
+                        .collect();
+                    sections.push(format!(
+                        "【你的任务清单（可用 workspace_task_list 工具更新）】\n{}",
+                        lines.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+
     if !agent.active_skill_ids.is_empty() {
         let db_state = app_handle.state::<DbState>();
         let all_skills = {
@@ -1020,10 +1193,10 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
                 },
                 similarity_threshold: 0.0,
                 window_size: 1,
-                reranker_config_id: None,
-                reranker_base_url: None,
-                reranker_model: None,
-                rerank_top_n: None,
+                reranker_config_id: agent.rag_reranker_config_id.clone(),
+                reranker_base_url: agent.rag_reranker_base_url.clone(),
+                reranker_model: agent.rag_reranker_model.clone(),
+                rerank_top_n: agent.rag_rerank_top_n,
             };
             match search_knowledge_base(request, kb_state.clone()).await {
                 Ok(result) if !result.chunks.is_empty() => {
@@ -1085,16 +1258,34 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         server_id: "workspace".to_string(),
         server_name: "workspace".to_string(),
         name: "workspace_scratchpad".to_string(),
-        description: "读写你的私人工作备忘。这是唯一跨越「唤醒」持续保留的私有存储（普通对话历史只保留最近\
-            几十条消息，工具调用的中间结果醒来就丢）——用它记录任务清单、已查到的资料、下一步打算做什么，\
-            避免每次醒来都要重新摸索状态。action 为 replace 时整体覆盖，append 时追加一行，clear 清空；\
-            省略 content 直接读出当前内容。"
+        description: "读写你的私人自由文本备忘。这是跨越「唤醒」持续保留的私有存储之一（普通对话历史只保留\
+            最近几十条消息，工具调用的中间结果醒来就丢）——用它记录已查到的资料、当前想法、下一步打算做什么。\
+            如果是可勾选完成的具体待办事项，优先用 workspace_task_list 而不是这里。\
+            action 为 replace 时整体覆盖，append 时追加一行，clear 清空；省略 content 直接读出当前内容。"
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ["read", "replace", "append", "clear"], "description": "read 只读取；replace 整体覆盖；append 追加一行；clear 清空" },
                 "content": { "type": "string", "description": "replace/append 时要写入的内容" }
+            },
+            "required": ["action"]
+        }),
+    });
+    tools.push(MCPTool {
+        server_id: "workspace".to_string(),
+        server_name: "workspace".to_string(),
+        name: "workspace_task_list".to_string(),
+        description: "管理你的结构化任务清单，跨「唤醒」持续保留。add 新增一条待办；complete 把某条标记完成；\
+            reopen 取消完成标记；remove 删除一条；list 列出全部（含已完成）。清单内容也会自动拼进你的系统提示词，\
+            不用每次都手动 list 来提醒自己。"
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["add", "complete", "reopen", "remove", "list"], "description": "要执行的操作" },
+                "content": { "type": "string", "description": "action=add 时新任务的内容" },
+                "task_id": { "type": "string", "description": "action=complete/reopen/remove 时目标任务的 id" }
             },
             "required": ["action"]
         }),
@@ -1276,6 +1467,12 @@ async fn dispatch_tool_call(
                 active_skill_ids: vec![],
                 rag_top_k: default_rag_top_k(),
                 rag_retrieval_mode: default_rag_retrieval_mode(),
+                rag_reranker_config_id: None,
+                rag_reranker_base_url: None,
+                rag_reranker_model: None,
+                rag_rerank_top_n: None,
+                require_tool_approval: default_require_tool_approval(),
+                enable_thinking: false,
             };
 
             let pending = app_handle.state::<PendingProposals>();
@@ -1372,6 +1569,52 @@ async fn dispatch_tool_call(
             };
             serde_json::json!({ "scratchpad": current })
         }
+        "workspace_task_list" => {
+            let action = call.arguments.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let db_state = app_handle.state::<DbState>();
+            let db = db_state.0.lock().await;
+            let conn = match db::open_conn(&db.path) {
+                Ok(c) => c,
+                Err(e) => return serde_json::json!({ "error": format!("打开数据库连接失败: {}", e) }),
+            };
+            match action {
+                "add" => {
+                    let content = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                    if content.is_empty() {
+                        return serde_json::json!({ "error": "add 需要非空 content" });
+                    }
+                    let now = Utc::now().timestamp_millis();
+                    let task = WorkspaceAgentTask { id: Uuid::new_v4().to_string(), agent_id: agent.id.clone(), content, done: false, created_at: now, updated_at: now };
+                    if let Err(e) = db::insert_task(&conn, &task) {
+                        return serde_json::json!({ "error": format!("新增任务失败: {}", e) });
+                    }
+                    serde_json::json!({ "status": "added", "taskId": task.id })
+                }
+                "complete" | "reopen" => {
+                    let Some(task_id) = call.arguments.get("task_id").and_then(|v| v.as_str()) else {
+                        return serde_json::json!({ "error": "缺少 task_id" });
+                    };
+                    if let Err(e) = db::set_task_done(&conn, task_id, action == "complete") {
+                        return serde_json::json!({ "error": e.to_string() });
+                    }
+                    serde_json::json!({ "status": "ok" })
+                }
+                "remove" => {
+                    let Some(task_id) = call.arguments.get("task_id").and_then(|v| v.as_str()) else {
+                        return serde_json::json!({ "error": "缺少 task_id" });
+                    };
+                    if let Err(e) = db::delete_task(&conn, task_id) {
+                        return serde_json::json!({ "error": format!("删除任务失败: {}", e) });
+                    }
+                    serde_json::json!({ "status": "removed" })
+                }
+                "list" => match db::list_tasks(&conn, &agent.id) {
+                    Ok(tasks) => serde_json::json!(tasks),
+                    Err(e) => serde_json::json!({ "error": format!("读取任务清单失败: {}", e) }),
+                },
+                other => serde_json::json!({ "error": format!("未知 action: {}", other) }),
+            }
+        }
         "workspace_log" => {
             let content = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if content.trim().is_empty() {
@@ -1398,9 +1641,11 @@ async fn dispatch_tool_call(
                 .clamp(1, meeting::MAX_MAX_SPEECHES);
 
             let all_agents = list_agents_for_workspace(app_handle, &workspace.id).await;
-            let others: Vec<_> = all_agents.iter().filter(|a| a.id != agent.id).collect();
+            // 暂停中的 Agent 不拉进会议 -- 暂停是用户明确要求它别再干活，会议邀请
+            // 不应该把它绕过去。
+            let others: Vec<_> = all_agents.iter().filter(|a| a.id != agent.id && a.status != AgentStatus::Paused).collect();
             if others.is_empty() {
-                return serde_json::json!({ "error": "工作组内没有其他 Agent，无法召开会议" });
+                return serde_json::json!({ "error": "工作组内没有其他可参会的 Agent（可能都已暂停），无法召开会议" });
             }
 
             let meeting_id = Uuid::new_v4().to_string();
@@ -1527,19 +1772,29 @@ async fn dispatch_tool_call(
                 return serde_json::json!({ "error": format!("未知工具 {}，且该 Agent 未被授权使用任何 MCP 服务器", call.name) });
             }
             let db_state = app_handle.state::<DbState>();
-            let owning_server = match get_all_mcp_tools(db_state.clone()).await {
+            let owning_tool = match get_all_mcp_tools(db_state.clone()).await {
                 Ok(all_tools) => all_tools
                     .into_iter()
-                    .find(|t| t.name == call.name && agent.mcp_server_ids.contains(&t.server_id))
-                    .map(|t| t.server_id),
+                    .find(|t| t.name == call.name && agent.mcp_server_ids.contains(&t.server_id)),
                 Err(e) => {
                     return serde_json::json!({ "error": format!("获取 MCP 工具列表失败: {}", e) });
                 }
             };
-            let Some(server_id) = owning_server else {
+            let Some(tool) = owning_tool else {
                 return serde_json::json!({ "error": format!("工具 {} 不存在，或不在该 Agent 被授权使用的 MCP 服务器范围内", call.name) });
             };
-            match call_mcp_tool(db_state, Some(server_id), call.name.clone(), call.arguments.clone()).await {
+            // 无人值守缺口的另一半：权限旁路堵死了不代表安全。但给每一次工具
+            // 调用都要求批准会把"自主运行"变成"事事都要盯着"，反而没人真的
+            // 会去审批——只挑名字/描述命中危险关键词（删除、写入、执行命令等）
+            // 的工具走审批，其余照常自动放行；用户也可以直接关掉这个开关，
+            // 全部自动放行（自担风险）。
+            if agent.require_tool_approval && is_dangerous_tool(&tool.name, &tool.description) {
+                let approved = request_tool_approval(app_handle, &workspace.id, agent, &call.name, &call.arguments, cancel).await;
+                if !approved {
+                    return serde_json::json!({ "error": format!("用户未批准执行工具 {}", call.name) });
+                }
+            }
+            match call_mcp_tool(db_state, Some(tool.server_id), call.name.clone(), call.arguments.clone()).await {
                 Ok(v) => v,
                 Err(e) => serde_json::json!({ "error": e.to_string() }),
             }
@@ -1773,4 +2028,119 @@ async fn request_user_answer(
     };
     mark_pending_event_resolved_via_handle(app_handle, &question_id).await;
     answer
+}
+
+/// Keyword heuristic for "this MCP tool can do real damage if misused" --
+/// checked against the tool's name and description (case-insensitive,
+/// substring match). Deliberately covers destructive/mutating/execution
+/// verbs, not read-only ones (list/get/search/query/read/fetch) -- those
+/// stay auto-approved so the approval gate doesn't turn into "click yes on
+/// everything" noise that nobody actually reads. English and Chinese verbs
+/// both included since MCP tool descriptions can be in either.
+const DANGEROUS_TOOL_KEYWORDS: &[&str] = &[
+    "delete", "remove", "drop", "truncate", "wipe", "format", "destroy", "purge",
+    "kill", "terminate", "uninstall", "shutdown", "reboot",
+    "exec", "execute", "eval", "shell", "command", "spawn", "subprocess", "run_code", "runcode",
+    "write", "overwrite", "modify", "move", "rename", "chmod", "chown",
+    "删除", "移除", "清空", "格式化", "销毁", "卸载", "关机", "重启",
+    "执行命令", "执行代码", "运行命令", "运行代码", "写入", "覆盖", "修改文件", "移动文件", "重命名",
+];
+
+fn is_dangerous_tool(name: &str, description: &str) -> bool {
+    let haystack = format!("{} {}", name, description).to_lowercase();
+    DANGEROUS_TOOL_KEYWORDS.iter().any(|kw| haystack.contains(kw))
+}
+
+/// Registers a pending MCP tool-call approval, notifies the frontend, and
+/// blocks until the user approves/rejects it, 10 minutes pass with no
+/// response, or `cancel` fires. Unlike the sleep-approval default (stay
+/// awake is safe), this defaults to **deny** on timeout/cancel -- an
+/// unactioned approval for a real tool call (filesystem/shell-capable MCP
+/// servers included) should never silently proceed.
+async fn request_tool_approval(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent: &WorkspaceAgent,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    cancel: &CancellationToken,
+) -> bool {
+    let approval_id = Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel();
+    {
+        let pending = app_handle.state::<PendingToolApprovals>();
+        pending.0.lock().unwrap().insert(approval_id.clone(), tx);
+    }
+
+    let _ = app_handle.emit(
+        "workspace://tool-approval",
+        serde_json::json!({
+            "approvalId": approval_id, "workspaceId": workspace_id,
+            "agentId": agent.id, "agentName": agent.name,
+            "toolName": tool_name, "arguments": arguments,
+        }),
+    );
+    record_pending_event(
+        app_handle,
+        workspace_id,
+        &agent.id,
+        &agent.name,
+        "tool_approval",
+        serde_json::json!({ "toolName": tool_name, "arguments": arguments, "approvalId": approval_id }),
+        &approval_id,
+    )
+    .await;
+    insert_workspace_log(
+        app_handle,
+        workspace_id,
+        Some(agent.id.clone()),
+        "tool_approval",
+        format!("{} 请求执行工具「{}」，等待用户批准", agent.name, tool_name),
+    )
+    .await;
+
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => {
+            app_handle.state::<PendingToolApprovals>().0.lock().unwrap().remove(&approval_id);
+            None
+        }
+        result = tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx) => Some(result),
+    };
+
+    let approved = match outcome {
+        None => {
+            mark_pending_event_resolved_via_handle(app_handle, &approval_id).await;
+            return false;
+        }
+        Some(Ok(Ok(approved))) => approved,
+        Some(Ok(Err(_))) => false,
+        Some(Err(_)) => {
+            app_handle.state::<PendingToolApprovals>().0.lock().unwrap().remove(&approval_id);
+            false
+        }
+    };
+    mark_pending_event_resolved_via_handle(app_handle, &approval_id).await;
+    approved
+}
+
+#[cfg(test)]
+mod danger_classifier_tests {
+    use super::is_dangerous_tool;
+
+    #[test]
+    fn flags_destructive_and_execution_tools() {
+        assert!(is_dangerous_tool("delete_file", "Delete a file from disk"));
+        assert!(is_dangerous_tool("shell_exec", "Run an arbitrary shell command"));
+        assert!(is_dangerous_tool("write_file", "写入文件内容"));
+        assert!(is_dangerous_tool("rm_dir", "递归删除目录"));
+        assert!(is_dangerous_tool("format_disk", "格式化磁盘分区"));
+    }
+
+    #[test]
+    fn leaves_read_only_tools_unflagged() {
+        assert!(!is_dangerous_tool("list_files", "列出目录下的文件"));
+        assert!(!is_dangerous_tool("search_web", "Search the web for a query"));
+        assert!(!is_dangerous_tool("get_weather", "查询天气预报"));
+        assert!(!is_dangerous_tool("read_file", "读取文件内容"));
+    }
 }

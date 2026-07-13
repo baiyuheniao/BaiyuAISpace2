@@ -18,7 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type AgentRole = "main" | "sub";
-export type AgentStatus = "idle" | "running" | "waiting_approval" | "waiting_answer" | "sleeping" | "meeting" | "error";
+export type AgentStatus = "idle" | "running" | "waiting_approval" | "waiting_answer" | "sleeping" | "meeting" | "paused" | "error";
 
 /**
  * 默认协作行为准则：预填进新 Agent 的系统提示词输入框，对用户可见、可改、
@@ -58,7 +58,16 @@ export interface WorkspaceAgent {
   status: AgentStatus;
   ragTopK: number;
   ragRetrievalMode: string;
+  ragRerankerConfigId: string | null;
+  ragRerankerBaseUrl: string | null;
+  ragRerankerModel: string | null;
+  ragRerankTopN: number | null;
   scratchpad: string;
+  /** 高风险 MCP 工具（删除/写入/执行命令等）执行前是否需要用户批准，默认
+   *  true；关闭则该 Agent 的所有工具调用都自动放行。 */
+  requireToolApproval: boolean;
+  /** 是否为这个 Agent 的请求带上思考/推理参数，默认关闭（增加延迟和 token 消耗）。 */
+  enableThinking: boolean;
   /** 非 null 表示已被删除（软删除），仍保留用于历史消息里解析发送者名字。 */
   deletedAt: number | null;
   createdAt: number;
@@ -78,6 +87,21 @@ export interface UpdateAgentRequest {
   activeSkillIds: string[];
   ragTopK: number;
   ragRetrievalMode: string;
+  ragRerankerConfigId: string | null;
+  ragRerankerBaseUrl: string | null;
+  ragRerankerModel: string | null;
+  ragRerankTopN: number | null;
+  requireToolApproval: boolean;
+  enableThinking: boolean;
+}
+
+export interface WorkspaceAgentTask {
+  id: string;
+  agentId: string;
+  content: string;
+  done: boolean;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface WorkspaceMessage {
@@ -112,6 +136,12 @@ export interface CreateAgentRequest {
   activeSkillIds: string[];
   ragTopK: number;
   ragRetrievalMode: string;
+  ragRerankerConfigId?: string | null;
+  ragRerankerBaseUrl?: string | null;
+  ragRerankerModel?: string | null;
+  ragRerankTopN?: number | null;
+  requireToolApproval?: boolean;
+  enableThinking?: boolean;
 }
 
 export interface AgentProposalEvent {
@@ -143,13 +173,22 @@ interface AgentStatusEvent {
   status: AgentStatus;
 }
 
+export interface ToolApprovalEvent {
+  approvalId: string;
+  workspaceId: string;
+  agentId: string;
+  agentName: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
 /** 持久化的待处理事项，用于补齐"页面没开着 / App 重启前发生"而错过的一次性事件。 */
 export interface PendingEvent {
   id: string;
   workspaceId: string;
   agentId: string;
   agentName: string;
-  kind: "proposal" | "sleep" | "question";
+  kind: "proposal" | "sleep" | "question" | "tool_approval";
   payload: Record<string, unknown>;
   createdAt: number;
   resolvedAt: number | null;
@@ -174,6 +213,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const proposals = ref<AgentProposalEvent[]>([]);
   const sleepRequests = ref<SleepRequestEvent[]>([]);
   const questions = ref<QuestionEvent[]>([]);
+  const toolApprovals = ref<ToolApprovalEvent[]>([]);
   // 一次性提醒事件的队列，视图层 watch 它、用 message.warning() 弹出后自行清空 --
   // 这里不直接调用 useMessage()，因为 store 不在组件树里，拿不到 NMessageProvider 的上下文。
   const inactiveAgentNotices = ref<AgentInactiveEvent[]>([]);
@@ -218,6 +258,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       listen<QuestionEvent>("workspace://question", (e) => {
         console.log(`[Workspace] Agent 提问: questionId=${e.payload.questionId} agent=${e.payload.agentName} | ${e.payload.question.slice(0, 60)}`);
         questions.value.push(e.payload);
+      }),
+      listen<ToolApprovalEvent>("workspace://tool-approval", (e) => {
+        console.log(`[Workspace] 工具调用审批请求: approvalId=${e.payload.approvalId} agent=${e.payload.agentName} tool=${e.payload.toolName}`);
+        toolApprovals.value.push(e.payload);
       }),
       listen<AgentInactiveEvent>("workspace://agent-inactive", (e) => {
         console.log(`[Workspace] Agent 未在运行: agentId=${e.payload.agentId} name=${e.payload.agentName}`);
@@ -304,6 +348,11 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         sleepRequests.value.push({ requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, reason: (e.payload.reason as string) ?? "" });
       } else if (e.kind === "question" && !questions.value.some((q) => q.questionId === e.id)) {
         questions.value.push({ questionId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, question: (e.payload.question as string) ?? "" });
+      } else if (e.kind === "tool_approval" && !toolApprovals.value.some((t) => t.approvalId === e.id)) {
+        toolApprovals.value.push({
+          approvalId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName,
+          toolName: (e.payload.toolName as string) ?? "", arguments: (e.payload.arguments as Record<string, unknown>) ?? {},
+        });
       }
     }
   };
@@ -360,6 +409,37 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     questions.value = questions.value.filter((q) => q.questionId !== questionId);
   };
 
+  const resolveToolApproval = async (approvalId: string, approved: boolean) => {
+    console.log(`[Workspace] 处理工具调用审批: approvalId=${approvalId} approved=${approved}`);
+    await invoke("workspace_resolve_tool_approval", { approvalId, approved });
+    toolApprovals.value = toolApprovals.value.filter((t) => t.approvalId !== approvalId);
+  };
+
+  /** 手动紧急停止 / 恢复一个 Agent。 */
+  const pauseAgent = async (agentId: string) => {
+    await invoke("workspace_pause_agent", { agentId });
+  };
+  const resumeAgent = async (agentId: string) => {
+    await invoke("workspace_resume_agent", { agentId });
+  };
+
+  const listAgentTasks = async (agentId: string): Promise<WorkspaceAgentTask[]> => {
+    return invoke<WorkspaceAgentTask[]>("workspace_list_agent_tasks", { agentId });
+  };
+  const setTaskDone = async (taskId: string, done: boolean) => {
+    await invoke("workspace_set_task_done", { taskId, done });
+  };
+
+  /** 这个 Agent 最近一条错误日志的内容——用于在花名册上直接展示出错原因，
+   *  而不是只有一个"异常"标签、需要用户自己去时间线里翻。 */
+  const latestErrorFor = (agentId: string): string | null => {
+    for (let i = logs.value.length - 1; i >= 0; i--) {
+      const l = logs.value[i];
+      if (l.agentId === agentId && l.kind === "error") return l.content;
+    }
+    return null;
+  };
+
   /** 把一个 Agent id（或 "user"/"all"/"system"）解析成显示用的名字。
    *  `agents` 里包含软删除的 Agent（后端 workspace_list_agents 特意不过滤），
    *  所以已删除 Agent 发过的历史消息仍能显示真实名字，而不是裸 UUID。 */
@@ -386,6 +466,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     proposals,
     sleepRequests,
     questions,
+    toolApprovals,
     inactiveAgentNotices,
     initListeners,
     disposeListeners,
@@ -408,6 +489,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     resolveProposal,
     resolveSleepRequest,
     resolveQuestion,
+    resolveToolApproval,
+    pauseAgent,
+    resumeAgent,
+    listAgentTasks,
+    setTaskDone,
+    latestErrorFor,
     agentName,
   };
 });

@@ -75,6 +75,9 @@ pub enum AgentStatus {
     WaitingAnswer,
     Sleeping,
     Meeting,
+    /// 用户手动暂停，或触发了唤醒频率护栏被自动暂停；暂停期间新消息仍会
+    /// 存进收件箱，但不会触发处理，直到用户手动 `workspace_resume_agent`。
+    Paused,
     Error,
 }
 
@@ -87,6 +90,7 @@ impl AgentStatus {
             AgentStatus::WaitingAnswer => "waiting_answer",
             AgentStatus::Sleeping => "sleeping",
             AgentStatus::Meeting => "meeting",
+            AgentStatus::Paused => "paused",
             AgentStatus::Error => "error",
         }
     }
@@ -98,6 +102,7 @@ impl AgentStatus {
             "waiting_answer" => AgentStatus::WaitingAnswer,
             "sleeping" => AgentStatus::Sleeping,
             "meeting" => AgentStatus::Meeting,
+            "paused" => AgentStatus::Paused,
             "error" => AgentStatus::Error,
             _ => AgentStatus::Idle,
         }
@@ -147,14 +152,56 @@ pub struct WorkspaceAgent {
     pub rag_top_k: i32,
     /// RAG 检索模式，之前硬编码为 "hybrid"；取值 "vector"/"keyword"/"hybrid"。
     pub rag_retrieval_mode: String,
+    /// Reranker 配置 id（对应前端 settings.rerankerApiConfigs，用于唤醒时按 id
+    /// 从密钥链取 API key）；None 表示不启用 reranker。
+    #[serde(default)]
+    pub rag_reranker_config_id: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_base_url: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_model: Option<String>,
+    /// 精排后保留条数；None 时默认等于 rag_top_k。
+    #[serde(default)]
+    pub rag_rerank_top_n: Option<i32>,
     /// 跨唤醒保留的私有备忘（由 workspace_scratchpad 工具读写），每次唤醒都会
     /// 拼进系统提示词，弥补"每次醒来只记得群聊记录"的工作记忆缺失。
     #[serde(default)]
     pub scratchpad: String,
+    /// 是否启用高风险 MCP 工具的审批门（见 `commands::is_dangerous_tool`）。
+    /// 默认 true：只有名字/描述命中危险关键词（删除、写入、执行命令等）的
+    /// 工具才需要用户批准，其余工具照常自动放行，兼顾安全和效率；
+    /// false 时该 Agent 的所有工具调用都自动放行，风险自担。
+    #[serde(default = "default_require_tool_approval")]
+    pub require_tool_approval: bool,
+    /// 是否为这个 Agent 的请求带上思考/推理参数（Anthropic extended thinking /
+    /// Gemini thinkingConfig / SiliconFlow enable_thinking，按 provider 各自的
+    /// 形状，见 llm.rs::run_turn）。默认关闭——会增加延迟和 token 消耗，不是
+    /// 所有任务都需要，用户按 Agent 自行选择打开。
+    #[serde(default)]
+    pub enable_thinking: bool,
     /// 软删除时间戳；非 None 表示这个 Agent 已被用户删除，但消息/日志历史里
     /// 引用它的记录仍需要能正确显示名字，所以不做物理删除。
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub fn default_require_tool_approval() -> bool {
+    true
+}
+
+/// One entry in an agent's structured to-do list, distinct from the
+/// free-form `scratchpad` -- covers the "没有任务清单" half of the working-memory
+/// gap, where scratchpad only covers free-text notes. Managed by the
+/// `workspace_task_list` tool (add/complete/remove/list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentTask {
+    pub id: String,
+    pub agent_id: String,
+    pub content: String,
+    pub done: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -220,6 +267,18 @@ pub struct CreateAgentRequest {
     pub rag_top_k: i32,
     #[serde(default = "default_rag_retrieval_mode")]
     pub rag_retrieval_mode: String,
+    #[serde(default)]
+    pub rag_reranker_config_id: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_base_url: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_model: Option<String>,
+    #[serde(default)]
+    pub rag_rerank_top_n: Option<i32>,
+    #[serde(default = "default_require_tool_approval")]
+    pub require_tool_approval: bool,
+    #[serde(default)]
+    pub enable_thinking: bool,
 }
 
 pub fn default_rag_top_k() -> i32 {
@@ -257,6 +316,18 @@ pub struct UpdateAgentRequest {
     pub rag_top_k: i32,
     #[serde(default = "default_rag_retrieval_mode")]
     pub rag_retrieval_mode: String,
+    #[serde(default)]
+    pub rag_reranker_config_id: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_base_url: Option<String>,
+    #[serde(default)]
+    pub rag_reranker_model: Option<String>,
+    #[serde(default)]
+    pub rag_rerank_top_n: Option<i32>,
+    #[serde(default = "default_require_tool_approval")]
+    pub require_tool_approval: bool,
+    #[serde(default)]
+    pub enable_thinking: bool,
 }
 
 /// A `workspace_create_agent` proposal / `workspace_sleep` request /
