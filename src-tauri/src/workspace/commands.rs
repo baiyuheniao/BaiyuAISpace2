@@ -1771,9 +1771,10 @@ async fn dispatch_tool_call(
                 .chain(others.iter().map(|a| (a.id.clone(), a.name.clone())))
                 .collect();
             let order_display = participants.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" → ");
-            // 记住入场前正在休眠的与会者：散会时还原成休眠而不是一律复位待命。
-            // 开会把人叫起来没问题（会议邀请也是消息），但不能顺手吞掉它们
-            // "任务已完成"的声明，否则"全员休眠→触发验收"的机制会被开会打断。
+            // 记住入场前正在休眠的与会者：散会时它们会收到专门的指示——会上
+            // 派了新活就先干完、没派就重新申请休眠。刻意不做"自动还原休眠"：
+            // Sleeping 是需要主 Agent 批准的完工声明，系统代填会把会上刚派的
+            // 新活揣着睡死。
             let sleeping_before: std::collections::HashSet<String> = others
                 .iter()
                 .filter(|a| a.status == AgentStatus::Sleeping)
