@@ -22,8 +22,11 @@
 //! 被点名的发言人有签到时限，超时标记缺席、发言权顺延；缺席者之后补签到会
 //! 自动重新入会，并在下次被点名或散会时补收错过的发言。
 //!
-//! 散会时还原与会者状态：入场前在休眠的还原成休眠（开会不该吞掉"任务已
-//! 完成"的声明，否则"全员休眠→触发验收"会被一场会议打断），其余复位 Idle。
+//! 散会时与会者一律复位 Idle——包括入场前在休眠的。Sleeping 只能通过
+//! "申请→批准"进入（它是一个需要主 Agent 背书的完工声明），系统代填会把
+//! 会上刚派给它的新活揣着睡死；所以前休眠者会在散会结果里被指示：有新活
+//! 先干完再申请休眠，没新活就立即重新申请（审批的主 Agent 消息历史里就有
+//! 会议纪要，派没派活它看得见）。
 
 use super::commands::{
     insert_workspace_log, load_agent, send_workspace_message_silent, set_agent_status,
@@ -68,7 +71,9 @@ pub struct MeetingConfig {
     /// (agent_id, 名字)，同时是发言顺序：发起人在前，其余按创建顺序。
     pub participants: Vec<(String, String)>,
     pub max_speeches: u32,
-    /// 入场前处于休眠状态的与会者，散会时还原成休眠而不是 Idle。
+    /// 入场前处于休眠状态的与会者：散会时**不**自动还原休眠（Sleeping 只能
+    /// 经"申请→批准"进入），而是在散会结果里指示它们干完会上新派的活、或
+    /// 重新申请休眠。
     pub sleeping_before: HashSet<String>,
 }
 
@@ -282,6 +287,13 @@ pub async fn run_coordinator(app_handle: AppHandle, cfg: MeetingConfig, mut rx: 
             "transcript": transcript_json,
             "instruction": if aid == cfg.initiator_id {
                 "会议已结束。请用普通文字向用户简要汇报会议结论和后续安排。"
+            } else if cfg.sleeping_before.contains(aid) {
+                // 入场前在休眠的与会者不自动送回休眠——会上可能刚给它派了新活。
+                // 让它自己重新走"申请→批准"：审批的主 Agent 也在会议纪要的
+                // 消息历史里，派没派活它看得见，这层把关正好兜住。
+                "会议已结束，发言纪要已存档。你入场前处于休眠状态：如果会议给你安排了新工作，请立即开始执行，\
+                 完成后再调用 workspace_sleep 申请休眠；如果没有安排，请直接调用 workspace_sleep 重新申请休眠\
+                 （原因写明会议结论即可）。"
             } else {
                 "会议已结束，发言纪要已存档。请用一两句普通文字向用户说明你从会议中得到的结论或接下来打算做的事。"
             },
@@ -302,10 +314,12 @@ pub async fn run_coordinator(app_handle: AppHandle, cfg: MeetingConfig, mut rx: 
             map.remove(&cfg.workspace_id);
         }
     }
+    // 一律复位 Idle，包括入场前在休眠的：Sleeping 只能通过"申请→批准"进入，
+    // 系统代填会把会上新派的活揣着睡死。前休眠者已在散会指令里被要求干完新活
+    // 或重新申请休眠；缺席没收到指令的保持清醒等消息，也是安全的默认方向。
     for (id, _) in &cfg.participants {
         if matches!(load_agent(&app_handle, id).await, Ok(Some(a)) if a.status == AgentStatus::Meeting) {
-            let restore = if cfg.sleeping_before.contains(id) { AgentStatus::Sleeping } else { AgentStatus::Idle };
-            set_agent_status(&app_handle, id, restore).await;
+            set_agent_status(&app_handle, id, AgentStatus::Idle).await;
         }
     }
     insert_workspace_log(&app_handle, &cfg.workspace_id, Some(cfg.initiator_id.clone()), "meeting",
