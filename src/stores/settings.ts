@@ -188,6 +188,11 @@ export const useSettingsStore = defineStore(
 
     // ============ 系统托盘相关状态 ============
 
+    // 同步失败的一次性提醒队列。store 拿不到 NMessageProvider 上下文，没法直接
+    // 弹窗，改成让 Layout.vue watch 这个队列后弹出——静默失败会让用户以为设置
+    // 已生效，实际上后端根本不知道。
+    const syncErrorNotices = ref<string[]>([]);
+
     // 关闭窗口按钮的行为：true = 最小化到系统托盘，false = 直接退出程序
     const closeToTray = ref(true);
 
@@ -203,6 +208,7 @@ export const useSettingsStore = defineStore(
         await invoke("set_close_to_tray", { enabled: closeToTray.value });
       } catch (error) {
         console.error("Failed to sync close-to-tray setting:", error);
+        syncErrorNotices.value.push(`"关闭窗口时最小化到托盘"设置未能同步生效：${error}`);
       }
     };
 
@@ -221,6 +227,7 @@ export const useSettingsStore = defineStore(
         await invoke("set_show_hotkey", { accelerator: showHotkey.value });
       } catch (error) {
         console.error("Failed to sync show-hotkey setting:", error);
+        syncErrorNotices.value.push(`唤起快捷键 ${showHotkey.value} 注册失败，可能已被其他程序占用：${error}`);
       }
     };
 
@@ -231,6 +238,13 @@ export const useSettingsStore = defineStore(
 
     const setNewSessionHotkey = (accelerator: string) => {
       newSessionHotkey.value = accelerator;
+    };
+
+    // 切换全屏的应用内快捷键（同样是纯前端监听，不经后端）
+    const fullscreenHotkey = ref("F11");
+
+    const setFullscreenHotkey = (accelerator: string) => {
+      fullscreenHotkey.value = accelerator;
     };
 
     // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
@@ -573,6 +587,7 @@ export const useSettingsStore = defineStore(
       darkMode,
       toggleTheme,
       initTheme,
+      syncErrorNotices,
       closeToTray,
       setCloseToTray,
       syncCloseToTray,
@@ -581,6 +596,8 @@ export const useSettingsStore = defineStore(
       syncShowHotkey,
       newSessionHotkey,
       setNewSessionHotkey,
+      fullscreenHotkey,
+      setFullscreenHotkey,
       systemPrompt,
       apiConfigs,
       activeConfigId,
@@ -617,7 +634,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

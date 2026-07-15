@@ -14,6 +14,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSettingsStore } from "./settings";
 import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
 import { useMCPStore, type MCPTool } from "./mcp";
+import { classifyError } from "@/utils/errorMessage";
 
 /** 图片附件（base64 编码，不含 data URL 前缀） */
 export interface ImageAttachment {
@@ -44,6 +45,16 @@ export interface Message {
   }>;
   images?: ImageAttachment[];     // 图片附件（已转 base64）
   videos?: VideoAttachment[];     // 视频附件（已转 base64，仅 Gemini）
+  toolCalls?: ToolCallInfo[];     // 本轮回复中触发的工具调用（按发生顺序）
+}
+
+/** 单次工具调用的状态信息，用于在消息里展示"正在调用/已完成/失败" */
+export interface ToolCallInfo {
+  callId: string;                  // 工具调用 ID
+  toolName: string;                // 工具名称
+  arguments: string;               // 调用参数（JSON 字符串）
+  status: "calling" | "done" | "error";  // 当前状态
+  result?: string;                 // 调用结果（JSON 字符串，仅 done/error 时有）
 }
 
 /**
@@ -70,6 +81,20 @@ interface StreamChunk {
   message_id: string;             // 消息 ID
   content: string;                // 增量内容
   done: boolean;                  // 是否完成
+}
+
+/**
+ * 工具调用状态事件类型
+ * 从后端接收的 tool-call-status 事件数据结构
+ */
+interface ToolCallEvent {
+  session_id: string;             // 所属会话 ID
+  message_id: string;             // 消息 ID
+  call_id: string;                // 工具调用 ID
+  tool_name: string;               // 工具名称
+  arguments: string;               // 调用参数 (JSON 字符串)
+  status: "calling" | "done" | "error";  // 当前状态
+  result?: string;                 // 调用结果 (JSON 字符串)
 }
 
 /**
@@ -112,6 +137,11 @@ export const useChatStore = defineStore("chat", () => {
   
   /** 当前活动的会话 */
   const currentSession = ref<ChatSession | null>(null);
+
+  /** 会话/消息写入数据库失败的一次性提醒队列。store 拿不到 NMessageProvider
+   * 上下文，没法直接弹窗，改成让 Layout.vue watch 这个队列后弹出，弹完自行清空。
+   * 静默丢弃这类失败会让用户误以为记录已保存，其实压根没写进数据库。 */
+  const dbSaveErrorNotices = ref<string[]>([]);
   
   /** 是否正在加载/生成回复 */
   const isLoading = ref(false);
@@ -124,7 +154,10 @@ export const useChatStore = defineStore("chat", () => {
   
   /** SSE 事件监听器取消函数 */
   let unlistenFn: UnlistenFn | null = null;
-  
+
+  /** 工具调用状态事件监听器取消函数 */
+  let unlistenToolCallFn: UnlistenFn | null = null;
+
   /** RAG (检索增强生成) 是否启用 */
   const ragEnabled = ref(false);
   
@@ -265,6 +298,45 @@ export const useChatStore = defineStore("chat", () => {
   };
 
   /**
+   * 设置工具调用状态监听器
+   * 监听后端发送的 tool-call-status 事件，把调用状态写进当前流式消息的
+   * toolCalls 数组，供 ChatMessage.vue 展示"正在调用工具/工具调用结果"
+   *
+   * @returns void
+   */
+  const setupToolCallListener = async () => {
+    if (unlistenToolCallFn) {
+      unlistenToolCallFn();
+    }
+
+    unlistenToolCallFn = await listen<ToolCallEvent>("tool-call-status", (event) => {
+      const evt = event.payload;
+      if (!currentSession.value) return;
+      if (String(evt.session_id) !== String(currentSession.value.id)) return;
+
+      const message = currentSession.value.messages.find(m => m.id === evt.message_id);
+      if (!message) return;
+
+      if (!message.toolCalls) {
+        message.toolCalls = [];
+      }
+      const existing = message.toolCalls.find(tc => tc.callId === evt.call_id);
+      if (existing) {
+        existing.status = evt.status;
+        existing.result = evt.result;
+      } else {
+        message.toolCalls.push({
+          callId: evt.call_id,
+          toolName: evt.tool_name,
+          arguments: evt.arguments,
+          status: evt.status,
+          result: evt.result,
+        });
+      }
+    });
+  };
+
+  /**
    * 保存当前会话到数据库
    * 包含会话基本信息，不包含消息内容
    * 
@@ -287,6 +359,7 @@ export const useChatStore = defineStore("chat", () => {
       await invoke("save_session_cmd", { session: dbSession });
     } catch (error) {
       console.error("Failed to save session:", error);
+      dbSaveErrorNotices.value.push(`会话保存失败：${classifyError(error).message}`);
     }
   };
 
@@ -307,12 +380,13 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: message.timestamp,
         error: message.error,
       };
-      await invoke("save_message_cmd", { 
-        sessionId: currentSession.value.id, 
-        message: dbMessage 
+      await invoke("save_message_cmd", {
+        sessionId: currentSession.value.id,
+        message: dbMessage
       });
     } catch (error) {
       console.error("Failed to save message:", error);
+      dbSaveErrorNotices.value.push(`消息保存失败：${classifyError(error).message}`);
     }
   };
 
@@ -358,6 +432,7 @@ export const useChatStore = defineStore("chat", () => {
     // sendMessage() 里已经会在追加第一条用户消息后调用 saveSessionToDb()，
     // 否则每次点"新建对话"都会在历史记录里留下一条"新对话/0条消息"的僵尸记录
     await setupStreamListener();
+    await setupToolCallListener();
 
     return session;
   };
@@ -411,38 +486,7 @@ export const useChatStore = defineStore("chat", () => {
     lastRetrievalResult.value = null;
     console.log("[Chat] currentSession set, messages:", currentSession.value?.messages?.length);
     await setupStreamListener();
-  };
-
-  /**
-   * 错误类型分类
-   * 根据错误信息返回用户友好的错误类型和消息
-   * 
-   * @param error - 原始错误对象
-   * @returns 包含错误类型和用户友好消息的对象
-   */
-  const classifyError = (error: unknown): { type: string; message: string } => {
-    const errorStr = String(error);
-    
-    // 认证错误
-    if (errorStr.includes("API key") || errorStr.includes("Unauthorized") || errorStr.includes("401")) {
-      return { type: "auth", message: "API 密钥无效或已过期，请检查设置" };
-    } 
-    // 网络错误
-    else if (errorStr.includes("network") || errorStr.includes("Failed to fetch")) {
-      return { type: "network", message: "网络连接错误，请检查网络设置" };
-    } 
-    // 超时错误
-    else if (errorStr.includes("timeout")) {
-      return { type: "timeout", message: "请求超时，请重试或调整超时设置" };
-    } 
-    // 配置错误
-    else if (errorStr.includes("provider") || errorStr.includes("Invalid")) {
-      return { type: "config", message: "API 配置错误，请检查服务商和模型" };
-    } 
-    // 未知错误
-    else {
-      return { type: "unknown", message: `错误: ${errorStr}` };
-    }
+    await setupToolCallListener();
   };
 
   /**
@@ -986,6 +1030,7 @@ ${toolDefs}
     isLoading,
     currentStreamContent,
     ragEnabled,
+    dbSaveErrorNotices,
     selectedKnowledgeBaseId,
     lastRetrievalResult,
     mcpEnabled,

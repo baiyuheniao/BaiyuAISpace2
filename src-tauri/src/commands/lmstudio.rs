@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+use super::local_model::friendly_err;
+
 // ============ 类型定义 ============
 
 /// LM Studio `/api/v0/models` 接口返回的模型信息。
@@ -100,7 +102,7 @@ fn auth_headers(api_key: &Option<String>) -> reqwest::header::HeaderMap {
 /// 检查 `base_url` 处的 LM Studio 服务器是否可达。
 #[tauri::command]
 pub async fn check_lmstudio_status(base_url: String) -> Result<bool, String> {
-    let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = create_lmstudio_client().map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
     let url = build_lmstudio_url(&base_url, "/v1/models");
 
     match client.get(&url).send().await {
@@ -118,7 +120,7 @@ pub async fn list_lmstudio_models(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<Vec<LMStudioModelInfo>, String> {
-    let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = create_lmstudio_client().map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
     let url = build_lmstudio_url(&base_url, "/api/v0/models");
 
     let response = client
@@ -126,16 +128,16 @@ pub async fn list_lmstudio_models(
         .headers(auth_headers(&api_key))
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to LM Studio: {}", e))?;
+        .map_err(|e| friendly_err("无法连接到 LM Studio，请确认 LM Studio 服务器已启动", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("LM Studio returned status: {}", response.status()));
+        return Err(friendly_err("LM Studio 返回异常状态，请检查服务是否正常运行", response.status()));
     }
 
     let body: LMStudioModelsResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse LM Studio response: {}", e))?;
+        .map_err(|e| friendly_err("解析 LM Studio 返回的数据失败，请确认版本是否兼容", e))?;
 
     Ok(body
         .data
@@ -162,7 +164,7 @@ pub async fn pull_lmstudio_model(
     api_key: Option<String>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = create_lmstudio_client().map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
     let download_url = build_lmstudio_url(&base_url, "/api/v1/models/download");
 
     log::info!("Downloading LM Studio model: {}", model_id);
@@ -173,17 +175,17 @@ pub async fn pull_lmstudio_model(
         .json(&serde_json::json!({ "model": model_id }))
         .send()
         .await
-        .map_err(|e| format!("Failed to start model download: {}", e))?;
+        .map_err(|e| friendly_err("无法开始下载模型，请检查网络连接和 LM Studio 服务状态", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Download failed: {}", error_text));
+        return Err(friendly_err("模型下载失败，请确认模型标识是否正确", error_text));
     }
 
     let job: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse download response: {}", e))?;
+        .map_err(|e| friendly_err("解析下载任务响应失败", e))?;
 
     // 模型可能已经在磁盘上了，这种情况下没有任务需要轮询。
     let initial_status = job["status"].as_str().unwrap_or("").to_string();
@@ -199,7 +201,7 @@ pub async fn pull_lmstudio_model(
 
     let job_id = job["job_id"]
         .as_str()
-        .ok_or("Download response missing job_id")?
+        .ok_or("下载任务响应格式异常，请重试")?
         .to_string();
 
     let status_url = build_lmstudio_url(
@@ -215,19 +217,19 @@ pub async fn pull_lmstudio_model(
             .headers(auth_headers(&api_key))
             .send()
             .await
-            .map_err(|e| format!("Failed to poll download status: {}", e))?;
+            .map_err(|e| friendly_err("查询下载进度失败，请检查网络连接", e))?;
 
         if !status_response.status().is_success() {
-            return Err(format!(
-                "Download status check failed: {}",
-                status_response.status()
+            return Err(friendly_err(
+                "查询下载进度失败，请检查 LM Studio 服务是否正常运行",
+                status_response.status(),
             ));
         }
 
         let status_json: serde_json::Value = status_response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse download status: {}", e))?;
+            .map_err(|e| friendly_err("解析下载进度失败", e))?;
 
         let status = status_json["status"].as_str().unwrap_or("").to_string();
 
@@ -244,7 +246,7 @@ pub async fn pull_lmstudio_model(
                 return Ok(());
             }
             "failed" => {
-                return Err(format!("Download failed for model: {}", model_id));
+                return Err(format!("模型 {} 下载失败，请重试或更换模型", model_id));
             }
             _ => continue, // "downloading" / "paused" -- 继续轮询
         }
@@ -258,7 +260,7 @@ pub async fn load_lmstudio_model(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = create_lmstudio_client().map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
     let url = build_lmstudio_url(&base_url, "/api/v1/models/load");
 
     let response = client
@@ -267,11 +269,11 @@ pub async fn load_lmstudio_model(
         .json(&serde_json::json!({ "model": model_id }))
         .send()
         .await
-        .map_err(|e| format!("Failed to load model: {}", e))?;
+        .map_err(|e| friendly_err("加载模型失败，请确认 LM Studio 服务正在运行", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Load failed: {}", error_text));
+        return Err(friendly_err("加载模型失败，请检查模型是否已下载完整", error_text));
     }
 
     log::info!("LM Studio model loaded: {}", model_id);
@@ -285,7 +287,7 @@ pub async fn unload_lmstudio_model(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<(), String> {
-    let client = create_lmstudio_client().map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = create_lmstudio_client().map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
     let url = build_lmstudio_url(&base_url, "/api/v1/models/unload");
 
     let response = client
@@ -294,11 +296,11 @@ pub async fn unload_lmstudio_model(
         .json(&serde_json::json!({ "model": model_id }))
         .send()
         .await
-        .map_err(|e| format!("Failed to unload model: {}", e))?;
+        .map_err(|e| friendly_err("卸载模型失败，请确认 LM Studio 服务正在运行", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Unload failed: {}", error_text));
+        return Err(friendly_err("卸载模型失败，请稍后重试", error_text));
     }
 
     log::info!("LM Studio model unloaded: {}", model_id);

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::local_model::hide_console_window;
+use super::local_model::{friendly_err, hide_console_window};
 
 // ============ 类型定义 ============
 
@@ -192,11 +192,11 @@ pub async fn list_docker_images() -> Result<Vec<DockerImage>, String> {
     let output = cmd
         .output()
         .await
-        .map_err(|e| format!("docker images 失败: {}", e))?;
+        .map_err(|e| friendly_err("获取镜像列表失败，请确认 Docker 已安装并启动", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker images 出错: {}", stderr));
+        return Err(friendly_err("获取镜像列表失败，请确认 Docker 服务是否正常运行", stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -233,11 +233,11 @@ pub async fn list_docker_containers(all: Option<bool>) -> Result<Vec<DockerConta
     let output = cmd
         .output()
         .await
-        .map_err(|e| format!("docker ps 失败: {}", e))?;
+        .map_err(|e| friendly_err("获取容器列表失败，请确认 Docker 已安装并启动", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker ps 出错: {}", stderr));
+        return Err(friendly_err("获取容器列表失败，请确认 Docker 服务是否正常运行", stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -280,7 +280,7 @@ pub async fn pull_docker_image(image: String, app_handle: AppHandle) -> Result<(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("无法启动 docker: {}", e))?;
+        .map_err(|e| friendly_err("无法启动 Docker，请确认 Docker Desktop 已安装并启动", e))?;
 
     let stdout = child.stdout.take().expect("stdout pipe");
     let stderr = child.stderr.take().expect("stderr pipe");
@@ -326,7 +326,7 @@ pub async fn pull_docker_image(image: String, app_handle: AppHandle) -> Result<(
     let exit_status = child
         .wait()
         .await
-        .map_err(|e| format!("docker pull 执行失败: {}", e))?;
+        .map_err(|e| friendly_err("拉取镜像失败，请确认 Docker 服务是否正常运行", e))?;
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 
@@ -342,7 +342,7 @@ pub async fn pull_docker_image(image: String, app_handle: AppHandle) -> Result<(
         log::info!("Docker image pulled: {}", image);
         Ok(())
     } else {
-        let msg = format!("docker pull {} 失败", image);
+        let msg = format!("镜像 {} 拉取失败，请检查镜像名称是否正确或网络连接", image);
         let _ = app_handle.emit(
             "docker-pull-progress",
             DockerPullProgress {
@@ -368,7 +368,7 @@ pub async fn start_docker_container(
     let profile = profiles
         .iter()
         .find(|p| p.id == profile_id)
-        .ok_or_else(|| format!("未知的 Docker 部署方案: {}", profile_id))?;
+        .ok_or_else(|| format!("未知的部署方案 \"{}\"，请重新选择", profile_id))?;
 
     let name = container_name.unwrap_or_else(|| format!("baiyu-{}", profile_id));
 
@@ -400,10 +400,10 @@ pub async fn start_docker_container(
         let out = cmd
             .output()
             .await
-            .map_err(|e| format!("docker start 失败: {}", e))?;
+            .map_err(|e| friendly_err("启动容器失败，请确认 Docker 服务是否正常运行", e))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("docker start 出错: {}", stderr));
+            return Err(friendly_err("启动容器失败，请检查容器状态或端口是否被占用", stderr));
         }
         log::info!("Docker container '{}' restarted ({})", name, existing_id);
         return Ok(existing_id);
@@ -444,11 +444,11 @@ pub async fn start_docker_container(
     let output = cmd
         .output()
         .await
-        .map_err(|e| format!("docker run 失败: {}", e))?;
+        .map_err(|e| friendly_err("创建容器失败，请确认 Docker 服务是否正常运行", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker run 出错: {}", stderr));
+        return Err(friendly_err("创建容器失败，请检查端口是否被占用或磁盘空间是否充足", stderr));
     }
 
     let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -471,11 +471,11 @@ pub async fn stop_docker_container(container_id: String) -> Result<(), String> {
     let output = cmd
         .output()
         .await
-        .map_err(|e| format!("docker stop 失败: {}", e))?;
+        .map_err(|e| friendly_err("停止容器失败，请确认 Docker 服务是否正常运行", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker stop 出错: {}", stderr));
+        return Err(friendly_err("停止容器失败，请稍后重试", stderr));
     }
 
     log::info!("Docker container '{}' stopped", container_id);
@@ -493,11 +493,11 @@ pub async fn remove_docker_container(container_id: String) -> Result<(), String>
     let output = cmd
         .output()
         .await
-        .map_err(|e| format!("docker rm 失败: {}", e))?;
+        .map_err(|e| friendly_err("删除容器失败，请确认 Docker 服务是否正常运行", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker rm 出错: {}", stderr));
+        return Err(friendly_err("删除容器失败，请稍后重试", stderr));
     }
 
     log::info!("Docker container '{}' removed", container_id);

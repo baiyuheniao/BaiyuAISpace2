@@ -48,22 +48,22 @@ const MCP_TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
 #[derive(Error, Debug)]
 pub enum MCPError {
     /// 服务器未找到
-    #[error("MCP server not found: {0}")]
+    #[error("找不到 MCP 服务器 \"{0}\"，请检查是否已在设置中配置")]
     ServerNotFound(String),
     /// 启动服务器失败
-    #[error("Failed to launch MCP server: {0}")]
+    #[error("启动 MCP 服务器失败：{0}")]
     LaunchError(String),
     /// 通信错误
-    #[error("MCP communication error: {0}")]
+    #[error("与 MCP 服务器通信失败：{0}")]
     CommunicationError(String),
     /// 配置无效
-    #[error("Invalid configuration: {0}")]
+    #[error("MCP 服务器配置有误：{0}")]
     InvalidConfig(String),
     /// JSON 解析错误
-    #[error("JSON error: {0}")]
+    #[error("解析 MCP 服务器返回的数据失败，请确认服务器版本是否兼容")]
     JsonError(#[from] serde_json::Error),
     /// HTTP 请求错误
-    #[error("Reqwest error: {0}")]
+    #[error("连接 MCP 服务器失败，请检查网络连接和服务器地址")]
     ReqwestError(#[from] reqwest::Error),
 }
 
@@ -210,7 +210,7 @@ pub async fn create_mcp_server(
         MCPServerType::SSE | MCPServerType::HTTP => {
             if server.url.is_none() || server.url.as_ref().unwrap().is_empty() {
                 return Err(MCPError::InvalidConfig(
-                    "HTTP/SSE server requires URL".to_string(),
+                    "HTTP/SSE 类型的服务器必须填写 URL".to_string(),
                 ));
             }
         }
@@ -227,7 +227,7 @@ pub async fn create_mcp_server(
     // 保存到数据库
     let db = state.0.lock().await;
     db.save_mcp_server(&config)
-        .map_err(|e| MCPError::CommunicationError(e.to_string()))?;
+        .map_err(|e| { log::error!("保存 MCP 服务器配置失败（详情：{}）", e); MCPError::CommunicationError("保存 MCP 服务器配置失败，请重试".to_string()) })?;
     drop(db);
 
     // 服务器的 command/args/url 刚刚可能发生了变化 -- 清掉对应的工具列表缓存，
@@ -443,7 +443,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         stdin
             .write_all((request_json + "\n").as_bytes())
             .await
-            .map_err(|e| MCPError::CommunicationError(format!("Failed to write to stdin: {}", e)))?;
+            .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
     }
 
     let stdout = child.stdout.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdout".to_string()))?;
@@ -452,7 +452,7 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
     let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| MCPError::CommunicationError("Tool list timeout".to_string()))?
-        .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
+        .map_err(|e| { log::error!("MCP 读取响应失败（详情：{}）", e); MCPError::CommunicationError("读取 MCP 服务器响应失败，请确认服务器是否正常运行".to_string()) })?
         .ok_or_else(|| MCPError::CommunicationError("No response from MCP server".to_string()))?;
 
     let response: JsonRpcResponse = serde_json::from_str(&response_line).map_err(MCPError::JsonError)?;
@@ -510,7 +510,7 @@ async fn call_mcp_tools_http(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErro
     let resp_json = response
         .json::<JsonRpcResponse>()
         .await
-        .map_err(|e| MCPError::CommunicationError(format!("Failed to parse HTTP response: {}", e)))?;
+        .map_err(|e| { log::error!("MCP 解析 HTTP 响应失败（详情：{}）", e); MCPError::CommunicationError("解析 MCP 服务器返回的数据失败，请确认服务器版本是否兼容".to_string()) })?;
 
     if let Some(error) = resp_json.error {
         return Err(MCPError::CommunicationError(format!("MCP error ({}): {}", error.code, error.message)));
@@ -661,7 +661,7 @@ pub async fn call_mcp_tool(
 
     match result {
         Ok(v) => Ok(v),
-        Err(err) => Err(MCPError::CommunicationError(format!("Failed to execute tool {}: {}", tool_name, err))),
+        Err(err) => Err(MCPError::CommunicationError(format!("工具 \"{}\" 调用失败：{}", tool_name, err))),
     }
 }
 
@@ -973,7 +973,7 @@ async fn call_mcp_tool_stdio(
         stdin
             .write_all((request_json + "\n").as_bytes())
             .await
-            .map_err(|e| MCPError::CommunicationError(format!("Failed to write to stdin: {}", e)))?;
+            .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
     }
 
     // 带超时地从 stdout 读取响应
@@ -987,7 +987,7 @@ async fn call_mcp_tool_stdio(
     let response_line = tokio::time::timeout(MCP_TOOL_CALL_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| MCPError::CommunicationError("Tool execution timeout".to_string()))?
-        .map_err(|e| MCPError::CommunicationError(format!("Failed to read response: {}", e)))?
+        .map_err(|e| { log::error!("MCP 读取响应失败（详情：{}）", e); MCPError::CommunicationError("读取 MCP 服务器响应失败，请确认服务器是否正常运行".to_string()) })?
         .ok_or_else(|| MCPError::CommunicationError("No response from MCP server".to_string()))?;
 
     log::debug!("MCP Response: {}", response_line);
@@ -1068,7 +1068,7 @@ async fn call_mcp_tool_http(
     let resp_json = response
         .json::<JsonRpcResponse>()
         .await
-        .map_err(|e| MCPError::CommunicationError(format!("Failed to parse HTTP response: {}", e)))?;
+        .map_err(|e| { log::error!("MCP 解析 HTTP 响应失败（详情：{}）", e); MCPError::CommunicationError("解析 MCP 服务器返回的数据失败，请确认服务器版本是否兼容".to_string()) })?;
 
     if let Some(error) = resp_json.error {
         return Err(MCPError::CommunicationError(format!(

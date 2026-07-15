@@ -27,15 +27,21 @@ export function isModifierOnly(e: KeyboardEvent): boolean {
   return MODIFIER_CODES.has(e.code);
 }
 
+/** 功能键（F1~F24）不与普通文本输入冲突，允许不搭配修饰键单独作为快捷键 */
+function isFunctionKeyCode(code: string): boolean {
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(code);
+}
+
 /** 把按键事件格式化成和 accelerator 字符串一致的形式（如 "Ctrl+K"），
- * 没有搭配修饰键时返回 null（要求至少一个修饰键，避免和普通输入冲突）。 */
+ * 没有搭配修饰键时返回 null（要求至少一个修饰键，避免和普通输入冲突），
+ * 但功能键（F1~F24）例外，允许单独作为快捷键。 */
 export function acceleratorFromEvent(e: KeyboardEvent): string | null {
   const mods: string[] = [];
   if (e.ctrlKey) mods.push("Ctrl");
   if (e.altKey) mods.push("Alt");
   if (e.shiftKey) mods.push("Shift");
   if (e.metaKey) mods.push("Super");
-  if (mods.length === 0) return null;
+  if (mods.length === 0 && !isFunctionKeyCode(e.code)) return null;
   return [...mods, formatMainKey(e.code)].join("+");
 }
 

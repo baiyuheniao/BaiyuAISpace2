@@ -1,14 +1,20 @@
 # 当某个 v* 版本的 Release 由人工点击 "Publish release" 从草稿转正后触发。
-# 把该 Release 里的 latest.json 复制一份到固定 tag "updater-manifest" 下的独立
-# Release，供 tauri-plugin-updater 用一个不受 "prerelease" 影响的固定 URL 查询。
+# 把该 Release 里的 latest.json 复制一份到固定 tag 下的独立 Release，供
+# tauri-plugin-updater 用一个不受 "prerelease" 影响的固定 URL 查询。
 #
 # 背景：GitHub 的 `/releases/latest` 解析规则里，prerelease 永远不会被视为
 # latest release；而本项目所有 beta 版本都在 release.yml 里打了 prerelease
 # 标签（用于在 GitHub UI 上和正式版区分），导致 updater.ts 原来查询的
 # `.../releases/latest/download/latest.json` 端点一直 404，自动更新形同虚设。
-# 这里额外维护一个固定 tag 的"清单专用" Release：它本身不是 prerelease，
+# 这里额外维护两个固定 tag 的"清单专用" Release：它们本身都不是 prerelease，
 # 但 latest.json 里记录的下载地址仍然指向原始版本 Release 的真实资产，
 # 不影响 GitHub Releases 页面上 beta 版本的 Pre-release 标签展示。
+#
+# 稳定版/Beta 版走两条独立的清单（Settings 页"立即更新并安装"按钮分两边）：
+# - updater-manifest：只在这次发布是正式版（非 prerelease）时更新，是
+#   tauri.conf.json 默认 endpoint 和启动时自动检测都用的通道。
+# - updater-manifest-beta：每次发布（正式版或 Beta）都更新，代表"最新的
+#   任意版本"，只有后端 check_and_install_beta_update 会显式查询它。
 name: Publish update manifest
 
 on:
@@ -27,7 +33,8 @@ permissions:
 
 jobs:
   publish-update-manifest:
-    # updater-manifest 自身的 Release 不以 v 开头，避免被这个 workflow 自己触发出死循环
+    # updater-manifest / updater-manifest-beta 自身的 Release 不以 v 开头，
+    # 避免被这个 workflow 自己触发出死循环
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     env:
@@ -37,7 +44,25 @@ jobs:
       - name: Download latest.json from the published release
         run: gh release download "$TARGET_TAG" --repo ${{ github.repository }} --pattern latest.json --dir manifest --clobber
 
+      - name: Determine whether this release is a prerelease (Beta)
+        id: release-kind
+        run: |
+          IS_PRERELEASE=$(gh release view "$TARGET_TAG" --repo ${{ github.repository }} --json isPrerelease --jq .isPrerelease)
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure fixed updater-manifest-beta release exists
+        run: |
+          gh release view updater-manifest-beta --repo ${{ github.repository }} || \
+          gh release create updater-manifest-beta --repo ${{ github.repository }} \
+            --title "自动更新清单 · Beta 通道（请勿删除）" \
+            --notes "仅供应用内 Beta 自动更新读取 latest.json，跟踪最新的任意发布（正式版或 Beta），不代表实际版本发布。" \
+            --prerelease --latest=false
+
+      - name: Publish latest.json to the Beta channel release
+        run: gh release upload updater-manifest-beta manifest/latest.json --repo ${{ github.repository }} --clobber
+
       - name: Ensure fixed updater-manifest release exists
+        if: steps.release-kind.outputs.is_prerelease == 'false'
         run: |
           gh release view updater-manifest --repo ${{ github.repository }} || \
           gh release create updater-manifest --repo ${{ github.repository }} \
@@ -45,5 +70,6 @@ jobs:
             --notes "仅供应用内自动更新读取 latest.json，不代表实际版本发布，安装包请在正式版本 Release 里下载。" \
             --prerelease --latest=false
 
-      - name: Publish latest.json to the fixed release
+      - name: Publish latest.json to the stable channel release
+        if: steps.release-kind.outputs.is_prerelease == 'false'
         run: gh release upload updater-manifest manifest/latest.json --repo ${{ github.repository }} --clobber

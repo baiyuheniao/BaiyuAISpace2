@@ -200,11 +200,14 @@ fn main() {
             commands::auth::get_baidu_access_token,
             // 检测最新版本(设置页手动检测按钮)
             commands::app_update::check_latest_releases,
+            // 检测并安装 Beta 版更新(独立于稳定版 updater 端点)
+            commands::app_update::check_and_install_beta_update,
             // 数据库相关命令
             save_session_cmd,
             save_message_cmd,
             get_sessions_cmd,
             delete_session_cmd,
+            clear_database_cmd,
             // 安全存储相关命令
             save_api_key,
             get_api_key,
@@ -548,7 +551,7 @@ async fn save_session_cmd(
     db_state: tauri::State<'_, DbState>,
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
-    db.save_session(&session).map_err(|e| e.to_string())
+    db.save_session(&session).map_err(|e| commands::local_model::friendly_err("保存会话失败，请重试", e))
 }
 
 #[tauri::command]
@@ -558,7 +561,7 @@ async fn save_message_cmd(
     db_state: tauri::State<'_, DbState>,
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
-    db.save_message(&session_id, &message).map_err(|e| e.to_string())
+    db.save_message(&session_id, &message).map_err(|e| commands::local_model::friendly_err("保存消息失败，请重试", e))
 }
 
 #[tauri::command]
@@ -566,7 +569,7 @@ async fn get_sessions_cmd(
     db_state: tauri::State<'_, DbState>,
 ) -> Result<Vec<ChatSession>, String> {
     let db = db_state.0.lock().await;
-    db.get_sessions().map_err(|e| e.to_string())
+    db.get_sessions().map_err(|e| commands::local_model::friendly_err("读取会话列表失败，请重试", e))
 }
 
 #[tauri::command]
@@ -575,7 +578,16 @@ async fn delete_session_cmd(
     db_state: tauri::State<'_, DbState>,
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
-    db.delete_session(&session_id).map_err(|e| e.to_string())
+    db.delete_session(&session_id).map_err(|e| commands::local_model::friendly_err("删除会话失败，请重试", e))
+}
+
+/// 清空数据库：删除全部会话、消息、MCP 服务器配置、Skill（设置页“危险操作”按钮对应的后端命令）
+#[tauri::command]
+async fn clear_database_cmd(
+    db_state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    let db = db_state.0.lock().await;
+    db.clear_all().map_err(|e| commands::local_model::friendly_err("清空数据库失败，请重启应用后重试", e))
 }
 
 #[tauri::command]
@@ -595,7 +607,7 @@ fn read_log_file() -> Result<String, String> {
     if let Some(log_file) = get_log_file_path() {
         if log_file.exists() {
             return std::fs::read_to_string(log_file)
-                .map_err(|e| format!("读取日志文件失败: {}", e));
+                .map_err(|e| commands::local_model::friendly_err("读取日志文件失败，请检查文件是否被占用", e));
         }
         Err("日志文件不存在".to_string())
     } else {
@@ -619,14 +631,14 @@ fn set_show_hotkey(
     app: tauri::AppHandle,
     state: tauri::State<ShowHotkeyState>,
 ) -> Result<(), String> {
-    let mut current = state.0.lock().map_err(|e| e.to_string())?;
+    let mut current = state.0.lock().map_err(|e| commands::local_model::friendly_err("内部状态异常，请重启应用", e))?;
     if *current == accelerator {
         return Ok(());
     }
     // 先注册新快捷键，成功后再解绑旧的——避免注册失败时把原有快捷键也丢了
     app.global_shortcut()
         .register(accelerator.as_str())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| commands::local_model::friendly_err("注册快捷键失败，可能已被其他程序占用", e))?;
     let _ = app.global_shortcut().unregister(current.as_str());
     *current = accelerator;
     Ok(())
@@ -634,7 +646,7 @@ fn set_show_hotkey(
 
 #[tauri::command]
 fn get_show_hotkey(state: tauri::State<ShowHotkeyState>) -> Result<String, String> {
-    state.0.lock().map(|s| s.clone()).map_err(|e| e.to_string())
+    state.0.lock().map(|s| s.clone()).map_err(|e| commands::local_model::friendly_err("内部状态异常，请重启应用", e))
 }
 
 #[tauri::command]

@@ -22,6 +22,9 @@ import { computed, onMounted, onBeforeUnmount, watch } from "vue";
 // 导入 Vue Router 相关功能
 import { useRoute, useRouter } from "vue-router";
 
+// 导入 Tauri 窗口 API (全屏切换)
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 // 导入 NaiveUI 通知 API (左下角统一弹窗机制)
 import { useNotification } from "naive-ui";
 
@@ -108,6 +111,15 @@ const handleNewSessionHotkey = (e: KeyboardEvent) => {
   handleNewChat();
 };
 
+// 应用内"切换全屏"快捷键（默认 F11，在 Settings 里可改）
+const handleFullscreenHotkey = async (e: KeyboardEvent) => {
+  if (!eventMatchesAccelerator(e, settings.fullscreenHotkey)) return;
+  e.preventDefault();
+  const win = getCurrentWindow();
+  const isFullscreen = await win.isFullscreen();
+  await win.setFullscreen(!isFullscreen);
+};
+
 // 通知 API (供更新提示弹窗使用)
 const notification = useNotification();
 
@@ -123,8 +135,36 @@ watch(workspacePendingCount, (count, prev) => {
   }
 });
 
+// 会话/消息写入数据库失败时，chat store 拿不到弹窗上下文，把提醒塞进队列，
+// 这里全局 watch 后弹出并清空——避免用户以为已保存，其实静默丢失了记录。
+watch(
+  () => chat.dbSaveErrorNotices.length,
+  () => {
+    while (chat.dbSaveErrorNotices.length > 0) {
+      const msg = chat.dbSaveErrorNotices.shift();
+      if (msg) {
+        notification.error({ title: "本地保存失败", description: msg, duration: 6000 });
+      }
+    }
+  }
+);
+
+// 托盘/快捷键设置同步到后端失败时，同样走队列弹窗，别让用户以为设置已生效。
+watch(
+  () => settings.syncErrorNotices.length,
+  () => {
+    while (settings.syncErrorNotices.length > 0) {
+      const msg = settings.syncErrorNotices.shift();
+      if (msg) {
+        notification.warning({ title: "设置未能同步", description: msg, duration: 6000 });
+      }
+    }
+  }
+);
+
 onMounted(async () => {
   window.addEventListener("keydown", handleNewSessionHotkey);
+  window.addEventListener("keydown", handleFullscreenHotkey);
   // 延迟几秒再检测更新，避免和启动初始化抢时间
   setTimeout(() => {
     void checkForAppUpdate(notification);
@@ -135,6 +175,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleNewSessionHotkey);
+  window.removeEventListener("keydown", handleFullscreenHotkey);
 });
 </script>
 

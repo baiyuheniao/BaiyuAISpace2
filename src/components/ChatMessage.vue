@@ -410,6 +410,36 @@ const handleCopy = async () => {
           <n-spin size="small" />
           <span class="streaming-text">思考中...</span>
         </div>
+
+        <!-- 工具调用列表 -->
+        <div
+          v-if="message.toolCalls && message.toolCalls.length > 0"
+          class="tool-calls"
+        >
+          <div
+            v-for="tc in message.toolCalls"
+            :key="tc.callId"
+            class="tool-call-item"
+            :class="{ 'tool-call-error': tc.status === 'error' }"
+          >
+            <div class="tool-call-header">
+              <n-spin
+                v-if="tc.status === 'calling'"
+                :size="12"
+              />
+              <span class="tool-call-status-icon">{{ tc.status === "done" ? "✓" : tc.status === "error" ? "✕" : "" }}</span>
+              <span class="tool-call-name">{{ tc.toolName }}</span>
+              <span class="tool-call-status-text">{{
+                tc.status === "calling" ? "调用中" : tc.status === "error" ? "调用失败" : "已完成"
+              }}</span>
+            </div>
+            <pre class="tool-call-args">{{ tc.arguments }}</pre>
+            <pre
+              v-if="tc.result"
+              class="tool-call-result"
+            >{{ tc.result }}</pre>
+          </div>
+        </div>
       </div>
 
       <!-- Error message -->
@@ -781,6 +811,61 @@ const handleCopy = async () => {
   border-top: 1px dashed rgba(0, 0, 0, 0.4);
   color: $ink-faint;
   font-size: 13px;
+}
+
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.4);
+}
+
+.tool-call-item {
+  border: $border-faint;
+  background: $surface;
+  padding: 10px 12px;
+}
+
+.tool-call-item.tool-call-error {
+  border-color: $ink;
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tool-call-status-icon {
+  color: $ink-soft;
+  font-family: $font-mono;
+}
+
+.tool-call-name {
+  font-family: $font-mono;
+  font-weight: 600;
+  color: $ink;
+}
+
+.tool-call-status-text {
+  color: $ink-faint;
+  letter-spacing: 0.05em;
+}
+
+.tool-call-args,
+.tool-call-result {
+  margin: 6px 0 0 0;
+  padding: 8px 10px;
+  background: $bg;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  font-family: $font-mono;
+  font-size: 12px;
+  color: $ink-soft;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .message-error {

@@ -371,9 +371,9 @@ impl Database {
         if let Some(ref api_key) = server.api_key {
             if !api_key.is_empty() {
                 let entry = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server.id, "api_key"))
-                    .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+                    .map_err(|e| { log::error!("创建密钥链条目失败（详情：{}）", e); "保存 API 密钥失败，请检查系统密钥链权限".to_string() })?;
                 entry.set_password(api_key)
-                    .map_err(|e| format!("Failed to store API key in keyring: {}", e))?;
+                    .map_err(|e| { log::error!("写入密钥链失败（详情：{}）", e); "保存 API 密钥失败，请检查系统密钥链权限".to_string() })?;
             }
         }
         
@@ -553,6 +553,34 @@ impl Database {
         )?;
 
         log::info!("Skill deleted: {}", skill_id);
+        Ok(())
+    }
+
+    /**
+     * 清空数据库：删除所有会话、消息、MCP 服务器配置、Skill。
+     * 不涉及知识库 / 协作团队 / 定时任务，那些是各自独立的 SQLite 文件。
+     */
+    pub fn clear_all(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // MCP 服务器的 API Key 存在系统密钥链里，delete 前先逐个清理，
+        // 避免只删表行、密钥链里留下孤儿凭据。
+        let mut stmt = self.conn.prepare("SELECT id FROM mcp_servers")?;
+        let server_ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for server_id in &server_ids {
+            if let Ok(entry) = Entry::new(MCP_KEYRING_SERVICE, &format!("{}_{}", server_id, "api_key")) {
+                let _ = entry.delete_credential();
+            }
+        }
+
+        self.conn.execute("DELETE FROM messages", [])?;
+        self.conn.execute("DELETE FROM sessions", [])?;
+        self.conn.execute("DELETE FROM mcp_servers", [])?;
+        self.conn.execute("DELETE FROM skills", [])?;
+        self.conn.execute_batch("VACUUM")?;
+        log::info!("Database cleared: all sessions, messages, mcp_servers, skills removed");
         Ok(())
     }
 }

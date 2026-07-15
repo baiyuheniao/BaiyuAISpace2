@@ -27,13 +27,13 @@ use crate::db::DbState;
 
 #[derive(Error, Debug)]
 pub enum SkillError {
-    #[error("Database error: {0}")]
+    #[error("数据库操作失败：{0}")]
     DatabaseError(String),
-    #[error("Skill not found: {0}")]
+    #[error("找不到 Skill \"{0}\"")]
     NotFound(String),
-    #[error("Invalid skill configuration: {0}")]
+    #[error("Skill 配置有误：{0}")]
     InvalidConfig(String),
-    #[error("File error: {0}")]
+    #[error("文件操作失败：{0}")]
     FileError(String),
 }
 
@@ -68,7 +68,7 @@ pub fn skill_resources_dir(app_handle: &AppHandle, skill_id: &str) -> Result<Pat
     let app_data_dir = app_handle
         .path()
         .app_data_dir()
-        .map_err(|e| SkillError::FileError(format!("Failed to get app data dir: {}", e)))?;
+        .map_err(|e| { log::error!("获取应用数据目录失败（详情：{}）", e); SkillError::FileError("获取应用数据目录失败，请重启应用后重试".to_string()) })?;
     Ok(app_data_dir.join("skills").join(skill_id).join("resources"))
 }
 
@@ -106,7 +106,7 @@ pub async fn save_skill(
 
     let db = state.0.lock().await;
     db.save_skill(&config)
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("保存 Skill 失败（详情：{}）", e); SkillError::DatabaseError("保存 Skill 失败，请重试".to_string()) })?;
 
     log::info!("Skill saved: {} ({})", config.name, config.id);
     Ok(config)
@@ -118,7 +118,7 @@ pub async fn list_skills(state: tauri::State<'_, DbState>) -> Result<Vec<Skill>,
     let db = state.0.lock().await;
     let skills = db
         .get_skills()
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("获取 Skill 列表失败（详情：{}）", e); SkillError::DatabaseError("获取 Skill 列表失败，请重试".to_string()) })?;
     Ok(skills)
 }
 
@@ -131,7 +131,7 @@ pub async fn delete_skill(
 ) -> Result<(), SkillError> {
     let db = state.0.lock().await;
     db.delete_skill(&skill_id)
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("删除 Skill 失败（详情：{}）", e); SkillError::DatabaseError("删除 Skill 失败，请重试".to_string()) })?;
     drop(db);
 
     if let Ok(dir) = skill_resources_dir(&app_handle, &skill_id) {
@@ -156,24 +156,24 @@ pub async fn add_skill_resource_file(
     let dir = skill_resources_dir(&app_handle, &skill_id)?;
     tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| SkillError::FileError(format!("Failed to create resources dir: {}", e)))?;
+        .map_err(|e| { log::error!("创建资源目录失败（详情：{}）", e); SkillError::FileError("创建资源目录失败，请检查磁盘空间和权限".to_string()) })?;
 
     let source = PathBuf::from(&file_path);
     let filename = source
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| SkillError::FileError("Invalid file path".to_string()))?
+        .ok_or_else(|| SkillError::FileError("文件路径无效，请重新选择文件".to_string()))?
         .to_string();
 
     let dest = dir.join(&filename);
     tokio::fs::copy(&source, &dest)
         .await
-        .map_err(|e| SkillError::FileError(format!("Failed to copy file: {}", e)))?;
+        .map_err(|e| { log::error!("拷贝资源文件失败（详情：{}）", e); SkillError::FileError("添加资源文件失败，请检查磁盘空间和权限".to_string()) })?;
 
     let db = state.0.lock().await;
     let mut skills = db
         .get_skills()
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("获取 Skill 列表失败（详情：{}）", e); SkillError::DatabaseError("获取 Skill 列表失败，请重试".to_string()) })?;
     let skill = skills
         .iter_mut()
         .find(|s| s.id == skill_id)
@@ -185,7 +185,7 @@ pub async fn add_skill_resource_file(
     skill.updated_at = chrono::Utc::now().timestamp_millis();
 
     db.save_skill(skill)
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("保存 Skill 失败（详情：{}）", e); SkillError::DatabaseError("保存 Skill 失败，请重试".to_string()) })?;
 
     Ok(skill.clone())
 }
@@ -205,7 +205,7 @@ pub async fn remove_skill_resource_file(
     let db = state.0.lock().await;
     let mut skills = db
         .get_skills()
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("获取 Skill 列表失败（详情：{}）", e); SkillError::DatabaseError("获取 Skill 列表失败，请重试".to_string()) })?;
     let skill = skills
         .iter_mut()
         .find(|s| s.id == skill_id)
@@ -215,7 +215,7 @@ pub async fn remove_skill_resource_file(
     skill.updated_at = chrono::Utc::now().timestamp_millis();
 
     db.save_skill(skill)
-        .map_err(|e| SkillError::DatabaseError(e.to_string()))?;
+        .map_err(|e| { log::error!("保存 Skill 失败（详情：{}）", e); SkillError::DatabaseError("保存 Skill 失败，请重试".to_string()) })?;
 
     Ok(skill.clone())
 }

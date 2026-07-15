@@ -25,6 +25,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { save } from "@tauri-apps/plugin-dialog";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
+import { check as checkTauriUpdate, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { 
@@ -200,6 +203,128 @@ const checkLatestVersion = async () => {
 
 const openReleasePage = (url: string) => {
   void openExternalUrl(url);
+};
+
+/** 是否正在下载/安装更新（安装期间禁止重复点击） */
+const installingUpdate = ref(false);
+
+/** 安装进度提示文案 */
+const installProgress = ref("");
+
+/**
+ * 检测到新版本后点击"立即更新并安装"：更新包走 Tauri updater 插件默认的
+ * endpoint（tauri.conf.json 里配置的 updater-manifest，只跟踪正式版发布），
+ * 对应"最新正式版"一栏。
+ */
+const installLatestUpdate = async () => {
+  installingUpdate.value = true;
+  installProgress.value = "正在检测安装包…";
+  let update: Update | null = null;
+  try {
+    update = await checkTauriUpdate();
+  } catch (error) {
+    installingUpdate.value = false;
+    installProgress.value = "";
+    message.error("检测安装包失败: " + error);
+    return;
+  }
+
+  if (!update) {
+    installingUpdate.value = false;
+    installProgress.value = "";
+    message.warning("未找到可自动安装的更新包，请前往 GitHub 手动下载");
+    return;
+  }
+
+  let downloaded = 0;
+  let total = 0;
+  try {
+    await update.downloadAndInstall((event) => {
+      switch (event.event) {
+        case "Started":
+          total = event.data.contentLength ?? 0;
+          installProgress.value = total > 0 ? "下载中 0%" : "下载中…";
+          break;
+        case "Progress":
+          downloaded += event.data.chunkLength;
+          installProgress.value =
+            total > 0 ? `下载中 ${Math.min(100, Math.round((downloaded / total) * 100))}%` : "下载中…";
+          break;
+        case "Finished":
+          installProgress.value = "下载完成，正在安装…";
+          break;
+      }
+    });
+  } catch (error) {
+    installingUpdate.value = false;
+    installProgress.value = "";
+    message.error("安装更新失败: " + error);
+    return;
+  }
+
+  installProgress.value = "安装完成，即将重启应用…";
+  message.success("更新安装完成，应用即将重启");
+  setTimeout(() => {
+    void relaunch();
+  }, 1500);
+};
+
+/** 是否正在下载/安装 Beta 更新 */
+const installingBetaUpdate = ref(false);
+
+/** Beta 安装进度提示文案 */
+const installBetaProgress = ref("");
+
+/** 后端 check_and_install_beta_update 命令进度事件的取消监听函数 */
+let unlistenBetaProgress: UnlistenFn | null = null;
+
+interface BetaUpdateProgressEvent {
+  status: "checking" | "downloading" | "finished";
+  percent: number | null;
+}
+
+onMounted(async () => {
+  unlistenBetaProgress = await listen<BetaUpdateProgressEvent>("beta-update-progress", (event) => {
+    const { status, percent } = event.payload;
+    if (status === "checking") {
+      installBetaProgress.value = "正在检测安装包…";
+    } else if (status === "downloading") {
+      installBetaProgress.value = percent !== null ? `下载中 ${percent}%` : "下载中…";
+    } else if (status === "finished") {
+      installBetaProgress.value = "下载完成，正在安装…";
+    }
+  });
+});
+
+onBeforeUnmount(() => {
+  unlistenBetaProgress?.();
+});
+
+/**
+ * 检测到新 Beta 版后点击"立即更新并安装"：Beta 走独立于正式版的更新通道
+ * （后端 `check_and_install_beta_update` 用 tauri-plugin-updater 的
+ * `endpoints()` 显式指向 `updater-manifest-beta` 清单），因为 JS 侧的
+ * `check()` 只认 tauri.conf.json 里的静态 endpoint 配置，无法在运行时切换。
+ */
+const installLatestBetaUpdate = async () => {
+  installingBetaUpdate.value = true;
+  installBetaProgress.value = "正在检测安装包…";
+  try {
+    const installedVersion = await invoke<string | null>("check_and_install_beta_update");
+    if (!installedVersion) {
+      message.warning("未找到可自动安装的 Beta 更新包，请前往 GitHub 手动下载");
+      return;
+    }
+    message.success("Beta 更新安装完成，应用即将重启");
+    setTimeout(() => {
+      void relaunch();
+    }, 1500);
+  } catch (error) {
+    message.error("安装 Beta 更新失败: " + error);
+  } finally {
+    installingBetaUpdate.value = false;
+    installBetaProgress.value = "";
+  }
 };
 
 // ============ 弹窗状态 ============
@@ -604,10 +729,28 @@ const handleCloseToTrayChange = async (enabled: boolean) => {
   message.success(enabled ? "已开启：关闭窗口将最小化到托盘" : "已关闭：关闭窗口将直接退出程序");
 };
 
-// ============ 快捷键录制（托盘唤起 / 新建会话） ============
+// ============ 危险操作：清空数据库 ============
+
+/** 清空数据库中：会话、消息、MCP 服务器配置、Skill。知识库 / 协作团队 /
+ * 定时任务是各自独立的 SQLite 文件，不受影响。 */
+const clearingDatabase = ref(false);
+
+const handleClearDatabase = async () => {
+  clearingDatabase.value = true;
+  try {
+    await invoke("clear_database_cmd");
+    message.success("数据库已清空：会话、消息、MCP 服务器配置、Skill 均已删除");
+  } catch (error) {
+    message.error(`清空数据库失败：${error}`);
+  } finally {
+    clearingDatabase.value = false;
+  }
+};
+
+// ============ 快捷键录制（托盘唤起 / 新建会话 / 切换全屏） ============
 
 /** 当前正在录制哪个快捷键；null 表示未在录制 */
-const recordingHotkeyTarget = ref<"show" | "newSession" | null>(null);
+const recordingHotkeyTarget = ref<"show" | "newSession" | "fullscreen" | null>(null);
 
 let hotkeyRecordListener: ((e: KeyboardEvent) => void) | null = null;
 
@@ -619,7 +762,7 @@ const stopRecordingHotkey = () => {
   recordingHotkeyTarget.value = null;
 };
 
-const startRecordingHotkey = (target: "show" | "newSession") => {
+const startRecordingHotkey = (target: "show" | "newSession" | "fullscreen") => {
   if (recordingHotkeyTarget.value) return;
   recordingHotkeyTarget.value = target;
 
@@ -637,7 +780,7 @@ const startRecordingHotkey = (target: "show" | "newSession") => {
 
     const accelerator = acceleratorFromEvent(e);
     if (!accelerator) {
-      message.warning("请至少搭配一个修饰键（Ctrl / Alt / Shift），避免和普通按键冲突");
+      message.warning("请至少搭配一个修饰键（Ctrl / Alt / Shift）或使用功能键（F1~F24），避免和普通按键冲突");
       return;
     }
 
@@ -648,11 +791,14 @@ const startRecordingHotkey = (target: "show" | "newSession") => {
         await settings.setShowHotkey(accelerator);
         message.success(`唤起快捷键已设置为 ${accelerator}`);
       } catch (error) {
-        message.error(`设置快捷键失败（可能已被其他程序占用）：${error}`);
+        message.error(String(error));
       }
-    } else {
+    } else if (target === "newSession") {
       settings.setNewSessionHotkey(accelerator);
       message.success(`新建会话快捷键已设置为 ${accelerator}`);
+    } else {
+      settings.setFullscreenHotkey(accelerator);
+      message.success(`切换全屏快捷键已设置为 ${accelerator}`);
     }
   };
 
@@ -1132,6 +1278,61 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 {{ recordingHotkeyTarget === 'newSession' ? '请按下组合键…' : '修改快捷键' }}
               </n-button>
             </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">切换全屏的快捷键</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                在应用窗口获得焦点时按下该快捷键，即可切换窗口全屏 / 还原。点击右侧按钮后按下新的按键即可修改，按 Esc 取消录制。
+              </n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="12"
+            >
+              <n-tag size="medium">
+                {{ settings.fullscreenHotkey }}
+              </n-tag>
+              <n-button
+                size="small"
+                :type="recordingHotkeyTarget === 'fullscreen' ? 'warning' : 'default'"
+                @click="startRecordingHotkey('fullscreen')"
+              >
+                {{ recordingHotkeyTarget === 'fullscreen' ? '请按下按键…' : '修改快捷键' }}
+              </n-button>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">清空数据库</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                永久删除全部会话、聊天记录、MCP 服务器配置、Skill，操作不可撤销。知识库、协作团队、定时任务数据不受影响。建议清空前自行备份重要对话。
+              </n-text>
+            </div>
+            <n-popconfirm
+              positive-text="确认清空"
+              negative-text="取消"
+              @positive-click="handleClearDatabase"
+            >
+              <template #trigger>
+                <n-button
+                  size="small"
+                  type="error"
+                  :loading="clearingDatabase"
+                >
+                  清空数据库
+                </n-button>
+              </template>
+              此操作将永久删除全部会话、聊天记录、MCP 服务器配置、Skill，且无法恢复，确定继续？
+            </n-popconfirm>
           </div>
 
           <div class="general-setting-item general-setting-item--stack">
@@ -1750,6 +1951,22 @@ const providerOptions = computed(() => settings.presetProviderOptions);
                 >
                   在 GitHub 中查看
                 </n-button>
+                <n-button
+                  v-if="section.label === '最新正式版' && isNewerVersion(section.info.version)"
+                  size="small"
+                  :loading="installingUpdate"
+                  @click="installLatestUpdate"
+                >
+                  立即更新并安装
+                </n-button>
+                <n-button
+                  v-if="section.label === '最新 Beta 版' && isNewerVersion(section.info.version)"
+                  size="small"
+                  :loading="installingBetaUpdate"
+                  @click="installLatestBetaUpdate"
+                >
+                  立即更新并安装
+                </n-button>
               </template>
             </div>
 
@@ -1763,6 +1980,18 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               class="version-check-notes"
               v-html="renderReleaseNotes(section.info.body)"
             />
+            <div
+              v-if="section.label === '最新正式版' && installingUpdate"
+              class="version-check-progress"
+            >
+              {{ installProgress }}
+            </div>
+            <div
+              v-if="section.label === '最新 Beta 版' && installingBetaUpdate"
+              class="version-check-progress"
+            >
+              {{ installBetaProgress }}
+            </div>
           </div>
         </template>
       </div>
@@ -1906,6 +2135,12 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
 .version-check-link {
   margin-left: auto;
+}
+
+.version-check-progress {
+  font-size: 12px;
+  color: $ink-faint;
+  font-family: $font-mono;
 }
 
 .version-check-notes {

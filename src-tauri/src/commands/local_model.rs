@@ -16,6 +16,13 @@ use tauri::{AppHandle, Emitter};
 use tokio::process::Child;
 use once_cell::sync::Lazy;
 
+/// 生成面向用户的友好错误提示：原始错误（Rust/HTTP/进程 stderr 等技术细节）
+/// 只写入日志供排查问题用，返回给前端弹窗的只有中文说明 + 可执行的下一步。
+pub(crate) fn friendly_err<E: std::fmt::Display>(headline: &str, detail: E) -> String {
+    log::error!("{}（详情：{}）", headline, detail);
+    headline.to_string()
+}
+
 /// 防止从这个 GUI 应用启动控制台子进程（例如 `ollama.exe`）时，
 /// Windows 原本会一闪而过弹出的控制台窗口。
 pub(crate) fn hide_console_window(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
@@ -208,7 +215,7 @@ pub async fn check_ollama_status(
     ollama_base_url: String,
 ) -> Result<bool, String> {
     let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/tags");
 
@@ -227,7 +234,7 @@ pub async fn list_local_models(
     ollama_base_url: String,
 ) -> Result<Vec<LocalModelInfo>, String> {
     let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/tags");
 
@@ -235,16 +242,16 @@ pub async fn list_local_models(
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
+        .map_err(|e| friendly_err("无法连接到 Ollama 服务，请确认 Ollama 已启动", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Ollama returned status: {}", response.status()));
+        return Err(friendly_err("Ollama 服务返回异常状态，请检查 Ollama 是否正常运行", response.status()));
     }
 
     let body: OllamaListResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
+        .map_err(|e| friendly_err("解析 Ollama 返回的数据失败，请确认 Ollama 版本是否兼容", e))?;
 
     let models: Vec<LocalModelInfo> = body
         .models
@@ -269,7 +276,7 @@ pub async fn show_local_model(
     model_name: String,
 ) -> Result<LocalModelInfo, String> {
     let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/show");
 
@@ -278,16 +285,16 @@ pub async fn show_local_model(
         .json(&serde_json::json!({ "name": model_name }))
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
+        .map_err(|e| friendly_err("无法连接到 Ollama 服务，请确认 Ollama 已启动", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Ollama returned status: {}", response.status()));
+        return Err(friendly_err("Ollama 服务返回异常状态，请检查 Ollama 是否正常运行", response.status()));
     }
 
     let body: OllamaShowResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
+        .map_err(|e| friendly_err("解析 Ollama 返回的数据失败，请确认 Ollama 版本是否兼容", e))?;
 
     Ok(LocalModelInfo {
         name: model_name.clone(),
@@ -308,7 +315,7 @@ pub async fn pull_local_model(
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let client = create_download_client()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/pull");
 
@@ -349,11 +356,11 @@ pub async fn pull_local_model(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Failed to start model pull: {}", e))?;
+        .map_err(|e| friendly_err("无法开始下载模型，请检查网络连接和 Ollama 服务状态", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Pull failed: {}", error_text));
+        return Err(friendly_err("模型下载失败，请确认模型名称是否正确", error_text));
     }
 
     // 处理流式响应，持续更新进度
@@ -362,7 +369,7 @@ pub async fn pull_local_model(
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Stream error during pull: {}", e))?;
+        let chunk = chunk.map_err(|e| friendly_err("下载模型时连接中断，请重试", e))?;
         let text = String::from_utf8_lossy(&chunk);
         buffer.push_str(&text);
 
@@ -402,7 +409,7 @@ pub async fn delete_local_model(
     ollama_base_url: String,
 ) -> Result<(), String> {
     let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/delete");
 
@@ -411,11 +418,11 @@ pub async fn delete_local_model(
         .json(&serde_json::json!({ "name": request.model_name }))
         .send()
         .await
-        .map_err(|e| format!("Failed to delete model: {}", e))?;
+        .map_err(|e| friendly_err("删除模型失败，请确认 Ollama 服务正在运行", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Delete failed: {}", error_text));
+        return Err(friendly_err("删除模型失败，请稍后重试", error_text));
     }
 
     log::info!("Model deleted: {}", request.model_name);
@@ -434,7 +441,7 @@ pub async fn get_ollama_version(
     ollama_base_url: String,
 ) -> Result<String, String> {
     let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/version");
 
@@ -442,16 +449,16 @@ pub async fn get_ollama_version(
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
+        .map_err(|e| friendly_err("无法连接到 Ollama 服务，请确认 Ollama 已启动", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Ollama returned status: {}", response.status()));
+        return Err(friendly_err("Ollama 服务返回异常状态，请检查 Ollama 是否正常运行", response.status()));
     }
 
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .map_err(|e| friendly_err("解析 Ollama 版本信息失败", e))?;
 
     Ok(body["version"].as_str().unwrap_or("unknown").to_string())
 }
@@ -683,7 +690,7 @@ pub async fn start_ollama_service(
         .connect_timeout(Duration::from_secs(3))
         .no_proxy()
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/tags");
     if let Ok(response) = client.get(&url).send().await {
@@ -698,10 +705,10 @@ pub async fn start_ollama_service(
     // 查找 ollama 可执行文件
     let install_info = detect_ollama_installation().await?;
     if !install_info.installed {
-        return Err("Ollama is not installed".to_string());
+        return Err("未检测到 Ollama，请先安装 Ollama".to_string());
     }
 
-    let ollama_path = install_info.install_path.ok_or("Cannot find Ollama executable")?;
+    let ollama_path = install_info.install_path.ok_or_else(|| "找不到 Ollama 可执行文件，请重新安装 Ollama".to_string())?;
 
     // 在后台启动 ollama serve
     let mut cmd = tokio::process::Command::new(&ollama_path);
@@ -711,11 +718,11 @@ pub async fn start_ollama_service(
     hide_console_window(&mut cmd);
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to start Ollama service: {}", e))?;
+        .map_err(|e| friendly_err("启动 Ollama 服务失败，请检查安装是否完整", e))?;
 
     // 保存子进程句柄，供后续管理使用
     {
-        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| friendly_err("内部状态异常，请重启应用", e))?;
         *proc = Some(child);
     }
 
@@ -727,7 +734,7 @@ pub async fn start_ollama_service(
         .connect_timeout(Duration::from_secs(3))
         .no_proxy()
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let max_retries = 30u32;
     let mut retries = 0u32;
@@ -760,12 +767,12 @@ pub async fn start_ollama_service(
 #[tauri::command]
 pub async fn stop_ollama_service() -> Result<(), String> {
     let child = {
-        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| friendly_err("内部状态异常，请重启应用", e))?;
         proc.take()
     };
 
     if let Some(mut child) = child {
-        child.kill().await.map_err(|e| format!("Failed to stop Ollama: {}", e))?;
+        child.kill().await.map_err(|e| friendly_err("停止 Ollama 服务失败，请手动结束该进程", e))?;
         log::info!("Ollama service stopped");
     }
 
@@ -779,7 +786,7 @@ pub async fn get_ollama_service_status(
 ) -> Result<OllamaServiceStatus, String> {
     // 检查我们托管的进程是否还活着
     let managed_by_app = {
-        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut proc = OLLAMA_PROCESS.lock().map_err(|e| friendly_err("内部状态异常，请重启应用", e))?;
         match proc.as_mut() {
             Some(child) => {
                 // 尝试检查进程是否已退出
@@ -806,7 +813,7 @@ pub async fn get_ollama_service_status(
         .connect_timeout(Duration::from_secs(3))
         .no_proxy()
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let url = build_ollama_url(&ollama_base_url, "/api/tags");
     let running = match client.get(&url).send().await {
@@ -858,15 +865,15 @@ pub async fn download_ollama(
         .read_timeout(crate::commands::constants::DOWNLOAD_READ_TIMEOUT)
         .connect_timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
 
     let response = client.get(&download_url)
         .send()
         .await
-        .map_err(|e| format!("Download failed: {}", e))?;
+        .map_err(|e| friendly_err("下载 Ollama 安装包失败，请检查网络连接", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Download failed with status: {}", response.status()));
+        return Err(friendly_err("下载 Ollama 安装包失败，请稍后重试或更换下载源", response.status()));
     }
 
     let total_size = response.content_length();
@@ -877,14 +884,14 @@ pub async fn download_ollama(
 
     let mut file = tokio::fs::File::create(&installer_path)
         .await
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        .map_err(|e| friendly_err("创建临时文件失败，请检查磁盘空间和权限", e))?;
 
     let mut stream = response.bytes_stream();
     let mut last_progress_emit = std::time::Instant::now();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
-        file.write_all(&chunk).await.map_err(|e| format!("Write error: {}", e))?;
+        let chunk = chunk.map_err(|e| friendly_err("下载中断，请重试", e))?;
+        file.write_all(&chunk).await.map_err(|e| friendly_err("写入安装包文件失败，请检查磁盘空间", e))?;
 
         downloaded += chunk.len() as u64;
         let percent = total_size
@@ -904,7 +911,7 @@ pub async fn download_ollama(
         }
     }
 
-    file.flush().await.map_err(|e| format!("Flush error: {}", e))?;
+    file.flush().await.map_err(|e| friendly_err("保存安装包文件失败，请检查磁盘空间", e))?;
 
     let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
         stage: "completed".to_string(),
@@ -928,7 +935,7 @@ pub async fn install_ollama(
 ) -> Result<(), String> {
     let path = PathBuf::from(&installer_path);
     if !path.exists() {
-        return Err(format!("Installer not found: {}", installer_path));
+        return Err(friendly_err("找不到安装包文件，请重新下载", &installer_path));
     }
 
     let _ = app_handle.emit("ollama-install-progress", OllamaInstallProgress {
@@ -981,11 +988,11 @@ async fn install_ollama_windows(installer_path: &PathBuf) -> Result<(), String> 
         .arg("/S")
         .output()
         .await
-        .map_err(|e| format!("Failed to run installer: {}", e))?;
+        .map_err(|e| friendly_err("运行安装程序失败，请以管理员身份重试", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Installer failed: {}", stderr));
+        return Err(friendly_err("Ollama 安装失败，请尝试手动安装", stderr));
     }
 
     Ok(())
@@ -999,7 +1006,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         .unwrap_or_default();
 
     if extension != "zip" {
-        return Err(format!("Unsupported installer format on macOS: {}", extension));
+        return Err(friendly_err("不支持的安装包格式，请重新下载", extension));
     }
 
     let default_tmp = PathBuf::from("/tmp");
@@ -1009,7 +1016,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
     tokio::fs::create_dir_all(&extract_dir)
         .await
-        .map_err(|e| format!("Failed to create extract dir: {}", e))?;
+        .map_err(|e| friendly_err("创建解压目录失败，请检查磁盘空间和权限", e))?;
 
     // 用 ditto 解压（macOS 原生工具，能保留 resource fork）
     let output = tokio::process::Command::new("ditto")
@@ -1019,11 +1026,11 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         .arg(&extract_dir)
         .output()
         .await
-        .map_err(|e| format!("Failed to extract zip: {}", e))?;
+        .map_err(|e| friendly_err("解压安装包失败", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Extraction failed: {}", stderr));
+        return Err(friendly_err("解压安装包失败，请重新下载后重试", stderr));
     }
 
     // 在解压出来的目录里找 Ollama.app
@@ -1038,11 +1045,11 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
             .arg("2")
             .output()
             .await
-            .map_err(|e| format!("Failed to find Ollama.app: {}", e))?;
+            .map_err(|e| friendly_err("查找 Ollama.app 失败", e))?;
 
         let found_path = String::from_utf8_lossy(&find_output.stdout).trim().to_string();
         if found_path.is_empty() {
-            return Err("Could not find Ollama.app in the downloaded archive".to_string());
+            return Err("安装包中未找到 Ollama.app，请重新下载安装包".to_string());
         }
         PathBuf::from(&found_path)
     } else {
@@ -1065,7 +1072,7 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
         .arg(&dest)
         .output()
         .await
-        .map_err(|e| format!("Failed to copy Ollama.app: {}", e))?;
+        .map_err(|e| friendly_err("拷贝 Ollama 到应用程序目录失败", e))?;
 
     if !copy_output.status.success() {
         let stderr = String::from_utf8_lossy(&copy_output.stderr);
@@ -1079,14 +1086,14 @@ async fn install_ollama_macos(installer_path: &PathBuf) -> Result<(), String> {
                 ))
                 .output()
                 .await
-                .map_err(|e| format!("Failed to request admin privileges: {}", e))?;
+                .map_err(|e| friendly_err("请求管理员权限失败", e))?;
 
             if !osascript_output.status.success() {
                 let err = String::from_utf8_lossy(&osascript_output.stderr);
-                return Err(format!("Failed to copy with admin privileges: {}", err));
+                return Err(friendly_err("使用管理员权限安装失败，请手动将 Ollama.app 拖入应用程序目录", err));
             }
         } else {
-            return Err(format!("Failed to copy Ollama.app: {}", stderr));
+            return Err(friendly_err("安装 Ollama 到应用程序目录失败", stderr));
         }
     }
 
@@ -1123,11 +1130,11 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
             .arg(installer_path)
             .output()
             .await
-            .map_err(|e| format!("Failed to run install script: {}", e))?;
+            .map_err(|e| friendly_err("运行安装脚本失败", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Install script failed: {}", stderr));
+            return Err(friendly_err("Ollama 安装脚本执行失败，请尝试手动安装", stderr));
         }
     } else if filename.ends_with(".tgz") || filename.ends_with(".tar.gz") {
         // 把可执行文件解压到 /usr/local/bin
@@ -1138,7 +1145,7 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
             .arg("/usr/local/bin")
             .output()
             .await
-            .map_err(|e| format!("Failed to extract: {}", e))?;
+            .map_err(|e| friendly_err("解压安装包失败", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1152,18 +1159,18 @@ async fn install_ollama_linux(installer_path: &PathBuf) -> Result<(), String> {
                     .arg("/usr/local/bin")
                     .output()
                     .await
-                    .map_err(|e| format!("Failed to run with pkexec: {}", e))?;
+                    .map_err(|e| friendly_err("请求管理员权限失败", e))?;
 
                 if !pkexec_output.status.success() {
                     let err = String::from_utf8_lossy(&pkexec_output.stderr);
-                    return Err(format!("Failed to extract with elevated privileges: {}", err));
+                    return Err(friendly_err("使用管理员权限安装失败，请手动解压安装包到 /usr/local/bin", err));
                 }
             } else {
-                return Err(format!("Extraction failed: {}", stderr));
+                return Err(friendly_err("解压安装包失败，请检查磁盘空间和权限", stderr));
             }
         }
     } else {
-        return Err(format!("Unsupported installer format on Linux: {}", filename));
+        return Err(friendly_err("不支持的安装包格式，请重新下载", filename));
     }
 
     Ok(())
@@ -1184,7 +1191,7 @@ pub async fn search_ollama_models(
             .timeout(Duration::from_secs(15))
             .connect_timeout(Duration::from_secs(5))
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
+            .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?
     );
 
     // 拉取 Ollama 库的搜索页面
@@ -1194,13 +1201,13 @@ pub async fn search_ollama_models(
         .header("User-Agent", "Mozilla/5.0")
         .send()
         .await
-        .map_err(|e| format!("Search request failed: {}", e))?;
+        .map_err(|e| friendly_err("搜索模型失败，请检查网络连接", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Search failed with status: {}", response.status()));
+        return Err(friendly_err("搜索模型失败，请稍后重试", response.status()));
     }
 
-    let html = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+    let html = response.text().await.map_err(|e| friendly_err("读取搜索结果失败，请重试", e))?;
 
     // 从库链接里收集不重复的模型系列名称
     let mut series_names: Vec<String> = Vec::new();

@@ -123,6 +123,26 @@ pub struct SendMessageRequest {
     pub max_tokens: Option<u32>,
 }
 
+/// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
+#[derive(Clone, Serialize)]
+pub struct ToolCallEvent {
+    /// 会话 ID
+    pub session_id: String,
+    /// 消息 ID
+    pub message_id: String,
+    /// 工具调用 ID（同一次调用的 calling/done 事件用它配对）
+    pub call_id: String,
+    /// 工具名称
+    pub tool_name: String,
+    /// 调用参数（JSON 字符串）
+    pub arguments: String,
+    /// 状态："calling" | "done" | "error"
+    pub status: String,
+    /// 调用结果（仅 done/error 状态携带，JSON 字符串）
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
 /// 流式响应事件结构
 #[derive(Clone, Serialize)]
 pub struct StreamChunk {
@@ -1160,26 +1180,38 @@ pub async fn stream_message(
 async fn execute_tool_calls(
     app_handle: &AppHandle,
     state: tauri::State<'_, DbState>,
+    session_id: &str,
+    message_id: &str,
     tool_calls: &[ToolCall],
     mcp_tools: &[MCPTool],
     all_skills: &[Skill],
 ) -> Vec<serde_json::Value> {
     let mut tool_results = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
-        if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
+        let _ = app_handle.emit("tool-call-status", ToolCallEvent {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            call_id: tool_call.id.clone(),
+            tool_name: tool_call.function.name.clone(),
+            arguments: tool_call.function.arguments.clone(),
+            status: "calling".to_string(),
+            result: None,
+        });
+
+        let result = if let Some(skill_id) = tool_call.function.name.strip_prefix("skill__") {
             // 模型自主调用的 Skill：这里的"工具结果"其实是该 skill 自己的
             // instructions/资源内容，而不是一次真正的 MCP 调用。
             if let Some(skill) = all_skills.iter().find(|s| s.id == skill_id) {
                 log::info!("Model invoked skill: {}", skill.name);
                 let content = build_skill_context(std::slice::from_ref(skill), app_handle).await;
-                tool_results.push(serde_json::json!({ "skill": skill.name, "content": content }));
+                serde_json::json!({ "skill": skill.name, "content": content })
             } else {
                 log::warn!("Skill not found for autonomous call: {}", skill_id);
-                tool_results.push(serde_json::json!({ "error": format!("skill '{}' not found", skill_id) }));
+                serde_json::json!({ "error": format!("skill '{}' not found", skill_id) })
             }
         } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
             log::info!("Executing MCP tool: {}", tool.name);
-            let result = match call_mcp_tool(
+            match call_mcp_tool(
                 state.clone(),
                 Some(tool.server_id.clone()),
                 tool.name.clone(),
@@ -1193,12 +1225,24 @@ async fn execute_tool_calls(
                     log::error!("Tool execution failed: {}", e);
                     serde_json::json!({ "error": e.to_string() })
                 }
-            };
-            tool_results.push(result);
+            }
         } else {
             log::warn!("MCP tool not found: {}", tool_call.function.name);
-            tool_results.push(serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) }));
-        }
+            serde_json::json!({ "error": format!("tool '{}' not found", tool_call.function.name) })
+        };
+
+        let is_error = result.get("error").is_some();
+        let _ = app_handle.emit("tool-call-status", ToolCallEvent {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            call_id: tool_call.id.clone(),
+            tool_name: tool_call.function.name.clone(),
+            arguments: tool_call.function.arguments.clone(),
+            status: if is_error { "error".to_string() } else { "done".to_string() },
+            result: Some(result.to_string()),
+        });
+
+        tool_results.push(result);
     }
     tool_results
 }
@@ -1245,7 +1289,7 @@ async fn finalize_turn(
         let mut current_calls = tool_calls;
 
         for round in 0..MAX_TOOL_ROUNDS {
-            let tool_results = execute_tool_calls(app_handle, state.clone(), &current_calls, mcp_tools, all_skills).await;
+            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills).await;
             rounds.push((current_calls, tool_results));
 
             match continue_after_tool_calls(
