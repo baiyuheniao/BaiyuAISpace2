@@ -220,15 +220,18 @@ export const useLocalModelStore = defineStore(
      */
     const checkStatus = async () => {
       try {
-        isOnline.value = await invoke<boolean>("check_ollama_status", {
+        const status = await invoke<OllamaServiceStatus>("get_ollama_service_status", {
           ollamaBaseUrl: ollamaBaseUrl.value,
         });
-        if (isOnline.value) {
+        isOnline.value = status.running;
+        serviceManagedByApp.value = status.managedByApp;
+        if (status.running) {
           await fetchVersion();
         }
       } catch (error) {
         console.error("Failed to check Ollama status:", error);
         isOnline.value = false;
+        serviceManagedByApp.value = false;
       }
     };
 
@@ -382,14 +385,6 @@ export const useLocalModelStore = defineStore(
       return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
     };
 
-    /**
-     * 获取模型显示名称（去掉标签后缀）
-     */
-    const getModelDisplayName = (modelName: string): string => {
-      const colonIndex = modelName.indexOf(":");
-      return colonIndex > 0 ? modelName.substring(0, colonIndex) : modelName;
-    };
-
     // ============ Ollama 安装 & 服务管理方法 ============
 
     /**
@@ -449,24 +444,6 @@ export const useLocalModelStore = defineStore(
       } catch (error) {
         console.error("Failed to stop Ollama service:", error);
         throw error;
-      }
-    };
-
-    /**
-     * 获取 Ollama 服务状态
-     */
-    const getServiceStatus = async () => {
-      try {
-        const status = await invoke<OllamaServiceStatus>("get_ollama_service_status", {
-          ollamaBaseUrl: ollamaBaseUrl.value,
-        });
-        isOnline.value = status.running;
-        serviceManagedByApp.value = status.managedByApp;
-        return status;
-      } catch (error) {
-        console.error("Failed to get Ollama service status:", error);
-        isOnline.value = false;
-        return { running: false, managedByApp: false } as OllamaServiceStatus;
       }
     };
 
@@ -637,13 +614,11 @@ export const useLocalModelStore = defineStore(
       pullModel,
       deleteModel,
       formatSize,
-      getModelDisplayName,
 
       // Ollama 安装 & 服务管理方法
       detectInstallation,
       startService,
       stopService,
-      getServiceStatus,
       downloadAndInstallOllama,
       loadDownloadMirrors,
       searchModels,

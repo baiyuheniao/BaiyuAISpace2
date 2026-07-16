@@ -34,7 +34,7 @@ mod workspace_smoke_test;
 // 引入类型和函数
 use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
-use secure_storage::{save_api_key, get_api_key, delete_api_key, has_api_key};
+use secure_storage::{delete_api_key, get_api_key, save_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{
     WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingToolApprovals,
@@ -60,9 +60,9 @@ const DEFAULT_SHOW_HOTKEY: &str = "Ctrl+Alt+Space";
 struct ShowHotkeyState(StdMutex<String>);
 
 // 进程实际在写的日志文件路径——只在 init_logging() 里算一次。
-// 不能让 get_log_path/read_log_file/copy_log_file 各自用"现在的日期"重新拼文件名：
+// 不能让 copy_log_file 用"现在的日期"重新拼文件名：
 // 应用跨午夜运行时，文件名里的日期永远是启动那一刻的日期，"现在的日期"对不上，
-// 会导致这几个命令在文件明明存在的情况下报"日志文件不存在"
+// 会导致命令在文件明明存在的情况下报"日志文件不存在"
 static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
 
 pub fn get_log_file_path() -> Option<&'static PathBuf> {
@@ -196,8 +196,6 @@ fn main() {
             // LLM 相关命令
             commands::llm::stream_message,
             commands::llm::cancel_stream,
-            // 认证相关命令
-            commands::auth::get_baidu_access_token,
             // 检测最新版本(设置页手动检测按钮)
             commands::app_update::check_latest_releases,
             // 检测并安装 Beta 版更新(独立于稳定版 updater 端点)
@@ -212,7 +210,6 @@ fn main() {
             save_api_key,
             get_api_key,
             delete_api_key,
-            has_api_key,
             // 知识库相关命令
             knowledge_base::commands::create_knowledge_base,
             knowledge_base::commands::list_knowledge_bases,
@@ -221,7 +218,6 @@ fn main() {
             knowledge_base::commands::list_documents,
             knowledge_base::commands::delete_document,
             knowledge_base::commands::search_knowledge_base,
-            knowledge_base::commands::get_embedding_models,
             knowledge_base::commands::read_document_for_context,
             // MCP 相关命令
             commands::mcp::create_mcp_server,
@@ -232,9 +228,7 @@ fn main() {
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
             // 本地模型相关命令
-            commands::local_model::check_ollama_status,
             commands::local_model::list_local_models,
-            commands::local_model::show_local_model,
             commands::local_model::pull_local_model,
             commands::local_model::delete_local_model,
             commands::local_model::get_model_sources_cmd,
@@ -297,14 +291,10 @@ fn main() {
             scheduler::commands::schedule_delete,
             scheduler::commands::schedule_toggle,
             // 日志相关命令
-            get_log_path,
-            read_log_file,
             copy_log_file,
             // 系统托盘相关命令
             set_close_to_tray,
-            get_close_to_tray,
             set_show_hotkey,
-            get_show_hotkey,
         ])
         // 应用初始化设置
         .setup(move |app| {
@@ -591,38 +581,8 @@ async fn clear_database_cmd(
 }
 
 #[tauri::command]
-fn get_log_path() -> Result<String, String> {
-    if let Some(log_file) = get_log_file_path() {
-        if log_file.exists() {
-            return Ok(log_file.to_string_lossy().to_string());
-        }
-        Err("日志文件不存在".to_string())
-    } else {
-        Err("无法获取日志目录".to_string())
-    }
-}
-
-#[tauri::command]
-fn read_log_file() -> Result<String, String> {
-    if let Some(log_file) = get_log_file_path() {
-        if log_file.exists() {
-            return std::fs::read_to_string(log_file)
-                .map_err(|e| commands::local_model::friendly_err("读取日志文件失败，请检查文件是否被占用", e));
-        }
-        Err("日志文件不存在".to_string())
-    } else {
-        Err("无法获取日志目录".to_string())
-    }
-}
-
-#[tauri::command]
 fn set_close_to_tray(enabled: bool, state: tauri::State<CloseToTrayState>) {
     state.0.store(enabled, Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn get_close_to_tray(state: tauri::State<CloseToTrayState>) -> bool {
-    state.0.load(Ordering::Relaxed)
 }
 
 #[tauri::command]
@@ -642,11 +602,6 @@ fn set_show_hotkey(
     let _ = app.global_shortcut().unregister(current.as_str());
     *current = accelerator;
     Ok(())
-}
-
-#[tauri::command]
-fn get_show_hotkey(state: tauri::State<ShowHotkeyState>) -> Result<String, String> {
-    state.0.lock().map(|s| s.clone()).map_err(|e| commands::local_model::friendly_err("内部状态异常，请重启应用", e))
 }
 
 #[tauri::command]

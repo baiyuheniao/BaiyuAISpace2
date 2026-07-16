@@ -230,13 +230,3 @@ pub fn get_embedding_dimension(provider: &str, model: &str) -> i32 {
         _ => 1536,
     }
 }
-
-/// 可用的 embedding 模型列表
-pub fn get_available_embedding_models() -> Vec<(String, String, i32)> {
-    vec![
-        ("openai".to_string(), "text-embedding-3-small".to_string(), 1536),
-        ("openai".to_string(), "text-embedding-3-large".to_string(), 3072),
-        ("zhipu".to_string(), "embedding-2".to_string(), 1024),
-        ("siliconflow".to_string(), "BAAI/bge-large-zh-v1.5".to_string(), 1024),
-    ]
-}

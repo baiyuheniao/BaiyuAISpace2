@@ -105,22 +105,3 @@ pub fn delete_api_key(provider: String) -> Result<(), SecureStorageError> {
     log::info!("API key deleted for provider: {}", provider);
     Ok(())
 }
-
-/// 检查 API 密钥是否存在
-/// 
-/// # 参数
-/// * `provider` - 提供商标识符
-/// 
-/// # 返回
-/// 存在返回 true，不存在返回 false
-#[tauri::command]
-pub fn has_api_key(provider: String) -> Result<bool, SecureStorageError> {
-    let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))
-        .map_err(|e| SecureStorageError::KeyringError(e.to_string()))?;
-    
-    match entry.get_password() {
-        Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(SecureStorageError::KeyringError(e.to_string())),
-    }
-}

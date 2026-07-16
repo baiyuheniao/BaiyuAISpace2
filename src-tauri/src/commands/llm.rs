@@ -2109,19 +2109,6 @@ fn build_run_turn_body(
     }
 }
 
-#[allow(dead_code)]
-#[tauri::command]
-pub async fn get_chat_sessions() -> Result<Vec<ChatSession>, LLMError> {
-    Ok(vec![])
-}
-
-#[allow(dead_code)]
-#[tauri::command]
-pub async fn delete_chat_session(session_id: String) -> Result<(), LLMError> {
-    log::info!("Deleting session: {}", session_id);
-    Ok(())
-}
-
 fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
     // 本地模型不需要 API key
     if request.provider == "local" {

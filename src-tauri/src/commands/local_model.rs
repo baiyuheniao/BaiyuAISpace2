@@ -81,21 +81,6 @@ struct OllamaModelEntry {
     details: Option<ModelDetails>,
 }
 
-/// Ollama 模型详情（show）接口的响应
-#[derive(Debug, Deserialize)]
-struct OllamaShowResponse {
-    details: Option<ModelDetails>,
-    // 其余我们用不到的字段
-    #[allow(dead_code)]
-    license: Option<String>,
-    #[allow(dead_code)]
-    modelfile: Option<String>,
-    #[allow(dead_code)]
-    parameters: Option<String>,
-    #[allow(dead_code)]
-    template: Option<String>,
-}
-
 /// 模型源配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,25 +194,6 @@ fn build_ollama_url(base_url: &str, endpoint: &str) -> String {
 
 // ============ Tauri 命令 ============
 
-/// 检查 Ollama 服务是否正在运行且可访问
-#[tauri::command]
-pub async fn check_ollama_status(
-    ollama_base_url: String,
-) -> Result<bool, String> {
-    let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
-
-    let url = build_ollama_url(&ollama_base_url, "/api/tags");
-
-    match client.get(&url).send().await {
-        Ok(response) => Ok(response.status().is_success()),
-        Err(e) => {
-            log::debug!("Ollama status check failed: {}", e);
-            Ok(false)
-        }
-    }
-}
-
 /// 列出 Ollama 上所有本地可用的模型
 #[tauri::command]
 pub async fn list_local_models(
@@ -267,43 +233,6 @@ pub async fn list_local_models(
         .collect();
 
     Ok(models)
-}
-
-/// 获取指定本地模型的详细信息
-#[tauri::command]
-pub async fn show_local_model(
-    ollama_base_url: String,
-    model_name: String,
-) -> Result<LocalModelInfo, String> {
-    let client = create_ollama_client(&ollama_base_url)
-        .map_err(|e| friendly_err("创建网络连接失败，请重启应用后重试", e))?;
-
-    let url = build_ollama_url(&ollama_base_url, "/api/show");
-
-    let response = client
-        .post(&url)
-        .json(&serde_json::json!({ "name": model_name }))
-        .send()
-        .await
-        .map_err(|e| friendly_err("无法连接到 Ollama 服务，请确认 Ollama 已启动", e))?;
-
-    if !response.status().is_success() {
-        return Err(friendly_err("Ollama 服务返回异常状态，请检查 Ollama 是否正常运行", response.status()));
-    }
-
-    let body: OllamaShowResponse = response
-        .json()
-        .await
-        .map_err(|e| friendly_err("解析 Ollama 返回的数据失败，请确认 Ollama 版本是否兼容", e))?;
-
-    Ok(LocalModelInfo {
-        name: model_name.clone(),
-        model: model_name,
-        modified_at: String::new(),
-        size: 0,
-        digest: String::new(),
-        details: body.details,
-    })
 }
 
 /// 从指定源拉取（下载）模型

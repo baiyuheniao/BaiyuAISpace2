@@ -361,13 +361,17 @@ export const useSettingsStore = defineStore(
       if (idx === -1) return;
 
       const config = apiConfigs.value[idx];
-      
-      // If API key is updated, save to secure storage
-      if (updates.apiKey !== undefined && updates.apiKey !== config.apiKey) {
-        saveApiKeyToSecureStorage(configId, updates.apiKey);
+      const { apiKey, ...safeUpdates } = updates;
+
+      // 编辑页约定“留空表示不修改”：空值既不能覆盖内存状态，也不能写入系统密钥链。
+      if (typeof apiKey === "string" && apiKey.trim()) {
+        if (apiKey !== config.apiKey) {
+          saveApiKeyToSecureStorage(configId, apiKey);
+        }
+        apiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+      } else {
+        apiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
-      
-      apiConfigs.value[idx] = { ...config, ...updates };
     };
 
     // 删除 LLM API 配置
@@ -425,13 +429,16 @@ export const useSettingsStore = defineStore(
       if (idx === -1) return;
 
       const config = embeddingApiConfigs.value[idx];
-      
-      // If API key is updated, save to secure storage
-      if (updates.apiKey !== undefined && updates.apiKey !== config.apiKey) {
-        saveApiKeyToSecureStorage(`emb_${configId}`, updates.apiKey);
+      const { apiKey, ...safeUpdates } = updates;
+
+      if (typeof apiKey === "string" && apiKey.trim()) {
+        if (apiKey !== config.apiKey) {
+          saveApiKeyToSecureStorage(`emb_${configId}`, apiKey);
+        }
+        embeddingApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+      } else {
+        embeddingApiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
-      
-      embeddingApiConfigs.value[idx] = { ...config, ...updates };
     };
 
     // 删除 Embedding API 配置
@@ -479,11 +486,18 @@ export const useSettingsStore = defineStore(
     const updateRerankerApiConfig = (configId: string, updates: Partial<RerankerApiConfig>) => {
       const idx = rerankerApiConfigs.value.findIndex((c) => c.id === configId);
       if (idx === -1) return;
+
       const config = rerankerApiConfigs.value[idx];
-      if (updates.apiKey !== undefined && updates.apiKey !== config.apiKey) {
-        saveApiKeyToSecureStorage(`reranker_${configId}`, updates.apiKey);
+      const { apiKey, ...safeUpdates } = updates;
+
+      if (typeof apiKey === "string" && apiKey.trim()) {
+        if (apiKey !== config.apiKey) {
+          saveApiKeyToSecureStorage(`reranker_${configId}`, apiKey);
+        }
+        rerankerApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+      } else {
+        rerankerApiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
-      rerankerApiConfigs.value[idx] = { ...config, ...updates };
     };
 
     // 删除 Reranker API 配置
@@ -555,9 +569,11 @@ export const useSettingsStore = defineStore(
 
     // 加载所有 API 密钥
     const loadAllApiKeys = async () => {
-      for (const config of apiConfigs.value) {
-        await loadApiKeyForConfig(config.id);
-      }
+      await Promise.all([
+        Promise.all(apiConfigs.value.map((config) => loadApiKeyForConfig(config.id))),
+        loadAllEmbeddingApiKeys(),
+        loadAllRerankerApiKeys(),
+      ]);
     };
 
     // 保存 API 密钥到安全存储

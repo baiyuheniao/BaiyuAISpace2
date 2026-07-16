@@ -355,18 +355,6 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     }
   };
 
-  const getEmbeddingModels = async (): Promise<
-    Array<{ provider: string; model: string; dim: number }>
-  > => {
-    try {
-      const result = await invoke<[string, string, number][]>("get_embedding_models");
-      return result.map(([provider, model, dim]) => ({ provider, model, dim }));
-    } catch (error) {
-      console.error("Failed to get embedding models:", error);
-      return [];
-    }
-  };
-
   const updateRetrievalSettings = (settings: Partial<RetrievalSettings>) => {
     retrievalSettings.value = { ...retrievalSettings.value, ...settings };
   };
@@ -414,7 +402,6 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     selectAndImportDocument,
     deleteDocument,
     searchKnowledgeBase,
-    getEmbeddingModels,
     updateRetrievalSettings,
     formatFileSize,
     formatDate,

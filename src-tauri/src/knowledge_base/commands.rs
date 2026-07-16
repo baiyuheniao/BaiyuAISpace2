@@ -682,12 +682,6 @@ fn get_reranker_api_key(config_id: &str) -> Result<String, KnowledgeBaseError> {
     }
 }
 
-/// 获取可用的 embedding 模型列表
-#[tauri::command]
-pub fn get_embedding_models() -> Vec<(String, String, i32)> {
-    super::embedding::get_available_embedding_models()
-}
-
 /// 解析文档并返回全文（用于聊天时直接注入上下文，无需知识库/向量化）
 #[tauri::command]
 pub async fn read_document_for_context(
