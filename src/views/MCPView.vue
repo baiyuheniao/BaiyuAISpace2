@@ -23,7 +23,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import {
   NLayout,
   NLayoutContent,
@@ -56,6 +56,8 @@ import {
   Globe,
   Terminal,
   Sparkles,
+  Search,
+  Storefront,
 } from "@vicons/ionicons5";
 import { useMCPStore, type MCPServer } from "@/stores/mcp";
 
@@ -83,6 +85,8 @@ interface MCPPreset {
   args: string[];
   /** 若该服务需要用户修改参数 (如本地路径)，或有首次运行的前提条件，则提示文案 */
   needsConfig?: string;
+  /** 市场里的分类标签，用于筛选；"推荐能力"卡片不展示分类，只有市场用 */
+  category: string;
 }
 
 const MCP_PRESETS: MCPPreset[] = [
@@ -94,6 +98,7 @@ const MCP_PRESETS: MCPPreset[] = [
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"],
     needsConfig: "请将最后一行参数改为你要允许访问的目录路径",
+    category: "文件与数据",
   },
   {
     id: "memory",
@@ -102,6 +107,7 @@ const MCP_PRESETS: MCPPreset[] = [
     serverType: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-memory"],
+    category: "效率与记忆",
   },
   {
     id: "playwright",
@@ -112,6 +118,7 @@ const MCP_PRESETS: MCPPreset[] = [
     command: "npx",
     args: ["-y", "@playwright/mcp@latest"],
     needsConfig: "首次调用浏览器类工具时会自动下载 Chromium，请确保网络畅通，可能需要等待片刻",
+    category: "网页与浏览器",
   },
   {
     id: "sequential-thinking",
@@ -120,6 +127,7 @@ const MCP_PRESETS: MCPPreset[] = [
     serverType: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+    category: "效率与记忆",
   },
   {
     id: "time",
@@ -128,6 +136,7 @@ const MCP_PRESETS: MCPPreset[] = [
     serverType: "stdio",
     command: "uvx",
     args: ["mcp-server-time"],
+    category: "效率与记忆",
   },
   {
     id: "git",
@@ -137,6 +146,7 @@ const MCP_PRESETS: MCPPreset[] = [
     command: "uvx",
     args: ["mcp-server-git", "--repository", "/path/to/git/repo"],
     needsConfig: "请将仓库路径改为你本地的 Git 仓库路径",
+    category: "开发工具",
   },
   {
     id: "office-word",
@@ -148,6 +158,7 @@ const MCP_PRESETS: MCPPreset[] = [
     args: ["--from", "office-word-mcp-server", "word_mcp_server"],
     needsConfig:
       "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-word-mcp-server",
+    category: "办公文档",
   },
   {
     id: "office-powerpoint",
@@ -159,6 +170,7 @@ const MCP_PRESETS: MCPPreset[] = [
     args: ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"],
     needsConfig:
       "需要已安装 uv（https://docs.astral.sh/uv/），首次运行会自动从 PyPI 拉取 office-powerpoint-mcp-server",
+    category: "办公文档",
   },
   {
     id: "office-excel",
@@ -168,8 +180,146 @@ const MCP_PRESETS: MCPPreset[] = [
     serverType: "stdio",
     command: "npx",
     args: ["--yes", "@negokaz/excel-mcp-server"],
+    category: "办公文档",
   },
 ];
+
+/**
+ * 市场专属条目：不进"推荐能力"（避免那张卡片过长），只在"MCP 市场"里可搜索到
+ * 均为官方参考实现或活跃维护的社区方案，且都不需要天生就没有填写入口的 env 变量
+ * （比如 GitHub/Slack 官方 MCP 需要 token 走 env，而现有表单没有 env 编辑项，暂不收录）
+ */
+const MCP_MARKET_EXTRA: MCPPreset[] = [
+  {
+    id: "everything",
+    name: "全功能测试服务",
+    description:
+      "官方参考实现，内置各类示例工具/资源/Prompt，用于验证 MCP 客户端的兼容程度（modelcontextprotocol/server-everything）",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-everything"],
+    category: "开发工具",
+  },
+  {
+    id: "fetch",
+    name: "网页抓取（官方版）",
+    description: "抓取指定 URL 并转换为 Markdown 返回给模型，官方参考实现，可与内置的网页抓取搭配或替代使用",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["mcp-server-fetch"],
+    category: "网页与浏览器",
+  },
+  {
+    id: "postgres",
+    name: "PostgreSQL 数据库",
+    description: "只读查询 PostgreSQL 数据库结构与数据，官方参考实现",
+    serverType: "stdio",
+    command: "npx",
+    args: [
+      "-y",
+      "@modelcontextprotocol/server-postgres",
+      "postgresql://user:password@localhost:5432/dbname",
+    ],
+    needsConfig: "请将最后一行参数改为你的 PostgreSQL 连接字符串",
+    category: "文件与数据",
+  },
+  {
+    id: "sqlite",
+    name: "SQLite 数据库",
+    description: "读写本地 SQLite 数据库文件，支持查询与建表",
+    serverType: "stdio",
+    command: "uvx",
+    args: ["mcp-server-sqlite", "--db-path", "/path/to/database.db"],
+    needsConfig: "请将数据库路径改为你本地的 .db 文件路径",
+    category: "文件与数据",
+  },
+];
+
+/** 市场目录 = 推荐能力里的预设 + 市场专属条目，二者共享同一套"填表单/查状态"逻辑 */
+const MCP_MARKET: MCPPreset[] = [...MCP_PRESETS, ...MCP_MARKET_EXTRA];
+
+/** 市场分类筛选的选项列表，从目录里去重生成，不用另外手动维护一份 */
+const MCP_MARKET_CATEGORIES = Array.from(new Set(MCP_MARKET.map((entry) => entry.category)));
+
+/**
+ * 内置能力：应用原生实现，无需任何配置，随"启用 MCP"开关直接生效
+ * 与 MCP_PRESETS 一起构成"推荐能力"模块，二者仅在是否需要用户配置上不同
+ */
+interface BuiltinCapability {
+  id: string;
+  name: string;
+  description: string;
+}
+
+const BUILTIN_CAPABILITIES: BuiltinCapability[] = [
+  {
+    id: "web-search",
+    name: "网络搜索",
+    description:
+      "通过 DuckDuckGo 搜索网页，获取实时信息。应用内置实现，无需安装 uv/Node.js 等任何依赖，随对话页的\"启用 MCP\"开关一起生效；Agent Team 里每个 Agent 也默认可用，不需要额外勾选",
+  },
+  {
+    id: "web-fetch",
+    name: "网页内容抓取",
+    description:
+      "抓取网页并提取正文文本。应用内置实现，无需安装任何依赖，随对话页的\"启用 MCP\"开关一起生效；Agent Team 里每个 Agent 也默认可用，不需要额外勾选",
+  },
+];
+
+/** "推荐能力"列表里的一项：内置能力（零配置）或社区预设（需要用户点击后填表保存） */
+type RecommendedItem =
+  | { kind: "builtin"; capability: BuiltinCapability }
+  | { kind: "preset"; preset: MCPPreset };
+
+/**
+ * 合并内置能力与社区预设，供"推荐能力"卡片统一渲染
+ * 保持在同一模块里是因为二者都是"软件默认推荐"的东西，用户不需要关心
+ * 背后是原生实现还是社区包，只需要通过状态标签区分"能不能直接用"
+ */
+const recommendedItems = computed<RecommendedItem[]>(() => [
+  ...BUILTIN_CAPABILITIES.map((capability) => ({ kind: "builtin" as const, capability })),
+  ...MCP_PRESETS.map((preset) => ({ kind: "preset" as const, preset })),
+]);
+
+/**
+ * 判断某个预设是否已经被配置成一个已保存的服务器
+ * 用名称匹配（预设应用后表单名称默认沿用 preset.name，用户当然可以改名，
+ * 改名后会被判定为"未配置"，这是可接受的简单启发式）
+ */
+const isPresetConfigured = (preset: MCPPreset) =>
+  mcp.servers.some((server) => server.name === preset.name);
+
+// ============ 市场 ============
+
+/** 市场搜索关键词，匹配名称或描述 */
+const marketSearchQuery = ref("");
+
+/** 市场当前选中的分类；null 表示"全部" */
+const marketSelectedCategory = ref<string | null>(null);
+
+/**
+ * 切换市场分类筛选
+ * 再次点击已选中的分类会取消筛选，回到"全部"
+ *
+ * @param category - 点击的分类
+ */
+const toggleMarketCategory = (category: string) => {
+  marketSelectedCategory.value = marketSelectedCategory.value === category ? null : category;
+};
+
+/** 按关键词 + 分类筛选后的市场条目 */
+const filteredMarketEntries = computed(() => {
+  const query = marketSearchQuery.value.trim().toLowerCase();
+  return MCP_MARKET.filter((entry) => {
+    const matchesCategory =
+      !marketSelectedCategory.value || entry.category === marketSelectedCategory.value;
+    const matchesQuery =
+      !query ||
+      entry.name.toLowerCase().includes(query) ||
+      entry.description.toLowerCase().includes(query);
+    return matchesCategory && matchesQuery;
+  });
+});
 
 // ============ 生命周期 ============
 
@@ -517,55 +667,8 @@ const handleTestSavedServer = async (server: MCPServer) => {
           </h1>
         </header>
 
-        <!-- 内置能力说明卡片 -->
-        <n-card
-          class="settings-card"
-          :bordered="false"
-        >
-          <template #header>
-            <div class="card-header">
-              <n-icon
-                :size="20"
-                depth="3"
-              >
-                <CheckmarkCircle />
-              </n-icon>
-              <span>内置能力（开箱即用）</span>
-            </div>
-          </template>
-
-          <n-list hoverable>
-            <n-list-item>
-              <n-thing>
-                <template #header>
-                  网络搜索
-                </template>
-                <template #description>
-                  <n-text depth="3">
-                    通过 DuckDuckGo 搜索网页，获取实时信息。应用内置实现，无需安装 uv/Node.js
-                    等任何依赖，随对话页的"启用 MCP"开关一起生效；Agent Team 里每个 Agent
-                    也默认可用，不需要额外勾选
-                  </n-text>
-                </template>
-              </n-thing>
-            </n-list-item>
-            <n-list-item>
-              <n-thing>
-                <template #header>
-                  网页内容抓取
-                </template>
-                <template #description>
-                  <n-text depth="3">
-                    抓取网页并提取正文文本。应用内置实现，无需安装任何依赖，随对话页的"启用
-                    MCP"开关一起生效；Agent Team 里每个 Agent 也默认可用，不需要额外勾选
-                  </n-text>
-                </template>
-              </n-thing>
-            </n-list-item>
-          </n-list>
-        </n-card>
-
-        <!-- 推荐服务预设卡片 -->
+        <!-- 推荐能力卡片：内置能力（零配置）与社区预设（需配置）合并展示，
+             用状态标签区分"能直接用"和"点了才能用"，而不是拆成两张视觉权重相同的卡片 -->
         <n-card
           class="settings-card"
           :bordered="false"
@@ -578,29 +681,46 @@ const handleTestSavedServer = async (server: MCPServer) => {
               >
                 <Sparkles />
               </n-icon>
-              <span>推荐服务</span>
+              <span>推荐能力</span>
             </div>
           </template>
 
           <n-list hoverable>
             <n-list-item
-              v-for="preset in MCP_PRESETS"
-              :key="preset.id"
+              v-for="item in recommendedItems"
+              :key="item.kind === 'builtin' ? item.capability.id : item.preset.id"
             >
               <n-thing>
                 <template #header>
-                  {{ preset.name }}
+                  {{ item.kind === "builtin" ? item.capability.name : item.preset.name }}
                 </template>
                 <template #description>
                   <n-text depth="3">
-                    {{ preset.description }}
+                    {{ item.kind === "builtin" ? item.capability.description : item.preset.description }}
                   </n-text>
                 </template>
               </n-thing>
               <template #suffix>
-                <n-button
+                <!-- 内置能力：常驻生效，不需要也不能操作 -->
+                <n-tag
+                  v-if="item.kind === 'builtin'"
+                  type="success"
                   size="small"
-                  @click="applyPreset(preset)"
+                >
+                  已启用
+                </n-tag>
+                <!-- 已经用过该预设保存出对应服务器：操作入口挪到下方"已连接的服务" -->
+                <n-tag
+                  v-else-if="isPresetConfigured(item.preset)"
+                  size="small"
+                >
+                  已配置
+                </n-tag>
+                <!-- 尚未配置的预设：一键填充表单 -->
+                <n-button
+                  v-else
+                  size="small"
+                  @click="applyPreset(item.preset)"
                 >
                   <template #icon>
                     <n-icon><Add /></n-icon>
@@ -622,9 +742,114 @@ const handleTestSavedServer = async (server: MCPServer) => {
               >
                 <CheckmarkCircle />
               </n-icon>
-              均为社区官方参考实现，首次运行时通过 npx/uvx 自动下载，无需手动准备脚本文件
+              内置能力随应用开箱即用；其余预设均为社区官方参考实现，首次运行时通过 npx/uvx
+              自动下载，无需手动准备脚本文件
             </n-text>
           </template>
+        </n-card>
+
+        <!-- MCP 市场卡片：比"推荐能力"范围更大的可搜索目录，选中后走同一套
+             填充表单/查状态逻辑，"推荐能力"里已经列出的条目在这里也能搜到 -->
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
+          <template #header>
+            <div class="card-header">
+              <n-icon
+                :size="20"
+                depth="3"
+              >
+                <Storefront />
+              </n-icon>
+              <span>MCP 市场</span>
+            </div>
+          </template>
+
+          <div class="market-filters">
+            <n-input
+              v-model:value="marketSearchQuery"
+              placeholder="搜索服务名称或功能描述"
+              clearable
+            >
+              <template #prefix>
+                <n-icon><Search /></n-icon>
+              </template>
+            </n-input>
+
+            <n-space class="market-categories">
+              <n-tag
+                :checked="marketSelectedCategory === null"
+                checkable
+                @click="marketSelectedCategory = null"
+              >
+                全部
+              </n-tag>
+              <n-tag
+                v-for="category in MCP_MARKET_CATEGORIES"
+                :key="category"
+                :checked="marketSelectedCategory === category"
+                checkable
+                @click="toggleMarketCategory(category)"
+              >
+                {{ category }}
+              </n-tag>
+            </n-space>
+          </div>
+
+          <n-list
+            v-if="filteredMarketEntries.length > 0"
+            hoverable
+          >
+            <n-list-item
+              v-for="entry in filteredMarketEntries"
+              :key="entry.id"
+            >
+              <n-thing>
+                <template #header>
+                  <n-space align="center">
+                    <span>{{ entry.name }}</span>
+                    <n-tag
+                      size="tiny"
+                      :bordered="false"
+                    >
+                      {{ entry.category }}
+                    </n-tag>
+                  </n-space>
+                </template>
+                <template #description>
+                  <n-text depth="3">
+                    {{ entry.description }}
+                  </n-text>
+                </template>
+              </n-thing>
+              <template #suffix>
+                <!-- 已经配置过：操作入口挪到下方"已连接的服务" -->
+                <n-tag
+                  v-if="isPresetConfigured(entry)"
+                  size="small"
+                >
+                  已配置
+                </n-tag>
+                <n-button
+                  v-else
+                  size="small"
+                  @click="applyPreset(entry)"
+                >
+                  <template #icon>
+                    <n-icon><Add /></n-icon>
+                  </template>
+                  使用此配置
+                </n-button>
+              </template>
+            </n-list-item>
+          </n-list>
+
+          <!-- 搜索/筛选无结果 -->
+          <n-empty
+            v-else
+            description="没有找到匹配的服务，换个关键词或分类试试"
+          />
         </n-card>
 
         <!-- MCP 服务器列表卡片 -->
@@ -1121,6 +1346,18 @@ const handleTestSavedServer = async (server: MCPServer) => {
     transform: translateY(-4px);
     box-shadow: $shadow-hover;
   }
+}
+
+/* 市场筛选区：搜索框 + 分类标签，与列表之间留出间距 */
+.market-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.market-categories {
+  flex-wrap: wrap;
 }
 
 /* 卡片头部 */
