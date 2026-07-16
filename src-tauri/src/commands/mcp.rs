@@ -366,6 +366,59 @@ fn resolve_windows_command(command: &str) -> String {
     command.to_string()
 }
 
+/// MCP 协议规定任何请求之前必须先完成 initialize 握手，否则服务器有权拒绝。
+/// 之前这里的 stdio 调用（tools/list 和 tools/call）都是进程一启动就直接发
+/// 业务请求，完全跳过了握手——用自己写的 DingTalk.py 这类不校验顺序的服务器
+/// 测试时看不出问题，但换成基于官方 MCP SDK 严格实现的服务器（比如 Python 版
+/// mcp-server-git）就会直接收到 "-32602 Invalid request parameters"。
+/// 这里补上握手：发 initialize、读它的响应、再发 notifications/initialized
+/// 通知（无需等待响应），之后调用方才能发真正的业务请求。
+async fn perform_mcp_handshake(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+) -> Result<(), MCPError> {
+    let init_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "BaiyuAISpace2", "version": env!("CARGO_PKG_VERSION") }
+        },
+        "id": Uuid::new_v4().to_string()
+    });
+    stdin
+        .write_all((init_request.to_string() + "\n").as_bytes())
+        .await
+        .map_err(|e| { log::error!("MCP initialize 握手写入失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送握手请求失败".to_string()) })?;
+
+    let init_response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
+        .await
+        .map_err(|_| MCPError::CommunicationError("MCP initialize handshake timeout".to_string()))?
+        .map_err(|e| { log::error!("MCP 握手响应读取失败（详情：{}）", e); MCPError::CommunicationError("读取 MCP 服务器握手响应失败".to_string()) })?
+        .ok_or_else(|| MCPError::CommunicationError("No initialize response from MCP server".to_string()))?;
+
+    let init_response: JsonRpcResponse = serde_json::from_str(&init_response_line).map_err(MCPError::JsonError)?;
+    if let Some(error) = init_response.error {
+        return Err(MCPError::CommunicationError(format!(
+            "MCP initialize error ({}): {}",
+            error.code, error.message
+        )));
+    }
+
+    // notifications/initialized 是单向通知，没有 id 字段，服务器不会回复
+    let initialized_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    stdin
+        .write_all((initialized_notification.to_string() + "\n").as_bytes())
+        .await
+        .map_err(|e| { log::error!("MCP initialized 通知写入失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送握手确认失败".to_string()) })?;
+
+    Ok(())
+}
+
 fn parse_mcp_tools_from_result(result: &serde_json::Value, server: &MCPServer) -> Result<Vec<MCPTool>, MCPError> {
     // MCP 协议的 tools/list 响应形如 {"result":{"tools":[...]}}} —— 工具数组在
     // result.tools 字段下面，result 本身是一个对象而不是数组。之前直接对 result
@@ -438,16 +491,16 @@ async fn call_mcp_tools_stdio(server: &MCPServer) -> Result<Vec<MCPTool>, MCPErr
         }
     });
 
-    {
-        let mut stdin = child.stdin.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdin".to_string()))?;
-        stdin
-            .write_all((request_json + "\n").as_bytes())
-            .await
-            .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
-    }
-
+    let mut stdin = child.stdin.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdin".to_string()))?;
     let stdout = child.stdout.take().ok_or_else(|| MCPError::CommunicationError("Failed to open stdout".to_string()))?;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    perform_mcp_handshake(&mut stdin, &mut lines).await?;
+
+    stdin
+        .write_all((request_json + "\n").as_bytes())
+        .await
+        .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
 
     let response_line = tokio::time::timeout(MCP_STDIO_TIMEOUT, lines.next_line())
         .await
@@ -964,17 +1017,9 @@ async fn call_mcp_tool_stdio(
         }
     });
 
-    // 把请求写入 stdin
-    {
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            MCPError::CommunicationError("Failed to open stdin".to_string())
-        })?;
-
-        stdin
-            .write_all((request_json + "\n").as_bytes())
-            .await
-            .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
-    }
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        MCPError::CommunicationError("Failed to open stdin".to_string())
+    })?;
 
     // 带超时地从 stdout 读取响应
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -982,6 +1027,14 @@ async fn call_mcp_tool_stdio(
     })?;
 
     let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    perform_mcp_handshake(&mut stdin, &mut lines).await?;
+
+    // 把请求写入 stdin
+    stdin
+        .write_all((request_json + "\n").as_bytes())
+        .await
+        .map_err(|e| { log::error!("MCP 写入 stdin 失败（详情：{}）", e); MCPError::CommunicationError("向 MCP 服务器发送请求失败".to_string()) })?;
 
     // 读取第一行（应该就是 JSON 响应）
     let response_line = tokio::time::timeout(MCP_TOOL_CALL_TIMEOUT, lines.next_line())
