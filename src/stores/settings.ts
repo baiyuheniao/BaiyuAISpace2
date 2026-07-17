@@ -250,6 +250,12 @@ export const useSettingsStore = defineStore(
     // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
     const systemPrompt = ref("");
 
+    // 服务商返回限流/过载类错误时的自动重试次数与间隔秒数，随每次对话请求
+    // 一起传给后端；默认值需与 src-tauri/src/commands/constants.rs 里的
+    // DEFAULT_LLM_RETRY_COUNT / DEFAULT_LLM_RETRY_INTERVAL_SECS 保持一致。
+    const retryCount = ref(3);
+    const retryIntervalSecs = ref(2);
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -615,6 +621,8 @@ export const useSettingsStore = defineStore(
       fullscreenHotkey,
       setFullscreenHotkey,
       systemPrompt,
+      retryCount,
+      retryIntervalSecs,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -650,7 +658,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

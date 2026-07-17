@@ -20,3 +20,8 @@ pub const MCP_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MCP_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const EMBEDDING_BATCH_DELAY_MS: u64 = 100;
+
+// 服务商返回限流/过载类错误（429/529/"overloaded" 等）时的默认自动重试
+// 次数和间隔；用户可在设置页覆盖，未配置时用这两个值兜底。
+pub const DEFAULT_LLM_RETRY_COUNT: u32 = 3;
+pub const DEFAULT_LLM_RETRY_INTERVAL_SECS: u32 = 2;

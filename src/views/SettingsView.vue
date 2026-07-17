@@ -1352,6 +1352,45 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               :autosize="{ minRows: 3, maxRows: 8 }"
             />
           </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">请求失败自动重试</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                当服务商返回限流或过载类错误（如 429、模型引擎过载）时，自动按此配置重试。重试次数设为 0 即关闭自动重试。
+              </n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="12"
+            >
+              <n-input-number
+                v-model:value="settings.retryCount"
+                placeholder="重试次数"
+                :min="0"
+                :max="10"
+                style="width: 140px;"
+              >
+                <template #suffix>
+                  次
+                </template>
+              </n-input-number>
+              <n-input-number
+                v-model:value="settings.retryIntervalSecs"
+                placeholder="重试间隔"
+                :min="1"
+                :max="60"
+                style="width: 140px;"
+              >
+                <template #suffix>
+                  秒
+                </template>
+              </n-input-number>
+            </n-space>
+          </div>
         </n-card>
 
         <!-- 关于卡片 -->

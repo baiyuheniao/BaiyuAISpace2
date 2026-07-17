@@ -12,7 +12,10 @@
  * - 会话和消息管理
  */
 
-use crate::commands::constants::{LLM_CONNECT_TIMEOUT, LLM_REQUEST_TIMEOUT, LLM_STREAM_READ_TIMEOUT};
+use crate::commands::constants::{
+    DEFAULT_LLM_RETRY_COUNT, DEFAULT_LLM_RETRY_INTERVAL_SECS, LLM_CONNECT_TIMEOUT,
+    LLM_REQUEST_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
+};
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
 use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
@@ -22,6 +25,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tauri::{AppHandle, Emitter};
@@ -121,6 +125,12 @@ pub struct SendMessageRequest {
     /// 最大输出 token 数（None 时使用默认值: 普通模式 4096, 思考模式 16000）
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// 遇到限流/过载类错误时的自动重试次数（None 时用 DEFAULT_LLM_RETRY_COUNT）
+    #[serde(default)]
+    pub retry_count: Option<u32>,
+    /// 每次重试之间的等待秒数（None 时用 DEFAULT_LLM_RETRY_INTERVAL_SECS）
+    #[serde(default)]
+    pub retry_interval_secs: Option<u32>,
 }
 
 /// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
@@ -667,6 +677,78 @@ fn create_streaming_http_client(url: &str) -> reqwest::Result<reqwest::Client> {
     builder.build()
 }
 
+/// 判断服务商返回的非 2xx 响应是不是"稍后重试大概率会成功"的临时性错误：
+/// 429/503/529（Anthropic 的过载码）本身就是明确信号；有些 provider 把过载/
+/// 限流塞进 200 以外的状态码但错误文本里带关键字（比如题述的
+/// `engine_overloaded_error`），一并按文本兜底识别。
+fn is_retryable_status(status: reqwest::StatusCode, body: &str) -> bool {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 || status.is_server_error() {
+        return true;
+    }
+    let lower = body.to_lowercase();
+    lower.contains("overloaded") || lower.contains("rate_limit") || lower.contains("rate limit")
+}
+
+fn is_retryable_reqwest_error(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect()
+}
+
+/// 带自动重试地发送一个已经构造好（`.json(body)` 等已调用完）的请求。只
+/// 覆盖"请求还没等到响应/服务商直接拒绝"这个阶段——调用方必须保证传入的
+/// 是流式请求真正开始读取 SSE 内容之前的那次 `send()`，不能是流已经吐出部分
+/// 内容之后的重试，否则会在前端产生重复/错乱的部分回复。
+async fn send_with_retry(
+    request_builder: &reqwest::RequestBuilder,
+    retry_count: u32,
+    retry_interval_secs: u32,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<reqwest::Response, LLMError> {
+    let mut attempt = 0u32;
+    loop {
+        let builder = request_builder.try_clone().ok_or_else(|| {
+            LLMError::ApiError("internal error: request body not clonable for retry".to_string())
+        })?;
+        match builder.send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(response);
+                }
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+                if attempt >= retry_count || !is_retryable_status(status, &error_text) {
+                    return Err(LLMError::ApiError(error_text));
+                }
+                log::warn!(
+                    "LLM 请求被服务商拒绝，判定为可重试错误（状态码 {}，第 {}/{} 次重试）：{}",
+                    status, attempt + 1, retry_count, error_text
+                );
+            }
+            Err(e) => {
+                if attempt >= retry_count || !is_retryable_reqwest_error(&e) {
+                    return Err(e.into());
+                }
+                log::warn!(
+                    "LLM 请求发送失败，判定为可重试错误（第 {}/{} 次重试）：{}",
+                    attempt + 1, retry_count, e
+                );
+            }
+        }
+        attempt += 1;
+        let wait = tokio::time::sleep(Duration::from_secs(retry_interval_secs as u64));
+        match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    _ = wait => {}
+                    _ = token.cancelled() => {
+                        return Err(LLMError::StreamError("请求已取消".to_string()));
+                    }
+                }
+            }
+            None => wait.await,
+        }
+    }
+}
+
 fn build_headers(provider: &str, api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -1052,25 +1134,16 @@ pub async fn stream_message(
 
     log::debug!("Auth header (masked): {}", masked_auth);
 
-    let response = match client
-        .post(&url)
-        .headers(headers.clone())
-        .json(&body)
-        .send()
-        .await
-    {
+    let retry_count = request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT);
+    let retry_interval_secs = request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS);
+    let request_builder = client.post(&url).headers(headers.clone()).json(&body);
+    let response = match send_with_retry(&request_builder, retry_count, retry_interval_secs, Some(&cancel_token)).await {
         Ok(r) => r,
         Err(e) => {
-            log::error!("reqwest send error for url '{}': {:?}", url, e);
-            return Err(e.into());
+            log::error!("LLM request failed for url '{}': {:?}", url, e);
+            return Err(e);
         }
     };
-
-    if !response.status().is_success() {
-        let error_text = response.text().await?;
-        log::error!("API error: {}", error_text);
-        return Err(LLMError::ApiError(error_text));
-    }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -1302,6 +1375,8 @@ async fn finalize_turn(
                 mcp_tools,
                 all_skills,
                 max_tokens,
+                request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
+                request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS),
             )
             .await
             {
@@ -1365,6 +1440,8 @@ async fn continue_after_tool_calls(
     mcp_tools: &[MCPTool],
     autonomous_skills: &[Skill],
     max_tokens: Option<u32>,
+    retry_count: u32,
+    retry_interval_secs: u32,
 ) -> Result<ContinuationResult, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client(&url)?;
@@ -1600,24 +1677,14 @@ async fn continue_after_tool_calls(
     };
     log::debug!("Tool-call continuation auth header (masked): {}", masked_auth);
 
-    let response = match client
-        .post(&url)
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-    {
+    let request_builder = client.post(&url).headers(headers).json(&body);
+    let response = match send_with_retry(&request_builder, retry_count, retry_interval_secs, None).await {
         Ok(r) => r,
         Err(e) => {
-            log::error!("reqwest send error (tool-call continuation) for url '{}': {:?}", url, e);
-            return Err(e.into());
+            log::error!("LLM request failed (tool-call continuation) for url '{}': {:?}", url, e);
+            return Err(e);
         }
     };
-
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
-        return Err(LLMError::ApiError(error_text));
-    }
 
     let json: serde_json::Value = response
         .json()
@@ -1874,12 +1941,14 @@ pub async fn run_turn(
     let body = build_run_turn_body(provider, model, system_prompt, native_messages, tools, max_tokens, enable_thinking);
 
     let headers = build_headers(provider, api_key);
-    let response = client.post(&url).headers(headers).json(&body).send().await?;
-
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
-        return Err(LLMError::ApiError(error_text));
-    }
+    let request_builder = client.post(&url).headers(headers).json(&body);
+    let response = send_with_retry(
+        &request_builder,
+        DEFAULT_LLM_RETRY_COUNT,
+        DEFAULT_LLM_RETRY_INTERVAL_SECS,
+        None,
+    )
+    .await?;
 
     let json: serde_json::Value = response.json().await.map_err(LLMError::RequestError)?;
 
@@ -2556,7 +2625,7 @@ mod provider_tool_calling_tests {
 
         let outcome = continue_after_tool_calls(
             "custom", "test-model", "test-key", &base_url,
-            &original_messages, &rounds, &[], &[], None,
+            &original_messages, &rounds, &[], &[], None, 0, 0,
         ).await.expect("continuation call should succeed");
 
         match outcome {
@@ -2616,7 +2685,7 @@ mod provider_tool_calling_tests {
         };
         let mut rounds = vec![(vec![call_1], vec![result_1])];
 
-        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None)
+        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0)
             .await
             .expect("round 1 continuation");
         let next_calls = match outcome {
@@ -2626,7 +2695,7 @@ mod provider_tool_calling_tests {
         assert_eq!(next_calls[0].id, "call_2");
 
         rounds.push((next_calls, vec![result_2]));
-        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None)
+        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0)
             .await
             .expect("round 2 continuation");
         match outcome_2 {

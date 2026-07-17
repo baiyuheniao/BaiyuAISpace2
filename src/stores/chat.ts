@@ -774,6 +774,8 @@ export const useChatStore = defineStore("chat", () => {
         enableSkillAutonomy: skillAutonomyEnabled.value,
         enableThinking: thinkingEnabled.value,
         maxTokens: config.maxTokens ?? null,
+        retryCount: settings.retryCount,
+        retryIntervalSecs: settings.retryIntervalSecs,
       };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
