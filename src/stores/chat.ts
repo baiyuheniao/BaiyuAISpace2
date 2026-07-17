@@ -13,7 +13,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useSettingsStore } from "./settings";
 import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
-import { useMCPStore, type MCPTool } from "./mcp";
 import { classifyError } from "@/utils/errorMessage";
 
 /** 图片附件（base64 编码，不含 data URL 前缀） */
@@ -490,93 +489,6 @@ export const useChatStore = defineStore("chat", () => {
   };
 
   /**
-   * 执行 MCP 工具调用
-   * 
-   * @param toolName - 工具名称
-   * @param toolInput - 工具输入参数
-   * @returns 工具执行结果 (字符串格式)
-   */
-  const executeMcpTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
-    const mcp = useMCPStore();
-    const tool = mcp.availableTools.find(t => t.name === toolName);
-    
-    if (!tool) {
-      return `错误: 工具 "${toolName}" 不存在`;
-    }
-
-    try {
-      // 调用后端 MCP 命令执行工具
-      const result = await invoke<any>("call_mcp_tool", {
-        toolName,
-        input: toolInput,
-      });
-
-      // 检查返回结果中的 success 标志
-      if (typeof result === 'object' && result !== null) {
-        const resultObj = result as Record<string, unknown>;
-        const anyRes = result as any;
-        
-        // 处理错误标志
-        if ('success' in resultObj) {
-          if (anyRes.success === false && anyRes.error) {
-            return `工具执行失败: ${anyRes.error}`;
-          }
-        }
-
-        // 提取结果字段
-        if ('result' in resultObj) {
-          return JSON.stringify(anyRes.result, null, 2);
-        }
-        
-        // 如果没有特定结果字段，返回整个响应
-        return JSON.stringify(anyRes, null, 2);
-      } else {
-        return String(result);
-      }
-    } catch (err) {
-      return `调用工具时出错: ${String(err)}`;
-    }
-  };
-
-  /**
-   * 处理助手消息中的 MCP 工具调用
-   * 从响应中解析工具调用指令并执行
-   * 
-   * @param assistantMessage - 助手消息对象
-   * @returns void
-   */
-  const handleMcpCalls = async (assistantMessage: Message): Promise<void> => {
-    const mcp = useMCPStore();
-    // 如果 MCP 未启用或没有可用工具，直接返回
-    if (!mcpEnabled.value || mcp.availableTools.length === 0) return;
-
-    // 简单的模式匹配来检测工具调用
-    // 格式: [使用工具: tool_name with input: {...}]
-    const toolCallPattern = /\[使用工具: ([\w_-]+) with input: ({[^}]+})\]/g;
-    const matches = Array.from(assistantMessage.content.matchAll(toolCallPattern));
-
-    if (matches.length === 0) return; // 未检测到工具调用
-
-    // 执行每个工具调用并收集结果
-    const toolResults: string[] = [];
-    for (const match of matches) {
-      const toolName = match[1];
-      try {
-        const toolInput = JSON.parse(match[2]) as Record<string, unknown>;
-        const result = await executeMcpTool(toolName, toolInput);
-        toolResults.push(`[工具 ${toolName} 结果]: ${result}`);
-      } catch (err) {
-        toolResults.push(`[工具 ${toolName} 错误]: ${String(err)}`);
-      }
-    }
-
-    // 如果执行了工具，将结果追加到助手消息
-    if (toolResults.length > 0) {
-      assistantMessage.content += "\n\n" + toolResults.join("\n");
-    }
-  };
-
-  /**
    * 发送消息 (核心函数)
    * 处理用户消息发送、LLM 调用、流式响应等完整流程
    *
@@ -617,8 +529,6 @@ export const useChatStore = defineStore("chat", () => {
       alert("API 密钥未加载，请重启应用或重新设置");
       return;
     }
-
-    const mcp = useMCPStore();
 
     // 初始化内容变量
     let enhancedContent = content;
@@ -737,31 +647,10 @@ export const useChatStore = defineStore("chat", () => {
         }
       }
 
-      // ============ MCP 系统提示 ============
-      if (mcpEnabled.value && mcp.availableTools.length > 0) {
-        const mcpSystemPrompt = buildMcpSystemPrompt(mcp.availableTools);
-        
-        // 如果已有系统消息，追加 MCP 信息
-        if (apiMessages.length > 0 && apiMessages[0].role === "system") {
-          apiMessages[0] = {
-            ...apiMessages[0],
-            content: apiMessages[0].content + "\n\n" + mcpSystemPrompt,
-          };
-        } else {
-          // 在开头插入新的系统消息
-          apiMessages.unshift({
-            id: crypto.randomUUID(),
-            role: "system",
-            content: mcpSystemPrompt,
-            timestamp: Date.now(),
-            error: undefined,
-            images: [],
-            videos: [],
-          });
-        }
-      }
-
       // ============ 构建请求 payload ============
+      // MCP 工具不再以文本形式塞进 system prompt——后端会在 enableMcp 开启时
+      // 通过各 provider 的原生 tools 字段声明工具并执行多轮调用循环，前端
+      // 再注入一份 JSON 文本只会让每轮请求重复付一份 token。
       const requestPayload = {
         sessionId: currentSession.value.id,
         messages: apiMessages,
@@ -804,12 +693,6 @@ export const useChatStore = defineStore("chat", () => {
         console.error('[sendMessage] stream_message error:', e);
         if (import.meta.env.DEV) console.error('stream_message error', e);
         throw e;
-      }
-
-      // ============ 处理 MCP 工具调用 ============
-      const assistantMsgRef = currentSession.value.messages[currentSession.value.messages.length - 1];
-      if (assistantMsgRef.role === "assistant") {
-        await handleMcpCalls(assistantMsgRef);
       }
 
       // ============ 更新会话标题 ============
@@ -874,55 +757,6 @@ export const useChatStore = defineStore("chat", () => {
     
     contextParts.push("\n---");
     return contextParts.join("\n");
-  };
-
-  /**
-   * 构建 MCP 工具定义
-   * 将可用工具格式化为 JSON 字符串，用于系统提示
-   * 
-   * @param availableTools - 可用的 MCP 工具列表
-   * @returns 格式化的工具定义字符串
-   */
-  const buildMcpToolDefinitions = (availableTools: MCPTool[]): string => {
-    if (availableTools.length === 0) return "";
-
-    const toolsJson = availableTools.map((tool) => ({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.input_schema,
-      },
-    }));
-
-    const toolDefString = JSON.stringify(toolsJson, null, 2);
-    
-    return `## 可用工具
-
-你可以使用以下工具来完成任务。每个工具都有特定的功能和参数要求。
-
-\`\`\`json
-${toolDefString}
-\`\`\`
-
-使用工具时，你可以调用它们来获取信息或执行操作。`;
-  };
-
-  /**
-   * 构建 MCP 系统提示
-   * 包含工具定义和如何使用工具的说明
-   * 
-   * @param availableTools - 可用的 MCP 工具列表
-   * @returns 系统提示字符串
-   */
-  const buildMcpSystemPrompt = (availableTools: MCPTool[]): string => {
-    const toolDefs = buildMcpToolDefinitions(availableTools);
-    
-    return `你是一个有能力的AI助手，可以使用各种工具来帮助用户完成任务。
-
-${toolDefs}
-
-当你需要使用工具时，请清楚地说明你打算使用哪个工具以及为什么。你可以组合多个工具来解决更复杂的问题。`;
   };
 
   /**
@@ -1051,7 +885,6 @@ ${toolDefs}
     toggleRag,               // 切换 RAG
     selectKnowledgeBaseForRag,  // 选择知识库
     classifyError,           // 错误分类
-    executeMcpTool,         // 执行 MCP 工具
     stopStream,              // 停止流式输出
   };
 });
