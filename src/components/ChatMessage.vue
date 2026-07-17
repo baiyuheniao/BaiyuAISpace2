@@ -191,6 +191,18 @@ const handleCopy = async () => {
         class="message-body"
         :class="{ 'user-body': isUser }"
       >
+        <!-- 思考过程（思考型模型的 reasoning 流式增量；默认折叠，点击展开。
+             仅内存态展示，不写入正文、不入库，刷新后消失） -->
+        <details
+          v-if="message.thinking"
+          class="thinking-block"
+        >
+          <summary class="thinking-summary">
+            思考过程
+          </summary>
+          <pre class="thinking-content">{{ message.thinking }}</pre>
+        </details>
+
         <div
           ref="contentRef"
           class="markdown-content"
@@ -596,6 +608,40 @@ const handleCopy = async () => {
 
 .markdown-content :deep(tr:nth-child(even)) {
   background: $surface;
+}
+
+/* 思考过程折叠区 - 黑白灰 + 排版层次，与工具调用块同一视觉家族 */
+.thinking-block {
+  margin-bottom: 12px;
+  border: $border-faint;
+  background: $surface;
+}
+
+.thinking-summary {
+  padding: 6px 12px;
+  font-family: $font-mono;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: $ink-faint;
+  cursor: pointer;
+  user-select: none;
+  transition: color $duration $ease;
+
+  &:hover {
+    color: $ink;
+  }
+}
+
+.thinking-content {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: $border-faint;
+  font-size: 12px;
+  line-height: $leading-body;
+  color: $ink-soft;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .streaming-indicator {

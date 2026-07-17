@@ -37,6 +37,7 @@ export interface Message {
   content: string;               // 消息内容
   timestamp: number;              // 时间戳 (毫秒)
   streaming?: boolean;            // 是否正在流式输出
+  thinking?: string;              // 思考过程（思考型模型的 reasoning 增量累积，仅内存态、不入库）
   error?: string;                 // 错误信息 (如果有)
   files?: Array<{                // 附件文件列表
     name: string;                 // 文件名
@@ -79,6 +80,7 @@ interface StreamChunk {
   session_id: string;             // 所属会话 ID
   message_id: string;             // 消息 ID
   content: string;                // 增量内容
+  is_thinking?: boolean;          // 是否思考过程增量（归到 thinking 字段而非正文）
   done: boolean;                  // 是否完成
 }
 
@@ -289,10 +291,14 @@ export const useChatStore = defineStore("chat", () => {
         return;
       }
 
-      // 累加内容 (打字机效果)
-      lastMessage.content += chunk.content;
-      currentStreamContent.value = lastMessage.content;
-      console.log("[Stream] Updated content, length:", lastMessage.content.length);
+      // 累加内容 (打字机效果)。思考型模型的思考增量单独归到 thinking 字段，
+      // 由 ChatMessage.vue 的"思考过程"折叠区展示，不混入正文、也不入库
+      if (chunk.is_thinking) {
+        lastMessage.thinking = (lastMessage.thinking ?? "") + chunk.content;
+      } else {
+        lastMessage.content += chunk.content;
+        currentStreamContent.value = lastMessage.content;
+      }
     });
   };
 
@@ -313,7 +319,13 @@ export const useChatStore = defineStore("chat", () => {
       if (!currentSession.value) return;
       if (String(evt.session_id) !== String(currentSession.value.id)) return;
 
-      const message = currentSession.value.messages.find(m => m.id === evt.message_id);
+      // 后端在 stream_message 里自行生成 message_id，与前端占位 assistant
+      // 消息的 id 并不相同（文本流的 stream-chunk 监听器同样只按 session
+      // 匹配，所以文本不受影响）。按 id 找不到时回退到最后一条 assistant
+      // 消息——否则工具调用状态永远挂不上任何消息，工具明明执行了，界面
+      // 上却看不到"调用中/已完成"。
+      const message = currentSession.value.messages.find(m => m.id === evt.message_id)
+        ?? [...currentSession.value.messages].reverse().find(m => m.role === "assistant");
       if (!message) return;
 
       if (!message.toolCalls) {
@@ -656,7 +668,10 @@ export const useChatStore = defineStore("chat", () => {
         messages: apiMessages,
         provider: config.provider,
         model: config.model,
-        apiKey: config.apiKey,
+        // 持久化会剥掉 apiKey，重启后 keyring 里没有条目的配置（本地模型）读到
+        // 的是 undefined——必须兜底成空串，否则 invoke 参数反序列化直接报
+        // "missing field apiKey"。空串对后端是合法值（本地免鉴权/keyring 兜底）。
+        apiKey: config.apiKey ?? "",
         baseUrl: config.baseUrl,
         enableMcp: mcpEnabled.value,
         activeSkillIds: activeSkillIds.value,

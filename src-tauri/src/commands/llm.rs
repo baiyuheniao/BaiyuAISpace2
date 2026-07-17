@@ -107,7 +107,13 @@ pub struct SendMessageRequest {
     pub provider: String,
     /// 模型名称
     pub model: String,
-    /// API 密钥
+    /// API 密钥。必须有 default：settings 持久化时会把 apiKey 字段剥掉（密钥
+    /// 只进系统 keyring），重启后本地 provider 的配置在 keyring 里没有条目可
+    /// 回填，前端会发出不带 apiKey 的请求——没有 default 时 serde 直接以
+    /// "missing field `apiKey`" 拒收整个请求，本地模型重启后就全用不了。
+    /// 空串对本地 provider 本来就是合法值（不鉴权），对其他 provider 则会
+    /// 走 get_api_key 的 keyring 兜底查找。
+    #[serde(default)]
     pub api_key: String,
     /// API 基础 URL
     pub base_url: String,
@@ -162,6 +168,10 @@ pub struct StreamChunk {
     pub message_id: String,
     /// 增量内容
     pub content: String,
+    /// 是否为思考过程增量。思考型模型（DeepSeek R1 系、Ollama 上的 qwen3.5
+    /// 等）会把思考内容放在 reasoning_content/reasoning 字段流式返回，前端
+    /// 据此把这部分归到"思考过程"折叠区，而不是混进正文。
+    pub is_thinking: bool,
     /// 是否完成
     pub done: bool,
 }
@@ -876,6 +886,14 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
                             .get("text")
                             .and_then(|t| t.as_str())
                             .map(|s| StreamContent::Text(s.to_string())),
+                        // Extended Thinking 的思考增量。此前被静默丢弃——对
+                        // Anthropic 影响不大（思考后总会有 text_delta 正文），
+                        // 但既然前端有了思考过程展示区，一并转发保持一致。
+                        Some("thinking_delta") => delta
+                            .get("thinking")
+                            .and_then(|t| t.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| StreamContent::Thinking(s.to_string())),
                         Some("input_json_delta") => {
                             let fragment = delta
                                 .get("partial_json")
@@ -916,9 +934,14 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
             // OpenAI 格式
             if let Some(choices) = json["choices"].as_array() {
                 if let Some(first_choice) = choices.first() {
-                    if let Some(content) = first_choice["delta"]["content"].as_str() {
-                        return Some(StreamContent::Text(content.to_string()));
-                    } else if let Some(tool_calls) = first_choice["delta"]["tool_calls"].as_array() {
+                    let delta = &first_choice["delta"];
+
+                    // 必须先看 tool_calls、再看 content：Ollama 等实现会在携带
+                    // tool_calls 的 chunk 里同时带上 `"content": ""`（OpenAI 官方
+                    // 是 null）。如果先按 content 分支处理，空字符串照样命中
+                    // as_str()，同一个 chunk 里的 tool_calls 就被整个吞掉——
+                    // 表现为模型明明发起了工具调用，前端却毫无反应、收到空回复。
+                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
                         // OpenAI 是增量流式发送工具调用的：某个 `index` 的第一个
                         // delta 携带 `id` + `function.name`，之后同一个 `index`
                         // 的后续每个 delta 只携带 `function.arguments` 的一个片段
@@ -940,6 +963,26 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
                             return Some(StreamContent::ToolCallDeltas(deltas));
                         }
                     }
+
+                    if let Some(content) = delta["content"].as_str() {
+                        if !content.is_empty() {
+                            return Some(StreamContent::Text(content.to_string()));
+                        }
+                    }
+
+                    // 思考型模型的思考增量：DeepSeek/SiliconFlow 系用
+                    // reasoning_content，Ollama 用 reasoning。这类 chunk 的
+                    // content 恒为空串/null——丢弃它们的话，思考占比高的模型
+                    // （比如 Ollama 上的 qwen3.5）在用户看来就是等了半分钟
+                    // 收到一条空回复。单独作为思考过程转发，不混入正文。
+                    if let Some(reasoning) = delta["reasoning_content"]
+                        .as_str()
+                        .or_else(|| delta["reasoning"].as_str())
+                    {
+                        if !reasoning.is_empty() {
+                            return Some(StreamContent::Thinking(reasoning.to_string()));
+                        }
+                    }
                 }
             }
             None
@@ -950,6 +993,8 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
 #[derive(Debug)]
 enum StreamContent {
     Text(String),
+    /// 思考型模型的思考过程增量（reasoning/reasoning_content/thinking_delta）
+    Thinking(String),
     ToolCallDeltas(Vec<ToolCallDelta>),
     Done,
 }
@@ -1159,6 +1204,7 @@ pub async fn stream_message(
                     session_id: request.session_id.clone(),
                     message_id: message_id.clone(),
                     content: String::new(),
+                    is_thinking: false,
                     done: true,
                 });
                 return Ok(());
@@ -1186,6 +1232,16 @@ pub async fn stream_message(
                                             session_id: request.session_id.clone(),
                                             message_id: message_id.clone(),
                                             content: text,
+                                            is_thinking: false,
+                                            done: false,
+                                        });
+                                    }
+                                    StreamContent::Thinking(text) => {
+                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
+                                            session_id: request.session_id.clone(),
+                                            message_id: message_id.clone(),
+                                            content: text,
+                                            is_thinking: true,
                                             done: false,
                                         });
                                     }
@@ -1380,11 +1436,21 @@ async fn finalize_turn(
             )
             .await
             {
-                Ok(ContinuationResult::Text(live_reply)) => {
+                Ok(ContinuationResult::Text { text, thinking }) => {
+                    if let Some(th) = thinking.filter(|t| !t.is_empty()) {
+                        let _ = app_handle.emit("stream-chunk", StreamChunk {
+                            session_id: request.session_id.clone(),
+                            message_id: message_id.to_string(),
+                            content: th,
+                            is_thinking: true,
+                            done: false,
+                        });
+                    }
                     let _ = app_handle.emit("stream-chunk", StreamChunk {
                         session_id: request.session_id.clone(),
                         message_id: message_id.to_string(),
-                        content: live_reply,
+                        content: text,
+                        is_thinking: false,
                         done: false,
                     });
                     break;
@@ -1410,16 +1476,18 @@ async fn finalize_turn(
         session_id: request.session_id.clone(),
         message_id: message_id.to_string(),
         content: String::new(),
+        is_thinking: false,
         done: true,
     });
     Ok(())
 }
 
-/// 一次工具调用续写请求可能得到的两种结果：模型已经完成，给出了纯文本回复；
-/// 或者它还想继续调用工具（比如"列出允许访问的目录"接着"列出该目录下的
-/// 文件"——一轮里的两次调用）。`finalize_turn` 会对后一种情况循环处理。
+/// 一次工具调用续写请求可能得到的两种结果：模型已经完成，给出了文本回复
+/// （思考型模型可能附带甚至只有思考内容——qwen3.5 经 Ollama 续写时会把回答
+/// 埋进 reasoning、content 留空，这时思考内容是仅有的可展示产出）；或者它
+/// 还想继续调用工具。`finalize_turn` 会对后一种情况循环处理。
 enum ContinuationResult {
-    Text(String),
+    Text { text: String, thinking: Option<String> },
     ToolCalls(Vec<ToolCall>),
 }
 
@@ -1710,11 +1778,16 @@ async fn continue_after_tool_calls(
             if !tool_use_calls.is_empty() {
                 return Ok(ContinuationResult::ToolCalls(tool_use_calls));
             }
+            let thinking = blocks
+                .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking")))
+                .and_then(|b| b.get("thinking"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
             blocks
                 .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")))
                 .and_then(|b| b.get("text"))
                 .and_then(|t| t.as_str())
-                .map(|s| ContinuationResult::Text(s.to_string()))
+                .map(|s| ContinuationResult::Text { text: s.to_string(), thinking })
                 .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
         }
         "google" => {
@@ -1746,7 +1819,7 @@ async fn continue_after_tool_calls(
                 .and_then(|arr| arr.first())
                 .and_then(|part| part.get("text"))
                 .and_then(|t| t.as_str())
-                .map(|s| ContinuationResult::Text(s.to_string()))
+                .map(|s| ContinuationResult::Text { text: s.to_string(), thinking: None })
                 .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
         }
         _ => {
@@ -1766,11 +1839,24 @@ async fn continue_after_tool_calls(
                             return Ok(ContinuationResult::ToolCalls(calls));
                         }
                     }
-                    if let Some(text) = first_choice["message"]["content"].as_str() {
-                        return Ok(ContinuationResult::Text(text.to_string()));
+                    // 思考型模型的非流式响应同样把思考放在 reasoning_content
+                    // （DeepSeek 系）/ reasoning（Ollama）字段；qwen3.5 经
+                    // Ollama 续写时甚至会 content 留空、只给 reasoning——这时
+                    // 思考内容是仅有的可展示产出，不能连同空 content 一起丢弃。
+                    let thinking = first_choice["message"]["reasoning_content"]
+                        .as_str()
+                        .or_else(|| first_choice["message"]["reasoning"].as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let content_text = first_choice["message"]["content"].as_str().unwrap_or("");
+                    if !content_text.is_empty() || thinking.is_some() {
+                        return Ok(ContinuationResult::Text {
+                            text: content_text.to_string(),
+                            thinking,
+                        });
                     }
                     if let Some(text) = first_choice["text"].as_str() {
-                        return Ok(ContinuationResult::Text(text.to_string()));
+                        return Ok(ContinuationResult::Text { text: text.to_string(), thinking: None });
                     }
                 }
             }
@@ -2388,6 +2474,58 @@ mod provider_tool_calling_tests {
         assert_eq!(tools[0]["function"]["name"], "get_weather");
     }
 
+    #[test]
+    fn openai_tool_calls_not_swallowed_by_empty_content_field() {
+        // Ollama 在携带 tool_calls 的 chunk 里同时带 `"content": ""`（OpenAI
+        // 官方是 null）。曾经的解析顺序先命中 content 分支，空串直接 return，
+        // 同一 chunk 的 tool_calls 被整个吞掉。
+        let parsed = parse_sse_line(
+            "local",
+            r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","index":0,"type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}"#,
+        ).expect("tool_calls must be parsed even when content is an empty string");
+        match parsed {
+            StreamContent::ToolCallDeltas(deltas) => {
+                assert_eq!(deltas.len(), 1);
+                assert_eq!(deltas[0].id.as_deref(), Some("call_1"));
+                assert_eq!(deltas[0].name.as_deref(), Some("get_weather"));
+            }
+            other => panic!("expected ToolCallDeltas, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn openai_reasoning_deltas_parse_as_thinking() {
+        // Ollama 用 `reasoning`，DeepSeek/SiliconFlow 系用 `reasoning_content`；
+        // 两种拼写都必须归到 Thinking，而不是被当作空 content 丢弃。
+        let ollama = parse_sse_line(
+            "local",
+            r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning":"想一想"},"finish_reason":null}]}"#,
+        );
+        assert!(matches!(ollama, Some(StreamContent::Thinking(ref s)) if s == "想一想"));
+
+        let deepseek = parse_sse_line(
+            "deepseek",
+            r#"data: {"choices":[{"index":0,"delta":{"content":null,"reasoning_content":"hmm"},"finish_reason":null}]}"#,
+        );
+        assert!(matches!(deepseek, Some(StreamContent::Thinking(ref s)) if s == "hmm"));
+
+        // 普通正文 chunk 不受影响
+        let text = parse_sse_line(
+            "local",
+            r#"data: {"choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}"#,
+        );
+        assert!(matches!(text, Some(StreamContent::Text(ref s)) if s == "你好"));
+    }
+
+    #[test]
+    fn anthropic_thinking_delta_parses_as_thinking() {
+        let parsed = parse_sse_line(
+            "anthropic",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}"#,
+        );
+        assert!(matches!(parsed, Some(StreamContent::Thinking(ref s)) if s == "Let me think"));
+    }
+
     fn image_message() -> ChatMessage {
         ChatMessage {
             id: "1".into(), role: "user".into(), content: "what is this".into(),
@@ -2629,7 +2767,7 @@ mod provider_tool_calling_tests {
         ).await.expect("continuation call should succeed");
 
         match outcome {
-            ContinuationResult::Text(text) => assert_eq!(text, "3加4等于7。"),
+            ContinuationResult::Text { text, .. } => assert_eq!(text, "3加4等于7。"),
             ContinuationResult::ToolCalls(_) => panic!("expected final text, got another tool-call request"),
         }
 
@@ -2690,7 +2828,7 @@ mod provider_tool_calling_tests {
             .expect("round 1 continuation");
         let next_calls = match outcome {
             ContinuationResult::ToolCalls(calls) => calls,
-            ContinuationResult::Text(_) => panic!("expected another tool call round"),
+            ContinuationResult::Text { .. } => panic!("expected another tool call round"),
         };
         assert_eq!(next_calls[0].id, "call_2");
 
@@ -2699,7 +2837,7 @@ mod provider_tool_calling_tests {
             .await
             .expect("round 2 continuation");
         match outcome_2 {
-            ContinuationResult::Text(text) => assert_eq!(text, "3+4=7，再乘以5等于35。"),
+            ContinuationResult::Text { text, .. } => assert_eq!(text, "3+4=7，再乘以5等于35。"),
             ContinuationResult::ToolCalls(_) => panic!("expected final text after 2 rounds"),
         }
 
