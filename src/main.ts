@@ -16,6 +16,7 @@
 import { createApp, type Directive } from "vue";
 import { createPinia } from "pinia";
 import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
+import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import router from "./router";
 import App from "./App.vue";
 
@@ -62,6 +63,38 @@ const vReveal: Directive<HTMLElement, number | undefined> = {
     revealObserver.unobserve(el);
   },
 };
+
+/**
+ * 全局外链拦截
+ *
+ * WebView 里点击 <a href="https://..."> 默认会让整个应用窗口导航去外部网站
+ * ——界面被顶掉且没有任何返回手段，只能杀进程重开（聊天消息里模型输出的
+ * Markdown 链接实测踩过）。LocalDeployView/SettingsView 各自给自己的链接
+ * 调过 plugin-shell 的 open()，但 v-html 渲染出的 Markdown 链接没人管。
+ * 这里在捕获阶段统一拦截：凡是指向应用自身源之外的 http/https 链接，
+ * 一律阻止 WebView 导航、转交系统默认浏览器打开。
+ */
+document.addEventListener(
+  "click",
+  (event) => {
+    const anchor = (event.target as HTMLElement | null)?.closest?.("a[href]");
+    if (!anchor) return;
+    const href = anchor.getAttribute("href") ?? "";
+    if (!/^https?:\/\//i.test(href)) return;
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(href).host === location.host;
+    } catch {
+      return;
+    }
+    if (sameOrigin) return;
+    event.preventDefault();
+    openExternalUrl(href).catch((err) => {
+      console.error("Failed to open external url:", href, err);
+    });
+  },
+  { capture: true },
+);
 
 // 创建 Pinia 实例
 const pinia = createPinia();
