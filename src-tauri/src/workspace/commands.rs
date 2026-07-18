@@ -1136,14 +1136,24 @@ async fn process_agent_wake(
 
         match outcome {
             TurnOutcome::Text(text) => {
+                // 空文本不算交卷：思考型模型（qwen3.5 经 Ollama 等）可能把整轮
+                // 输出都写进 reasoning 字段、content 为空。此前这里照样标记
+                // produced_final_text 并收工，表现为"Agent 明明跑了，工作区却
+                // 一条消息都没有"的静默失败。现在改为跳出循环但不标记完成，
+                // 交给下面的无工具强制收尾轮再逼一次真答案。
+                if text.trim().is_empty() {
+                    log::warn!(
+                        "[workspace] Agent「{}」返回空文本回复（疑似思考型模型把输出埋进 reasoning 字段），转入强制收尾轮",
+                        agent.name
+                    );
+                    break;
+                }
                 log::info!(
                     "[workspace] Agent「{}」产出最终回复 ({} 字符)",
                     agent.name, text.len()
                 );
                 append_text_reply(&agent.provider, &mut native_messages, &text);
-                if !text.trim().is_empty() {
-                    send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
-                }
+                send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
                 produced_final_text = true;
                 break;
             }
