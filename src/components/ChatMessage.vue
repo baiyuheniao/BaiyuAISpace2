@@ -203,6 +203,20 @@ const handleCopy = async () => {
           <pre class="thinking-content">{{ message.thinking }}</pre>
         </details>
 
+        <!-- 图片附件缩略图（随消息入库的 base64 图片） -->
+        <div
+          v-if="message.images && message.images.length > 0"
+          class="message-images"
+        >
+          <img
+            v-for="(img, idx) in message.images"
+            :key="idx"
+            :src="`data:${img.mediaType};base64,${img.data}`"
+            class="message-image"
+            alt="图片附件"
+          >
+        </div>
+
         <div
           ref="contentRef"
           class="markdown-content"
@@ -608,6 +622,21 @@ const handleCopy = async () => {
 
 .markdown-content :deep(tr:nth-child(even)) {
   background: $surface;
+}
+
+/* 图片附件缩略图 - 直角、细边框，随黑白设计系统 */
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.message-image {
+  max-width: 240px;
+  max-height: 240px;
+  border: $border-faint;
+  display: block;
 }
 
 /* 思考过程折叠区 - 黑白灰 + 排版层次，与工具调用块同一视觉家族 */

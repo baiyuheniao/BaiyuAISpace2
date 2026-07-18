@@ -193,6 +193,15 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute("ALTER TABLE workspace_agents ADD COLUMN tool_whitelist TEXT NOT NULL DEFAULT '[]'", [])?;
     }
 
+    let message_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(workspace_messages)")?
+        .query_map([], |row| row.get(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !message_columns.contains(&"images".to_string()) {
+        conn.execute("ALTER TABLE workspace_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", [])?;
+    }
+
     log::info!("Workspace SQLite tables initialized");
     Ok(())
 }
@@ -558,14 +567,23 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceMessage> {
         to_agent_id: row.get(3)?,
         content: row.get(4)?,
         created_at: row.get(5)?,
+        images: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
     })
 }
 
 pub fn insert_message(conn: &Connection, msg: &WorkspaceMessage) -> Result<(), WorkspaceError> {
     conn.execute(
-        "INSERT INTO workspace_messages (id, workspace_id, from_agent_id, to_agent_id, content, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![msg.id, msg.workspace_id, msg.from_agent_id, msg.to_agent_id, msg.content, msg.created_at],
+        "INSERT INTO workspace_messages (id, workspace_id, from_agent_id, to_agent_id, content, created_at, images)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            msg.id,
+            msg.workspace_id,
+            msg.from_agent_id,
+            msg.to_agent_id,
+            msg.content,
+            msg.created_at,
+            serde_json::to_string(&msg.images).unwrap_or_else(|_| "[]".to_string())
+        ],
     )?;
     Ok(())
 }
@@ -573,7 +591,7 @@ pub fn insert_message(conn: &Connection, msg: &WorkspaceMessage) -> Result<(), W
 /// 一个工作组的全部消息，最早的在前——供前端渲染完整时间线用。
 pub fn list_messages(conn: &Connection, workspace_id: &str, limit: i64) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at
+        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at, images
          FROM workspace_messages WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![workspace_id, limit], row_to_message)?;
@@ -592,7 +610,7 @@ pub fn list_recent_messages_for_agent(
     limit: i64,
 ) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at
+        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at, images
          FROM workspace_messages
          WHERE workspace_id = ?1 AND (to_agent_id = ?2 OR to_agent_id = 'all' OR from_agent_id = ?2)
          ORDER BY created_at DESC LIMIT ?3",
@@ -849,6 +867,7 @@ mod tests {
                     to_agent_id: to.to_string(),
                     content: content.to_string(),
                     created_at: i as i64,
+                    images: vec![],
                 },
             )
             .unwrap();
@@ -871,7 +890,7 @@ mod tests {
         insert_agent(&conn, &agent).unwrap();
         insert_message(
             &conn,
-            &WorkspaceMessage { id: "m1".into(), workspace_id: "ws-1".into(), from_agent_id: "user".into(), to_agent_id: agent.id.clone(), content: "hi".into(), created_at: 0 },
+            &WorkspaceMessage { id: "m1".into(), workspace_id: "ws-1".into(), from_agent_id: "user".into(), to_agent_id: agent.id.clone(), content: "hi".into(), created_at: 0, images: vec![] },
         )
         .unwrap();
         insert_log(

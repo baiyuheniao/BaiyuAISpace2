@@ -237,6 +237,10 @@ pub struct WorkspaceMessage {
     pub from_agent_id: String,
     pub to_agent_id: String,
     pub content: String,
+    /// 图片附件（base64，不含 data URL 前缀）。目前只有用户发出的消息会带；
+    /// Agent 唤醒回放时会把它们送进支持视觉的模型。
+    #[serde(default)]
+    pub images: Vec<crate::commands::llm::ImageAttachment>,
     pub created_at: i64,
 }
 

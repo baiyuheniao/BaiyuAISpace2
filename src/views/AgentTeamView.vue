@@ -23,7 +23,7 @@ import {
 } from "naive-ui";
 import {
   Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline,
-  PauseOutline, PlayOutline, RefreshOutline, DocumentTextOutline,
+  PauseOutline, PlayOutline, RefreshOutline, DocumentTextOutline, ImageOutline,
 } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
@@ -420,15 +420,48 @@ const agentMessages = computed(() => {
       role: (m.fromAgentId === id ? "assistant" : "user") as "assistant" | "user",
       content: m.fromAgentId === id || m.fromAgentId === "user" ? m.content : `[来自 ${workspace.agentName(m.fromAgentId)}] ${m.content}`,
       timestamp: m.createdAt,
+      images: m.images,
     }));
 });
 
+// 待发送的图片附件（base64；发送给支持视觉的模型，并随消息入库）
+const attachedMsgImages = ref<{ name: string; data: string; mediaType: string }[]>([]);
+const msgImageInputRef = ref<HTMLInputElement | null>(null);
+
+const handleMsgImagesSelected = (event: Event) => {
+  const files = (event.target as HTMLInputElement).files;
+  if (!files) return;
+  for (const file of Array.from(files)) {
+    if (!file.type.startsWith("image/")) continue;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      const commaIdx = dataUrl.indexOf(",");
+      if (commaIdx === -1) return;
+      attachedMsgImages.value.push({
+        name: file.name,
+        data: dataUrl.slice(commaIdx + 1),
+        mediaType: dataUrl.slice(5, dataUrl.indexOf(";")) || file.type,
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+  (event.target as HTMLInputElement).value = "";
+};
+
 const handleSendMessage = async () => {
   const content = newMessageContent.value.trim();
-  if (!selectedAgentId.value || !content) return;
+  if (!selectedAgentId.value || (!content && attachedMsgImages.value.length === 0)) return;
   try {
-    await workspace.sendUserMessage(selectedAgentId.value, content);
+    await workspace.sendUserMessage(
+      selectedAgentId.value,
+      content,
+      attachedMsgImages.value.length > 0
+        ? attachedMsgImages.value.map((i) => ({ data: i.data, mediaType: i.mediaType }))
+        : undefined
+    );
     newMessageContent.value = "";
+    attachedMsgImages.value = [];
   } catch (e) {
     message.error(`发送失败: ${e}`);
   }
@@ -1266,7 +1299,37 @@ onBeforeUnmount(() => {
                   「{{ selectedAgent.name }}」正在处理…
                 </p>
               </div>
+              <div
+                v-if="attachedMsgImages.length > 0"
+                class="attached-msg-images"
+              >
+                <n-tag
+                  v-for="(img, idx) in attachedMsgImages"
+                  :key="idx"
+                  closable
+                  size="small"
+                  @close="attachedMsgImages.splice(idx, 1)"
+                >
+                  {{ img.name }}
+                </n-tag>
+              </div>
               <div class="message-input-row">
+                <input
+                  ref="msgImageInputRef"
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  style="display: none"
+                  @change="handleMsgImagesSelected"
+                >
+                <n-button
+                  quaternary
+                  @click="msgImageInputRef?.click()"
+                >
+                  <template #icon>
+                    <n-icon><ImageOutline /></n-icon>
+                  </template>
+                </n-button>
                 <n-input
                   v-model:value="newMessageContent"
                   type="textarea"
@@ -2091,6 +2154,13 @@ onBeforeUnmount(() => {
   flex: 1;
   overflow-y: auto;
   margin-bottom: 12px;
+}
+
+.attached-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
 }
 
 .message-input-row {

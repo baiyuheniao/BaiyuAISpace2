@@ -123,6 +123,8 @@ export interface WorkspaceMessage {
   fromAgentId: string;
   toAgentId: string;
   content: string;
+  /** 图片附件（base64，不含 data URL 前缀）；目前只有用户消息会带 */
+  images?: { data: string; mediaType: string }[];
   createdAt: number;
 }
 
@@ -451,9 +453,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (agent) agent.deletedAt = Date.now();
   };
 
-  const sendUserMessage = async (toAgentId: string, content: string) => {
+  const sendUserMessage = async (
+    toAgentId: string,
+    content: string,
+    images?: { data: string; mediaType: string }[]
+  ) => {
     if (!currentWorkspaceId.value) return;
-    await invoke("workspace_send_user_message", { workspaceId: currentWorkspaceId.value, toAgentId, content });
+    await invoke("workspace_send_user_message", {
+      workspaceId: currentWorkspaceId.value,
+      toAgentId,
+      content,
+      images: images ?? null,
+    });
   };
 
   const resolveProposal = async (proposalId: string, approved: boolean, request?: CreateAgentRequest) => {

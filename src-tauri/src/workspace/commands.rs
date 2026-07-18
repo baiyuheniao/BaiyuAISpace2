@@ -7,7 +7,7 @@ use super::meeting::{self, MeetingCheckIn, MeetingConfig, MeetingHandle, Meeting
 use super::types::*;
 use crate::commands::llm::{
     append_text_reply, append_tool_round, build_native_messages, build_skill_context, run_turn,
-    ChatMessage, PendingToolCall, TurnOutcome,
+    ChatMessage, ImageAttachment, PendingToolCall, TurnOutcome,
 };
 use crate::commands::mcp::{call_mcp_tool, get_all_mcp_tools, MCPTool};
 use crate::db::DbState;
@@ -273,12 +273,14 @@ pub async fn workspace_send_user_message(
     workspace_id: String,
     to_agent_id: String,
     content: String,
+    images: Option<Vec<ImageAttachment>>,
     app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
-    if content.trim().is_empty() {
+    let images = images.unwrap_or_default();
+    if content.trim().is_empty() && images.is_empty() {
         return Err(WorkspaceError::InvalidConfig("消息内容不能为空".to_string()));
     }
-    send_workspace_message(&app_handle, &workspace_id, "user", &to_agent_id, &content).await;
+    send_workspace_message_impl(&app_handle, &workspace_id, "user", &to_agent_id, &content, images, true).await;
 
     // Agent 后台循环只存在于内存中（见 `start_agent_loop`），应用重新启动后
     // 不会自动恢复。如果目标 Agent 的 handle 不存在，上面 `send_workspace_message`
@@ -650,7 +652,7 @@ pub async fn send_workspace_message(
     to_agent_id: &str,
     content: &str,
 ) {
-    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, true).await
+    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, vec![], true).await
 }
 
 /// 静默变体：照常落库 + 发前端事件，但不唤醒任何 Agent。会议发言用它存档——
@@ -663,7 +665,7 @@ pub async fn send_workspace_message_silent(
     to_agent_id: &str,
     content: &str,
 ) {
-    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, false).await
+    send_workspace_message_impl(app_handle, workspace_id, from_agent_id, to_agent_id, content, vec![], false).await
 }
 
 async fn send_workspace_message_impl(
@@ -672,6 +674,7 @@ async fn send_workspace_message_impl(
     from_agent_id: &str,
     to_agent_id: &str,
     content: &str,
+    images: Vec<ImageAttachment>,
     wake: bool,
 ) {
     log::info!(
@@ -686,6 +689,7 @@ async fn send_workspace_message_impl(
         from_agent_id: from_agent_id.to_string(),
         to_agent_id: to_agent_id.to_string(),
         content: content.to_string(),
+        images,
         created_at: Utc::now().timestamp_millis(),
     };
 
@@ -1424,7 +1428,9 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
                 content,
                 timestamp: m.created_at,
                 error: None,
-                images: vec![],
+                // 用户消息可能带图片附件，回放给支持视觉的模型
+                // （build_native_messages 只对 user 角色构造多模态块）
+                images: m.images,
                 videos: vec![],
             }
         })

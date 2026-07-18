@@ -1906,25 +1906,64 @@ pub fn build_native_messages(provider: &str, messages: &[ChatMessage]) -> Vec<se
             .iter()
             .filter(|m| m.role != "system")
             .map(|m| {
-                serde_json::json!({
-                    "role": if m.role == "assistant" { "assistant" } else { "user" },
-                    "content": m.content
-                })
+                let role = if m.role == "assistant" { "assistant" } else { "user" };
+                if role == "user" && !m.images.is_empty() {
+                    // 与 build_stream_request_body 同款的图片块形状
+                    let mut blocks: Vec<serde_json::Value> = m.images.iter().map(|img| serde_json::json!({
+                        "type": "image",
+                        "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
+                    })).collect();
+                    if !m.content.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    serde_json::json!({ "role": role, "content": blocks })
+                } else {
+                    serde_json::json!({ "role": role, "content": m.content })
+                }
             })
             .collect(),
         "google" => messages
             .iter()
             .filter(|m| m.role != "system")
             .map(|m| {
-                serde_json::json!({
-                    "role": if m.role == "assistant" { "model" } else { "user" },
-                    "parts": [{ "text": m.content }]
-                })
+                let role = if m.role == "assistant" { "model" } else { "user" };
+                if role == "user" && !m.images.is_empty() {
+                    let mut parts: Vec<serde_json::Value> = vec![];
+                    if !m.content.is_empty() {
+                        parts.push(serde_json::json!({"text": m.content}));
+                    }
+                    for img in &m.images {
+                        parts.push(serde_json::json!({
+                            "inline_data": {"mime_type": img.media_type, "data": img.data}
+                        }));
+                    }
+                    serde_json::json!({ "role": "user", "parts": parts })
+                } else {
+                    serde_json::json!({ "role": role, "parts": [{ "text": m.content }] })
+                }
             })
             .collect(),
         _ => messages
             .iter()
-            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .map(|m| {
+                if m.role == "user" && !m.images.is_empty() {
+                    // OpenAI 兼容的图片格式：image_url 内嵌 data URL
+                    let mut content: Vec<serde_json::Value> = vec![];
+                    if !m.content.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    for img in &m.images {
+                        let data_uri = format!("data:{};base64,{}", img.media_type, img.data);
+                        content.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {"url": data_uri}
+                        }));
+                    }
+                    serde_json::json!({ "role": m.role, "content": content })
+                } else {
+                    serde_json::json!({ "role": m.role, "content": m.content })
+                }
+            })
             .collect(),
     }
 }
