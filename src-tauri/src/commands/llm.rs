@@ -525,6 +525,16 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 body["thinking_budget"] = serde_json::json!(8000);
             }
 
+            // 本地 OpenAI 兼容服务：思考开关关闭时，显式发送 reasoning_effort=none
+            // 关闭思考。此前这个开关对 local 是摆设——qwen3.5 这类默认思考的模型
+            // 在 LM Studio 上每条消息都要先想几百上千个 token 才吐正文（实测
+            // chat_template_kwargs 和 /no_think 都关不掉，只有 reasoning_effort
+            // 有效）。范围只限自托管服务：Ollama 等不认识该字段的会静默忽略；
+            // 不发给远端商业 provider（Mistral 等严格实现会拒收未知字段）。
+            if !enable_thinking && matches!(provider, "local" | "custom" | "openclaw") {
+                body["reasoning_effort"] = serde_json::json!("none");
+            }
+
             // 如果有可用工具就加进去
             if !tools.is_empty() {
                 let tools_json: Vec<_> = tools
@@ -2114,6 +2124,24 @@ pub async fn run_turn(
                 return Ok(TurnOutcome::ToolCalls(calls));
             }
             let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // 思考型模型（DeepSeek 系 reasoning_content / Ollama reasoning）可能
+            // content 留空、全部输出都在思考字段里。把这种情况在日志里点名——
+            // 调用方（Workspace 唤醒循环）会把空文本视为"未交卷"转入强制收尾，
+            // 但没有这行日志，排查时只能看到一次莫名其妙的空回复。
+            if text.trim().is_empty() {
+                let reasoning_len = message
+                    .get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| message.get("reasoning").and_then(|v| v.as_str()))
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                if reasoning_len > 0 {
+                    log::warn!(
+                        "[LLM] run_turn 返回空 content，但携带 {} 字符的 reasoning——思考型模型把输出埋进了思考字段",
+                        reasoning_len
+                    );
+                }
+            }
             Ok(TurnOutcome::Text(text))
         }
     }
@@ -2246,6 +2274,11 @@ fn build_run_turn_body(
             if enable_thinking && provider == "siliconflow" {
                 b["enable_thinking"] = serde_json::json!(true);
                 b["thinking_budget"] = serde_json::json!(8000);
+            }
+            // 与流式路径同款：本地服务在思考开关关闭时显式关掉思考，
+            // Workspace Agent 也能享受到（不开思考的 Agent 不再白等思考）
+            if !enable_thinking && matches!(provider, "local" | "custom" | "openclaw") {
+                b["reasoning_effort"] = serde_json::json!("none");
             }
             if !tools.is_empty() {
                 let tools_json: Vec<_> = tools
@@ -2524,6 +2557,35 @@ mod provider_tool_calling_tests {
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}"#,
         );
         assert!(matches!(parsed, Some(StreamContent::Thinking(ref s)) if s == "Let me think"));
+    }
+
+    #[test]
+    fn local_providers_get_reasoning_effort_none_only_when_thinking_disabled() {
+        let messages = vec![ChatMessage {
+            id: "1".into(), role: "user".into(), content: "hi".into(),
+            timestamp: 0, error: None, images: vec![], videos: vec![],
+        }];
+
+        // 本地服务 + 思考关闭：显式关思考（LM Studio 上 qwen3.5 这类默认思考
+        // 的模型只有 reasoning_effort 能关掉，chat_template_kwargs 和 /no_think
+        // 实测均无效）
+        let body = build_stream_request_body("local", "qwen3.5-9b", &messages, &[], false, None);
+        assert_eq!(body["reasoning_effort"], "none");
+
+        // 本地服务 + 思考开启：不干预，让模型按默认思考
+        let body = build_stream_request_body("local", "qwen3.5-9b", &messages, &[], true, None);
+        assert!(body.get("reasoning_effort").is_none());
+
+        // 远端商业 provider 一律不发该字段（Mistral 等严格实现会拒收未知字段）
+        let body = build_stream_request_body("openai", "gpt-4o", &messages, &[], false, None);
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Workspace Agent 的非流式路径同款
+        let native = build_native_messages("local", &messages);
+        let body = build_run_turn_body("local", "qwen3.5-9b", None, &native, &[], None, false);
+        assert_eq!(body["reasoning_effort"], "none");
+        let body = build_run_turn_body("local", "qwen3.5-9b", None, &native, &[], None, true);
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     fn image_message() -> ChatMessage {
