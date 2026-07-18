@@ -121,6 +121,7 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   ragRerankTopN: null,
   requireToolApproval: true,
   enableThinking: false,
+  maxToolRounds: 20,
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
 
@@ -213,6 +214,8 @@ const openEditAgentModal = (agent: WorkspaceAgent) => {
     ragRerankTopN: agent.ragRerankTopN,
     requireToolApproval: agent.requireToolApproval,
     enableThinking: agent.enableThinking,
+    // 旧数据可能没有这个字段（迁移默认 20），兜底防 undefined
+    maxToolRounds: agent.maxToolRounds ?? 20,
   };
   showEditAgentModal.value = true;
 };
@@ -656,6 +659,14 @@ const handleResolveSleep = async (requestId: string, approved: boolean) => {
   }
 };
 
+const handleResolveRounds = async (requestId: string, approved: boolean) => {
+  try {
+    await workspace.resolveRoundsRequest(requestId, approved);
+  } catch (e) {
+    message.error(`处理失败: ${e}`);
+  }
+};
+
 const answerDrafts = ref<Record<string, string>>({});
 const handleAnswer = async (questionId: string) => {
   const answer = answerDrafts.value[questionId]?.trim();
@@ -765,7 +776,7 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <div
-        v-if="workspace.proposals.length || workspace.sleepRequests.length || workspace.questions.length || workspace.toolApprovals.length"
+        v-if="workspace.proposals.length || workspace.sleepRequests.length || workspace.roundsRequests.length || workspace.questions.length || workspace.toolApprovals.length"
         class="pending-section"
       >
         <n-card
@@ -898,6 +909,29 @@ onBeforeUnmount(() => {
               @click="handleResolveSleep(r.requestId, true)"
             >
               批准休眠
+            </n-button>
+          </n-space>
+        </n-card>
+
+        <n-card
+          v-for="rr in workspace.roundsRequests"
+          :key="rr.requestId"
+          class="pending-card"
+          :title="`${rr.agentName} 申请追加 ${rr.rounds} 轮工具调用`"
+        >
+          <p class="pending-countdown">
+            {{ pendingCountdown(rr.createdAt) }}
+          </p>
+          <p>理由：{{ rr.reason || "未说明" }}（仅对该 Agent 本次唤醒有效，主 Agent 也可代为审批）</p>
+          <n-space justify="end">
+            <n-button @click="handleResolveRounds(rr.requestId, false)">
+              拒绝
+            </n-button>
+            <n-button
+              type="primary"
+              @click="handleResolveRounds(rr.requestId, true)"
+            >
+              批准追加
             </n-button>
           </n-space>
         </n-card>
@@ -1392,6 +1426,23 @@ onBeforeUnmount(() => {
             </n-text>
           </n-space>
         </n-form-item>
+        <n-form-item label="单次唤醒工具轮上限">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="agentForm.maxToolRounds"
+              :min="1"
+              :max="200"
+              placeholder="默认 20"
+              style="width: 120px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              一次唤醒最多执行多少轮工具调用；需要大量抓取/查询的 Agent 可调高。配额用完会强制它基于已有结果交卷
+            </n-text>
+          </n-space>
+        </n-form-item>
         <n-form-item
           v-if="mcp.servers.length > 0"
           label="MCP 工具"
@@ -1561,6 +1612,23 @@ onBeforeUnmount(() => {
               style="font-size: 12px"
             >
               开启后模型会先深度思考再回复，更费时间和 token，复杂任务再开
+            </n-text>
+          </n-space>
+        </n-form-item>
+        <n-form-item label="单次唤醒工具轮上限">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="editAgentForm.maxToolRounds"
+              :min="1"
+              :max="200"
+              placeholder="默认 20"
+              style="width: 120px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              一次唤醒最多执行多少轮工具调用；需要大量抓取/查询的 Agent 可调高。配额用完会强制它基于已有结果交卷
             </n-text>
           </n-space>
         </n-form-item>

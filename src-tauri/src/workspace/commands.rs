@@ -26,8 +26,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const PROPOSAL_TIMEOUT_SECS: u64 = 600;
-const MAX_ROUNDS_PER_WAKE: u32 = 8;
-/// 会议轮次（屏障式签到）不计入 `MAX_ROUNDS_PER_WAKE`，否则长会议会被正常
+// 单次唤醒的工具轮上限原是写死的常量 8，现改为每个 Agent 可配
+// （`WorkspaceAgent::max_tool_rounds`，默认 20，见 types.rs）。
+/// 会议轮次（屏障式签到）不计入 Agent 的工具轮上限，否则长会议会被正常
 /// 工具轮上限拦腰截断；这个总轮数是防失控的兜底保险丝。
 const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
 const MAX_HISTORY_MESSAGES: i64 = 40;
@@ -67,6 +68,14 @@ pub struct PendingProposals(pub Arc<Mutex<HashMap<String, oneshot::Sender<Propos
 /// 生效，因为把这条记录从 map 里摘掉这个动作本身就等于拿到了处理权。
 #[derive(Default)]
 pub struct PendingSleepRequests(pub Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
+
+/// 等待裁决的"追加工具轮数"申请，键为 request_id。子 Agent 在本次唤醒的
+/// 工具轮配额不够用时通过 `workspace_request_more_rounds` 发起申请并阻塞等待；
+/// 主 Agent 用 `workspace_approve_more_rounds`/`workspace_reject_more_rounds`
+/// 裁决，用户也可以通过 `workspace_resolve_rounds_request` 越权处理——谁先
+/// 摘走 sender，谁的决定生效。超时/取消一律视为拒绝（申请方走强制收尾）。
+#[derive(Default)]
+pub struct PendingRoundsRequests(pub Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
 
 /// 一个待处理的 `workspace_asks` 问题，key 是生成的 question id。由用户通过
 /// `workspace_resolve_question` 回答来解决。
@@ -373,6 +382,28 @@ pub async fn workspace_resolve_sleep_request(
     let Some(sender) = sender else {
         mark_pending_event_resolved(&app_handle, &request_id).await;
         return Err(WorkspaceError::NotFound(format!("休眠请求 {} 已过期或已被处理", request_id)));
+    };
+    let _ = sender.send(approved);
+    mark_pending_event_resolved(&app_handle, &request_id).await;
+    Ok(())
+}
+
+/// 用户对"追加工具轮数"申请的越权裁决——与休眠申请同款规则：主 Agent 的
+/// 审批工具和这里谁先摘走 sender，谁的决定生效。
+#[tauri::command]
+pub async fn workspace_resolve_rounds_request(
+    request_id: String,
+    approved: bool,
+    pending: State<'_, PendingRoundsRequests>,
+    app_handle: AppHandle,
+) -> Result<(), WorkspaceError> {
+    let sender = {
+        let mut map = pending.0.lock().unwrap();
+        map.remove(&request_id)
+    };
+    let Some(sender) = sender else {
+        mark_pending_event_resolved(&app_handle, &request_id).await;
+        return Err(WorkspaceError::NotFound(format!("轮数申请 {} 已过期或已被处理", request_id)));
     };
     let _ = sender.send(approved);
     mark_pending_event_resolved(&app_handle, &request_id).await;
@@ -831,6 +862,7 @@ async fn spawn_agent_internal(
             scratchpad: String::new(),
             require_tool_approval: request.require_tool_approval,
             enable_thinking: request.enable_thinking,
+            max_tool_rounds: request.max_tool_rounds.max(1),
             deleted_at: None,
             created_at: now,
             updated_at: now,
@@ -1072,11 +1104,14 @@ async fn process_agent_wake(
     // 配额，让屏障式会议能开满自己的发言上限；MAX_TOTAL_ROUNDS_PER_WAKE 兜底。
     let mut counted_rounds: u32 = 0;
     let mut total_rounds: u32 = 0;
+    // 每 Agent 可配的工具轮上限；老数据/异常值兜底到至少 1 轮。mut：获批的
+    // 轮数扩容申请（workspace_request_more_rounds）会在本次唤醒内当场加额
+    let mut max_tool_rounds = agent.max_tool_rounds.max(1) as u32;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        if counted_rounds >= MAX_ROUNDS_PER_WAKE || total_rounds >= MAX_TOTAL_ROUNDS_PER_WAKE {
+        if counted_rounds >= max_tool_rounds || total_rounds >= MAX_TOTAL_ROUNDS_PER_WAKE {
             break;
         }
         total_rounds += 1;
@@ -1136,14 +1171,55 @@ async fn process_agent_wake(
                     );
                     results.push(result);
                 }
-                let meeting_round = calls
+                // 获批的轮数扩容当场生效：提高本次唤醒的剩余配额
+                for (call, result) in calls.iter().zip(results.iter()) {
+                    if call.name == "workspace_request_more_rounds" {
+                        if let Some(extra) = result.get("extra_rounds").and_then(|v| v.as_u64()) {
+                            max_tool_rounds += extra as u32;
+                            log::info!(
+                                "[workspace] Agent「{}」获批追加 {} 轮工具调用，本次唤醒上限提升至 {}",
+                                agent.name, extra, max_tool_rounds
+                            );
+                        }
+                    }
+                }
+                // 会议签到轮与轮数申请轮不占普通工具轮配额——申请扩容这个
+                // 动作本身如果还要烧一轮配额，临门一脚的申请就永远发不出去
+                let exempt_round = calls
                     .iter()
-                    .all(|c| matches!(c.name.as_str(), "workspace_meeting" | "workspace_meeting_checkin"))
+                    .all(|c| matches!(
+                        c.name.as_str(),
+                        "workspace_meeting" | "workspace_meeting_checkin" | "workspace_request_more_rounds"
+                    ))
                     && results.iter().all(|r| r.get("error").is_none());
-                if !meeting_round {
+                if !exempt_round {
                     counted_rounds += 1;
                 }
                 append_tool_round(&agent.provider, &mut native_messages, &calls, &results);
+
+                // 配额将尽提醒：模型自己感知不到还剩几轮，没有这个提示，
+                // workspace_request_more_rounds 工具就永远不会在最需要的时刻
+                // 被想起。只在"恰好还剩 1 轮"时插入——获批扩容后上限变大，
+                // 下次逼近新上限时会再触发一次，语义正好。
+                if counted_rounds + 1 == max_tool_rounds {
+                    let hint = if agent.role == AgentRole::Sub {
+                        "【系统】提醒：你本次唤醒的工具调用轮数配额只剩最后 1 轮。若任务尚未完成且确有必要，\
+                         可调用 workspace_request_more_rounds 向主 Agent 申请追加轮数（申请本身不消耗配额）；\
+                         否则请利用最后一轮后直接给出最终回复。"
+                    } else {
+                        "【系统】提醒：你本次唤醒的工具调用轮数配额只剩最后 1 轮，请尽快基于已有信息收尾并给出最终回复。"
+                    };
+                    let warn = ChatMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: "user".to_string(),
+                        content: hint.to_string(),
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                        error: None,
+                        images: vec![],
+                        videos: vec![],
+                    };
+                    native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&warn)));
+                }
             }
         }
     }
@@ -1507,7 +1583,8 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
                     "name": { "type": "string", "description": "新 Agent 的名字" },
                     "provider": { "type": "string", "description": "openai / anthropic / google 等" },
                     "model": { "type": "string", "description": "模型名称" },
-                    "system_prompt": { "type": "string", "description": "这个新 Agent 的职责说明/系统提示词" }
+                    "system_prompt": { "type": "string", "description": "这个新 Agent 的职责说明/系统提示词" },
+                    "max_tool_rounds": { "type": "integer", "description": "该 Agent 单次唤醒最多可执行的工具调用轮数，不填默认 20；需要大量抓取/查询的任务可适当调高" }
                 },
                 "required": ["name", "provider", "model", "system_prompt"]
             }),
@@ -1528,7 +1605,41 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
                 }),
             });
         }
+        for (name, verb) in [("workspace_approve_more_rounds", "批准"), ("workspace_reject_more_rounds", "拒绝")] {
+            tools.push(MCPTool {
+                server_id: "workspace".to_string(),
+                server_name: "workspace".to_string(),
+                name: name.to_string(),
+                description: format!(
+                    "{}一个子 Agent 追加工具调用轮数的申请。request_id 填该子 Agent 申请时系统消息里给出的请求 id。\
+                     批准前评估它的理由是否充分、追加量是否合理（会产生额外的 API 消耗）。",
+                    verb
+                ),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "request_id": { "type": "string", "description": "轮数申请的 id" } },
+                    "required": ["request_id"]
+                }),
+            });
+        }
     } else {
+        tools.push(MCPTool {
+            server_id: "workspace".to_string(),
+            server_name: "workspace".to_string(),
+            name: "workspace_request_more_rounds".to_string(),
+            description: "当本次唤醒的工具调用轮数配额不足以完成当前任务时，向主 Agent 申请追加轮数。\
+                需说明理由；获批后追加的轮数只对本次唤醒有效。不要滥用——申请会打断你的工作等待审批，\
+                且可能被拒绝。"
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "rounds": { "type": "integer", "description": "申请追加的工具调用轮数（1-50）" },
+                    "reason": { "type": "string", "description": "为什么需要追加，以及大概要用来做什么" }
+                },
+                "required": ["rounds", "reason"]
+            }),
+        });
         tools.push(MCPTool {
             server_id: "workspace".to_string(),
             server_name: "workspace".to_string(),
@@ -1629,6 +1740,12 @@ async fn dispatch_tool_call(
                 rag_rerank_top_n: None,
                 require_tool_approval: default_require_tool_approval(),
                 enable_thinking: false,
+                max_tool_rounds: call
+                    .arguments
+                    .get("max_tool_rounds")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| (v as i32).max(1))
+                    .unwrap_or_else(default_max_tool_rounds),
             };
 
             let pending = app_handle.state::<PendingProposals>();
@@ -1669,6 +1786,59 @@ async fn dispatch_tool_call(
                     serde_json::json!({ "status": "ok" })
                 }
                 None => serde_json::json!({ "error": format!("休眠请求 {} 不存在或已被处理/超时", request_id) }),
+            }
+        }
+        "workspace_request_more_rounds" => {
+            if agent.role == AgentRole::Main {
+                return serde_json::json!({
+                    "error": "主 Agent 的工具轮上限由用户在 Agent 配置里调整，不走申请流程"
+                });
+            }
+            let rounds = call.arguments.get("rounds").and_then(|v| v.as_i64()).unwrap_or(0);
+            if rounds < 1 {
+                return serde_json::json!({ "error": "rounds 必须是正整数" });
+            }
+            // 单次申请封顶，防止一句话要走天文数字的配额
+            let rounds = rounds.min(50) as u32;
+            let reason = call.arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("未说明").to_string();
+
+            set_agent_status(app_handle, &agent.id, AgentStatus::WaitingApproval).await;
+            let approved =
+                request_more_rounds_approval(app_handle, &workspace.id, agent, rounds, &reason, cancel).await;
+            set_agent_status(app_handle, &agent.id, AgentStatus::Running).await;
+            if approved {
+                // `extra_rounds` 字段是唤醒循环识别"扩容已获批"的信号，
+                // 它会据此当场提高本次唤醒的剩余配额
+                serde_json::json!({
+                    "status": "approved",
+                    "extra_rounds": rounds,
+                    "message": format!("已获批为本次唤醒追加 {} 轮工具调用", rounds)
+                })
+            } else {
+                serde_json::json!({
+                    "status": "rejected",
+                    "message": "申请被拒绝或无人处理，请基于已有信息尽快给出最终回复"
+                })
+            }
+        }
+        "workspace_approve_more_rounds" | "workspace_reject_more_rounds" => {
+            if agent.role != AgentRole::Main {
+                return serde_json::json!({ "error": "只有主 Agent 才能审批轮数申请" });
+            }
+            let request_id = match call.arguments.get("request_id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return serde_json::json!({ "error": "缺少 request_id" }),
+            };
+            let approved = call.name == "workspace_approve_more_rounds";
+            let pending = app_handle.state::<PendingRoundsRequests>();
+            let sender = pending.0.lock().unwrap().remove(&request_id);
+            match sender {
+                Some(tx) => {
+                    let _ = tx.send(approved);
+                    mark_pending_event_resolved(app_handle, &request_id).await;
+                    serde_json::json!({ "status": "ok" })
+                }
+                None => serde_json::json!({ "error": format!("轮数申请 {} 不存在或已被处理/超时", request_id) }),
             }
         }
         "workspace_asks" => {
@@ -2133,6 +2303,92 @@ async fn request_sleep_approval(
         Some(Ok(Err(_))) => false,
         Some(Err(_)) => {
             app_handle.state::<PendingSleepRequests>().0.lock().unwrap().remove(&request_id);
+            false
+        }
+    };
+    mark_pending_event_resolved(app_handle, &request_id).await;
+    approved
+}
+
+/// 注册一条"追加工具轮数"申请并阻塞等待裁决（主 Agent 的审批工具 / 用户
+/// 越权 / 超时或取消视为拒绝），流程与 `request_sleep_approval` 同款。
+async fn request_more_rounds_approval(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent: &WorkspaceAgent,
+    rounds: u32,
+    reason: &str,
+    cancel: &CancellationToken,
+) -> bool {
+    let request_id = Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel();
+    {
+        let pending = app_handle.state::<PendingRoundsRequests>();
+        pending.0.lock().unwrap().insert(request_id.clone(), tx);
+    }
+
+    let _ = app_handle.emit(
+        "workspace://rounds-request",
+        serde_json::json!({
+            "requestId": request_id, "workspaceId": workspace_id,
+            "agentId": agent.id, "agentName": agent.name,
+            "rounds": rounds, "reason": reason,
+            "createdAt": Utc::now().timestamp_millis(),
+        }),
+    );
+
+    record_pending_event(
+        app_handle,
+        workspace_id,
+        &agent.id,
+        &agent.name,
+        "more_rounds",
+        serde_json::json!({ "rounds": rounds, "reason": reason, "requestId": request_id }),
+        &request_id,
+    )
+    .await;
+
+    if let Some(main_id) = find_main_agent_id(app_handle, workspace_id).await {
+        send_workspace_message(
+            app_handle,
+            workspace_id,
+            "system",
+            &main_id,
+            &format!(
+                "Agent「{}」申请为本次唤醒追加 {} 轮工具调用（request_id={}），理由：{}。如果同意，\
+                 调用 workspace_approve_more_rounds 工具并填入这个 request_id；如果不同意，调用 \
+                 workspace_reject_more_rounds。",
+                agent.name, rounds, request_id, reason
+            ),
+        )
+        .await;
+    }
+    insert_workspace_log(
+        app_handle,
+        workspace_id,
+        Some(agent.id.clone()),
+        "rounds_request",
+        format!("{} 申请追加 {} 轮工具调用：{}", agent.name, rounds, reason),
+    )
+    .await;
+
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => {
+            app_handle.state::<PendingRoundsRequests>().0.lock().unwrap().remove(&request_id);
+            None
+        }
+        result = tokio::time::timeout(Duration::from_secs(PROPOSAL_TIMEOUT_SECS), rx) => Some(result),
+    };
+
+    let approved = match outcome {
+        None => {
+            mark_pending_event_resolved(app_handle, &request_id).await;
+            return false;
+        }
+        Some(Ok(Ok(approved))) => approved,
+        Some(Ok(Err(_))) => false,
+        Some(Err(_)) => {
+            app_handle.state::<PendingRoundsRequests>().0.lock().unwrap().remove(&request_id);
             false
         }
     };

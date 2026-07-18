@@ -177,6 +177,10 @@ pub struct WorkspaceAgent {
     /// 所有任务都需要，用户按 Agent 自行选择打开。
     #[serde(default)]
     pub enable_thinking: bool,
+    /// 单次唤醒允许的最大工具调用轮数（会议签到轮不计入）。原为写死的
+    /// 常量 8，现按 Agent 可配，默认 20；配额烧完仍有无工具强制收尾轮兜底。
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: i32,
     /// 软删除时间戳；非 None 表示这个 Agent 已被用户删除，但消息/日志历史里
     /// 引用它的记录仍需要能正确显示名字，所以不做物理删除。
     #[serde(default)]
@@ -187,6 +191,10 @@ pub struct WorkspaceAgent {
 
 pub fn default_require_tool_approval() -> bool {
     true
+}
+
+pub fn default_max_tool_rounds() -> i32 {
+    20
 }
 
 /// Agent 结构化待办清单里的一项，跟自由格式的 `scratchpad` 不是一回事——
@@ -275,6 +283,8 @@ pub struct CreateAgentRequest {
     pub require_tool_approval: bool,
     #[serde(default)]
     pub enable_thinking: bool,
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: i32,
 }
 
 pub fn default_rag_top_k() -> i32 {
@@ -323,6 +333,8 @@ pub struct UpdateAgentRequest {
     pub require_tool_approval: bool,
     #[serde(default)]
     pub enable_thinking: bool,
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: i32,
 }
 
 /// 一个正在等待人工决策的 `workspace_create_agent` 提议 / `workspace_sleep`
