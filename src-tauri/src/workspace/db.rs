@@ -180,6 +180,9 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !agent_columns.contains(&"enable_thinking".to_string()) {
         conn.execute("ALTER TABLE workspace_agents ADD COLUMN enable_thinking INTEGER NOT NULL DEFAULT 0", [])?;
     }
+    if !agent_columns.contains(&"max_tool_rounds".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN max_tool_rounds INTEGER NOT NULL DEFAULT 20", [])?;
+    }
 
     log::info!("Workspace SQLite tables initialized");
     Ok(())
@@ -287,6 +290,7 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
         rag_rerank_top_n: row.get(22)?,
         require_tool_approval: row.get::<_, i64>(23)? != 0,
         enable_thinking: row.get::<_, i64>(24)? != 0,
+        max_tool_rounds: row.get(25)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -296,7 +300,7 @@ const AGENT_SELECT_COLUMNS: &str = "id, workspace_id, name, role, provider, mode
      mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at, \
      rag_top_k, rag_retrieval_mode, scratchpad, deleted_at, \
      rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval, \
-     enable_thinking";
+     enable_thinking, max_tool_rounds";
 
 pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), WorkspaceError> {
     conn.execute(
@@ -305,8 +309,8 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
           system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at,
           rag_top_k, rag_retrieval_mode, scratchpad, deleted_at,
           rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval,
-          enable_thinking)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+          enable_thinking, max_tool_rounds)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             agent.id,
             agent.workspace_id,
@@ -333,6 +337,7 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
             agent.rag_rerank_top_n,
             agent.require_tool_approval as i64,
             agent.enable_thinking as i64,
+            agent.max_tool_rounds,
         ],
     )?;
     Ok(())
@@ -393,8 +398,8 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
          system_prompt = ?6, mcp_server_ids = ?7, knowledge_base_ids = ?8, active_skill_ids = ?9, \
          rag_top_k = ?10, rag_retrieval_mode = ?11, \
          rag_reranker_config_id = ?12, rag_reranker_base_url = ?13, rag_reranker_model = ?14, rag_rerank_top_n = ?15, \
-         require_tool_approval = ?16, enable_thinking = ?17, updated_at = ?18 \
-         WHERE id = ?19 AND deleted_at IS NULL",
+         require_tool_approval = ?16, enable_thinking = ?17, max_tool_rounds = ?18, updated_at = ?19 \
+         WHERE id = ?20 AND deleted_at IS NULL",
         rusqlite::params![
             req.name,
             req.provider,
@@ -413,6 +418,7 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
             req.rag_rerank_top_n,
             req.require_tool_approval as i64,
             req.enable_thinking as i64,
+            req.max_tool_rounds.max(1),
             chrono::Utc::now().timestamp_millis(),
             req.id,
         ],
@@ -692,6 +698,8 @@ mod tests {
             scratchpad: String::new(),
             require_tool_approval: true,
             enable_thinking: false,
+            // 刻意用非默认值，任何列错位/漏写都会让往返断言直接失败
+            max_tool_rounds: 12,
             deleted_at: None,
             created_at: 1000,
             updated_at: 1000,
@@ -889,12 +897,14 @@ mod tests {
                 rag_rerank_top_n: Some(3),
                 require_tool_approval: false,
                 enable_thinking: true,
+                max_tool_rounds: 33,
             },
         )
         .unwrap();
 
         let fetched = get_agent(&conn, &agent.id).unwrap().unwrap();
         assert_eq!(fetched.name, "A-renamed");
+        assert_eq!(fetched.max_tool_rounds, 33);
         assert_eq!(fetched.provider, "deepseek");
         assert_eq!(fetched.rag_top_k, 8);
         assert_eq!(fetched.rag_retrieval_mode, "vector");
@@ -928,6 +938,7 @@ mod tests {
                     rag_rerank_top_n: None,
                     require_tool_approval: true,
                     enable_thinking: false,
+                    max_tool_rounds: 20,
                 },
             ),
             Err(WorkspaceError::AgentNotFound(_))

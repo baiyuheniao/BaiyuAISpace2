@@ -1,6 +1,6 @@
 [package]
 name = "BaiyuAISpace2"
-version = "0.2.0-beta.17"
+version = "0.2.0-beta.18"
 description = "轻量级跨平台 AI Agent 开发环境"
 authors = ["Baiyu"]
 license = "MPL-2.0"

@@ -68,6 +68,9 @@ export interface WorkspaceAgent {
   requireToolApproval: boolean;
   /** 是否为这个 Agent 的请求带上思考/推理参数，默认关闭（增加延迟和 token 消耗）。 */
   enableThinking: boolean;
+  /** 单次唤醒允许的最大工具调用轮数（会议签到轮不计入），默认 20；
+   *  配额烧完后仍会走无工具强制收尾轮兜底。 */
+  maxToolRounds: number;
   /** 非 null 表示已被删除（软删除），仍保留用于历史消息里解析发送者名字。 */
   deletedAt: number | null;
   createdAt: number;
@@ -93,6 +96,7 @@ export interface UpdateAgentRequest {
   ragRerankTopN: number | null;
   requireToolApproval: boolean;
   enableThinking: boolean;
+  maxToolRounds: number;
 }
 
 export interface WorkspaceAgentTask {
@@ -142,6 +146,7 @@ export interface CreateAgentRequest {
   ragRerankTopN?: number | null;
   requireToolApproval?: boolean;
   enableThinking?: boolean;
+  maxToolRounds?: number;
 }
 
 export interface AgentProposalEvent {
@@ -159,6 +164,17 @@ export interface SleepRequestEvent {
   workspaceId: string;
   agentId: string;
   agentName: string;
+  reason: string;
+  createdAt: number;
+}
+
+/** 子 Agent 申请为本次唤醒追加工具调用轮数（主 Agent 可用工具审批，用户也可在此越权处理）。 */
+export interface RoundsRequestEvent {
+  requestId: string;
+  workspaceId: string;
+  agentId: string;
+  agentName: string;
+  rounds: number;
   reason: string;
   createdAt: number;
 }
@@ -193,7 +209,7 @@ export interface PendingEvent {
   workspaceId: string;
   agentId: string;
   agentName: string;
-  kind: "proposal" | "sleep" | "question" | "tool_approval";
+  kind: "proposal" | "sleep" | "question" | "tool_approval" | "more_rounds";
   payload: Record<string, unknown>;
   createdAt: number;
   resolvedAt: number | null;
@@ -218,6 +234,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   // 事项已持久化，selectWorkspace 时会用 loadPendingEvents 补拉回来。
   const proposals = ref<AgentProposalEvent[]>([]);
   const sleepRequests = ref<SleepRequestEvent[]>([]);
+  const roundsRequests = ref<RoundsRequestEvent[]>([]);
   const questions = ref<QuestionEvent[]>([]);
   const toolApprovals = ref<ToolApprovalEvent[]>([]);
   // 一次性提醒事件的队列，视图层 watch 它、用 message.warning() 弹出后自行清空 --
@@ -265,6 +282,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         console.log(`[Workspace] 休眠申请: requestId=${e.payload.requestId} agent=${e.payload.agentName} reason=${e.payload.reason}`);
         sleepRequests.value.push(e.payload);
       }),
+      listen<RoundsRequestEvent>("workspace://rounds-request", (e) => {
+        console.log(`[Workspace] 轮数申请: requestId=${e.payload.requestId} agent=${e.payload.agentName} rounds=${e.payload.rounds}`);
+        roundsRequests.value.push(e.payload);
+      }),
       listen<QuestionEvent>("workspace://question", (e) => {
         console.log(`[Workspace] Agent 提问: questionId=${e.payload.questionId} agent=${e.payload.agentName} | ${e.payload.question.slice(0, 60)}`);
         questions.value.push(e.payload);
@@ -280,6 +301,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         const id = e.payload.id;
         proposals.value = proposals.value.filter((p) => p.proposalId !== id);
         sleepRequests.value = sleepRequests.value.filter((r) => r.requestId !== id);
+        roundsRequests.value = roundsRequests.value.filter((r) => r.requestId !== id);
         questions.value = questions.value.filter((q) => q.questionId !== id);
         toolApprovals.value = toolApprovals.value.filter((t) => t.approvalId !== id);
       }),
@@ -371,6 +393,11 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         proposals.value.push({ proposalId: e.id, workspaceId: e.workspaceId, proposedByAgentId: e.agentId, proposedByAgentName: e.agentName, draft, createdAt: e.createdAt });
       } else if (e.kind === "sleep" && !sleepRequests.value.some((r) => r.requestId === e.id)) {
         sleepRequests.value.push({ requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, reason: (e.payload.reason as string) ?? "", createdAt: e.createdAt });
+      } else if (e.kind === "more_rounds" && !roundsRequests.value.some((r) => r.requestId === e.id)) {
+        roundsRequests.value.push({
+          requestId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName,
+          rounds: (e.payload.rounds as number) ?? 0, reason: (e.payload.reason as string) ?? "", createdAt: e.createdAt,
+        });
       } else if (e.kind === "question" && !questions.value.some((q) => q.questionId === e.id)) {
         questions.value.push({ questionId: e.id, workspaceId: e.workspaceId, agentId: e.agentId, agentName: e.agentName, question: (e.payload.question as string) ?? "", createdAt: e.createdAt });
       } else if (e.kind === "tool_approval" && !toolApprovals.value.some((t) => t.approvalId === e.id)) {
@@ -427,6 +454,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     console.log(`[Workspace] 处理休眠申请: requestId=${requestId} approved=${approved}`);
     await invoke("workspace_resolve_sleep_request", { requestId, approved });
     sleepRequests.value = sleepRequests.value.filter((r) => r.requestId !== requestId);
+  };
+
+  const resolveRoundsRequest = async (requestId: string, approved: boolean) => {
+    console.log(`[Workspace] 处理轮数申请: requestId=${requestId} approved=${approved}`);
+    await invoke("workspace_resolve_rounds_request", { requestId, approved });
+    roundsRequests.value = roundsRequests.value.filter((r) => r.requestId !== requestId);
   };
 
   const resolveQuestion = async (questionId: string, answer: string) => {
@@ -497,6 +530,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     logs,
     proposals,
     sleepRequests,
+    roundsRequests,
     questions,
     toolApprovals,
     inactiveAgentNotices,
@@ -520,6 +554,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     sendUserMessage,
     resolveProposal,
     resolveSleepRequest,
+    resolveRoundsRequest,
     resolveQuestion,
     resolveToolApproval,
     pauseAgent,

@@ -37,7 +37,7 @@ use db::{Database, DbState};
 use secure_storage::{delete_api_key, get_api_key, save_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{
-    WorkspaceState, PendingProposals, PendingSleepRequests, PendingQuestions, PendingToolApprovals,
+    WorkspaceState, PendingProposals, PendingSleepRequests, PendingRoundsRequests, PendingQuestions, PendingToolApprovals,
     WakeRateState, init_workspace_tables,
 };
 use workspace::meeting::MeetingsState;
@@ -279,6 +279,7 @@ fn main() {
             workspace::commands::workspace_list_logs,
             workspace::commands::workspace_resolve_proposal,
             workspace::commands::workspace_resolve_sleep_request,
+            workspace::commands::workspace_resolve_rounds_request,
             workspace::commands::workspace_resolve_question,
             workspace::commands::workspace_resolve_tool_approval,
             workspace::commands::workspace_list_pending_events,
@@ -443,6 +444,7 @@ fn main() {
             app.manage(workspace_state);
             app.manage(PendingProposals::default());
             app.manage(PendingSleepRequests::default());
+            app.manage(PendingRoundsRequests::default());
             app.manage(PendingQuestions::default());
             app.manage(PendingToolApprovals::default());
             app.manage(WakeRateState::default());

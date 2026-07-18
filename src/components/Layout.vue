@@ -66,6 +66,7 @@ const workspacePendingCount = computed(
   () =>
     workspace.proposals.length +
     workspace.sleepRequests.length +
+    workspace.roundsRequests.length +
     workspace.questions.length +
     workspace.toolApprovals.length
 );
