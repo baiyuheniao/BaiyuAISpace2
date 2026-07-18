@@ -1148,13 +1148,66 @@ async fn process_agent_wake(
         }
     }
 
-    if !produced_final_text {
+    if !produced_final_text && !cancel.is_cancelled() {
         log::warn!(
-            "Workspace agent {} 在轮数上限内没有给出最终回复，提前结束本次唤醒（计数 {} 轮 / 总 {} 轮）",
+            "Workspace agent {} 在轮数上限内没有给出最终回复，进入无工具强制收尾轮（计数 {} 轮 / 总 {} 轮）",
             agent_id,
             counted_rounds,
             total_rounds
         );
+        // 强制交卷轮：此前工具轮配额烧完就直接结束，整轮唤醒的成果原地蒸发
+        // ——已抓取的所有工具结果被丢弃，工作区一条消息都收不到（日报助手
+        // 实测：8 轮全花在逐个 fetch 网页上，报告永远写不出来）。这里追加
+        // 一条明确的"预算用完，立即交卷"指令，再跑一轮**不带任何工具**的
+        // 推理：请求里没有 tools 字段，模型没有再发起调用的原生手段，只能
+        // 基于已经拿到的结果给出文字回复。
+        let nudge = ChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: "user".to_string(),
+            content: "【系统】本次唤醒的工具调用配额已用完。请立即基于以上已获得的全部工具结果，直接给出你的最终回复；如信息不完整，说明还缺什么即可，不要再尝试调用任何工具。".to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            error: None,
+            images: vec![],
+            videos: vec![],
+        };
+        native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&nudge)));
+
+        match run_turn(
+            &agent.provider,
+            &agent.model,
+            &api_key,
+            &agent.base_url,
+            Some(&system_prompt),
+            &native_messages,
+            &[],
+            None,
+            agent.enable_thinking,
+        )
+        .await
+        {
+            Ok(TurnOutcome::Text(text)) if !text.trim().is_empty() => {
+                log::info!(
+                    "[workspace] Agent「{}」强制收尾轮产出回复 ({} 字符)",
+                    agent.name,
+                    text.len()
+                );
+                append_text_reply(&agent.provider, &mut native_messages, &text);
+                send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
+            }
+            Ok(TurnOutcome::Text(_)) => {
+                log::warn!("[workspace] Agent「{}」强制收尾轮仍未产出内容", agent.name);
+            }
+            Ok(TurnOutcome::ToolCalls(_)) => {
+                // 请求里没给 tools 字段，正常到不了这里；真到了也只记录，不再执行
+                log::warn!(
+                    "[workspace] Agent「{}」强制收尾轮仍试图调用工具，放弃本次唤醒",
+                    agent.name
+                );
+            }
+            Err(e) => {
+                log::warn!("[workspace] Agent「{}」强制收尾轮请求失败: {}", agent.name, e);
+            }
+        }
     }
 
     // 别覆盖掉 Sleeping（由 workspace_sleep 设置）、Meeting（由会议协调器
