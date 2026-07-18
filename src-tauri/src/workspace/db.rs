@@ -183,6 +183,24 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !agent_columns.contains(&"max_tool_rounds".to_string()) {
         conn.execute("ALTER TABLE workspace_agents ADD COLUMN max_tool_rounds INTEGER NOT NULL DEFAULT 20", [])?;
     }
+    if !agent_columns.contains(&"history_limit".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN history_limit INTEGER NOT NULL DEFAULT 40", [])?;
+    }
+    if !agent_columns.contains(&"max_tokens".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN max_tokens INTEGER", [])?;
+    }
+    if !agent_columns.contains(&"tool_whitelist".to_string()) {
+        conn.execute("ALTER TABLE workspace_agents ADD COLUMN tool_whitelist TEXT NOT NULL DEFAULT '[]'", [])?;
+    }
+
+    let message_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(workspace_messages)")?
+        .query_map([], |row| row.get(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !message_columns.contains(&"images".to_string()) {
+        conn.execute("ALTER TABLE workspace_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", [])?;
+    }
 
     log::info!("Workspace SQLite tables initialized");
     Ok(())
@@ -291,6 +309,9 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
         require_tool_approval: row.get::<_, i64>(23)? != 0,
         enable_thinking: row.get::<_, i64>(24)? != 0,
         max_tool_rounds: row.get(25)?,
+        history_limit: row.get(26)?,
+        max_tokens: row.get(27)?,
+        tool_whitelist: serde_json::from_str(&row.get::<_, String>(28)?).unwrap_or_default(),
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -300,7 +321,7 @@ const AGENT_SELECT_COLUMNS: &str = "id, workspace_id, name, role, provider, mode
      mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at, \
      rag_top_k, rag_retrieval_mode, scratchpad, deleted_at, \
      rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval, \
-     enable_thinking, max_tool_rounds";
+     enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist";
 
 pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), WorkspaceError> {
     conn.execute(
@@ -309,8 +330,8 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
           system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at,
           rag_top_k, rag_retrieval_mode, scratchpad, deleted_at,
           rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval,
-          enable_thinking, max_tool_rounds)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+          enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         rusqlite::params![
             agent.id,
             agent.workspace_id,
@@ -338,6 +359,9 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
             agent.require_tool_approval as i64,
             agent.enable_thinking as i64,
             agent.max_tool_rounds,
+            agent.history_limit,
+            agent.max_tokens,
+            serde_json::to_string(&agent.tool_whitelist).unwrap_or_else(|_| "[]".to_string()),
         ],
     )?;
     Ok(())
@@ -398,8 +422,9 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
          system_prompt = ?6, mcp_server_ids = ?7, knowledge_base_ids = ?8, active_skill_ids = ?9, \
          rag_top_k = ?10, rag_retrieval_mode = ?11, \
          rag_reranker_config_id = ?12, rag_reranker_base_url = ?13, rag_reranker_model = ?14, rag_rerank_top_n = ?15, \
-         require_tool_approval = ?16, enable_thinking = ?17, max_tool_rounds = ?18, updated_at = ?19 \
-         WHERE id = ?20 AND deleted_at IS NULL",
+         require_tool_approval = ?16, enable_thinking = ?17, max_tool_rounds = ?18, history_limit = ?19, \
+         max_tokens = ?20, tool_whitelist = ?21, updated_at = ?22 \
+         WHERE id = ?23 AND deleted_at IS NULL",
         rusqlite::params![
             req.name,
             req.provider,
@@ -419,6 +444,9 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
             req.require_tool_approval as i64,
             req.enable_thinking as i64,
             req.max_tool_rounds.max(1),
+            req.history_limit.max(1),
+            req.max_tokens,
+            serde_json::to_string(&req.tool_whitelist).unwrap_or_else(|_| "[]".to_string()),
             chrono::Utc::now().timestamp_millis(),
             req.id,
         ],
@@ -446,6 +474,30 @@ pub fn set_scratchpad(conn: &Connection, agent_id: &str, content: &str) -> Resul
     conn.execute(
         "UPDATE workspace_agents SET scratchpad = ?1 WHERE id = ?2",
         rusqlite::params![content, agent_id],
+    )?;
+    Ok(())
+}
+
+/// 把一个工具加入 Agent 的审批白名单（幂等：已在名单里就不重复加）。
+/// 由审批卡片的"记住选择"触发；撤销走 `update_agent`（编辑表单整体保存）。
+pub fn add_tool_to_whitelist(conn: &Connection, agent_id: &str, tool_name: &str) -> Result<(), WorkspaceError> {
+    let current: String = conn.query_row(
+        "SELECT tool_whitelist FROM workspace_agents WHERE id = ?1",
+        [agent_id],
+        |row| row.get(0),
+    )?;
+    let mut list: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
+    if list.iter().any(|t| t == tool_name) {
+        return Ok(());
+    }
+    list.push(tool_name.to_string());
+    conn.execute(
+        "UPDATE workspace_agents SET tool_whitelist = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![
+            serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string()),
+            chrono::Utc::now().timestamp_millis(),
+            agent_id
+        ],
     )?;
     Ok(())
 }
@@ -515,14 +567,23 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceMessage> {
         to_agent_id: row.get(3)?,
         content: row.get(4)?,
         created_at: row.get(5)?,
+        images: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
     })
 }
 
 pub fn insert_message(conn: &Connection, msg: &WorkspaceMessage) -> Result<(), WorkspaceError> {
     conn.execute(
-        "INSERT INTO workspace_messages (id, workspace_id, from_agent_id, to_agent_id, content, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![msg.id, msg.workspace_id, msg.from_agent_id, msg.to_agent_id, msg.content, msg.created_at],
+        "INSERT INTO workspace_messages (id, workspace_id, from_agent_id, to_agent_id, content, created_at, images)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            msg.id,
+            msg.workspace_id,
+            msg.from_agent_id,
+            msg.to_agent_id,
+            msg.content,
+            msg.created_at,
+            serde_json::to_string(&msg.images).unwrap_or_else(|_| "[]".to_string())
+        ],
     )?;
     Ok(())
 }
@@ -530,7 +591,7 @@ pub fn insert_message(conn: &Connection, msg: &WorkspaceMessage) -> Result<(), W
 /// 一个工作组的全部消息，最早的在前——供前端渲染完整时间线用。
 pub fn list_messages(conn: &Connection, workspace_id: &str, limit: i64) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at
+        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at, images
          FROM workspace_messages WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![workspace_id, limit], row_to_message)?;
@@ -549,7 +610,7 @@ pub fn list_recent_messages_for_agent(
     limit: i64,
 ) -> Result<Vec<WorkspaceMessage>, WorkspaceError> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at
+        "SELECT id, workspace_id, from_agent_id, to_agent_id, content, created_at, images
          FROM workspace_messages
          WHERE workspace_id = ?1 AND (to_agent_id = ?2 OR to_agent_id = 'all' OR from_agent_id = ?2)
          ORDER BY created_at DESC LIMIT ?3",
@@ -700,6 +761,9 @@ mod tests {
             enable_thinking: false,
             // 刻意用非默认值，任何列错位/漏写都会让往返断言直接失败
             max_tool_rounds: 12,
+            history_limit: 25,
+            max_tokens: Some(4096),
+            tool_whitelist: vec!["write_file".to_string()],
             deleted_at: None,
             created_at: 1000,
             updated_at: 1000,
@@ -803,6 +867,7 @@ mod tests {
                     to_agent_id: to.to_string(),
                     content: content.to_string(),
                     created_at: i as i64,
+                    images: vec![],
                 },
             )
             .unwrap();
@@ -825,7 +890,7 @@ mod tests {
         insert_agent(&conn, &agent).unwrap();
         insert_message(
             &conn,
-            &WorkspaceMessage { id: "m1".into(), workspace_id: "ws-1".into(), from_agent_id: "user".into(), to_agent_id: agent.id.clone(), content: "hi".into(), created_at: 0 },
+            &WorkspaceMessage { id: "m1".into(), workspace_id: "ws-1".into(), from_agent_id: "user".into(), to_agent_id: agent.id.clone(), content: "hi".into(), created_at: 0, images: vec![] },
         )
         .unwrap();
         insert_log(
@@ -898,6 +963,9 @@ mod tests {
                 require_tool_approval: false,
                 enable_thinking: true,
                 max_tool_rounds: 33,
+                history_limit: 60,
+                max_tokens: Some(9000),
+                tool_whitelist: vec!["exec_cmd".to_string()],
             },
         )
         .unwrap();
@@ -905,6 +973,9 @@ mod tests {
         let fetched = get_agent(&conn, &agent.id).unwrap().unwrap();
         assert_eq!(fetched.name, "A-renamed");
         assert_eq!(fetched.max_tool_rounds, 33);
+        assert_eq!(fetched.history_limit, 60);
+        assert_eq!(fetched.max_tokens, Some(9000));
+        assert_eq!(fetched.tool_whitelist, vec!["exec_cmd".to_string()]);
         assert_eq!(fetched.provider, "deepseek");
         assert_eq!(fetched.rag_top_k, 8);
         assert_eq!(fetched.rag_retrieval_mode, "vector");
@@ -939,6 +1010,9 @@ mod tests {
                     require_tool_approval: true,
                     enable_thinking: false,
                     max_tool_rounds: 20,
+                    history_limit: 40,
+                    max_tokens: None,
+                    tool_whitelist: vec![],
                 },
             ),
             Err(WorkspaceError::AgentNotFound(_))

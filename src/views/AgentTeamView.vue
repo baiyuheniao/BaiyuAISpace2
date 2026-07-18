@@ -23,7 +23,7 @@ import {
 } from "naive-ui";
 import {
   Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline,
-  PauseOutline, PlayOutline, RefreshOutline, DocumentTextOutline,
+  PauseOutline, PlayOutline, RefreshOutline, DocumentTextOutline, ImageOutline,
 } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
@@ -122,6 +122,9 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   requireToolApproval: true,
   enableThinking: false,
   maxToolRounds: 20,
+  historyLimit: 40,
+  maxTokens: null,
+  toolWhitelist: [],
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
 
@@ -214,8 +217,11 @@ const openEditAgentModal = (agent: WorkspaceAgent) => {
     ragRerankTopN: agent.ragRerankTopN,
     requireToolApproval: agent.requireToolApproval,
     enableThinking: agent.enableThinking,
-    // 旧数据可能没有这个字段（迁移默认 20），兜底防 undefined
+    // 旧数据可能没有这些字段（迁移有默认值），兜底防 undefined
     maxToolRounds: agent.maxToolRounds ?? 20,
+    historyLimit: agent.historyLimit ?? 40,
+    maxTokens: agent.maxTokens ?? null,
+    toolWhitelist: [...(agent.toolWhitelist ?? [])],
   };
   showEditAgentModal.value = true;
 };
@@ -300,9 +306,17 @@ const handleResumeAgent = async (agentId: string) => {
 
 // ============ 待处理事项：MCP 工具调用审批 ============
 
+// 各审批卡片上"记住选择"勾选状态，key 为 approvalId
+const rememberApprovalChoices = reactive<Record<string, boolean>>({});
+
 const handleResolveToolApproval = async (t: ToolApprovalEvent, approved: boolean) => {
   try {
-    await workspace.resolveToolApproval(t.approvalId, approved);
+    await workspace.resolveToolApproval(t.approvalId, approved, {
+      remember: rememberApprovalChoices[t.approvalId] ?? false,
+      agentId: t.agentId,
+      toolName: t.toolName,
+    });
+    delete rememberApprovalChoices[t.approvalId];
   } catch (e) {
     message.error(`处理失败: ${e}`);
   }
@@ -406,15 +420,48 @@ const agentMessages = computed(() => {
       role: (m.fromAgentId === id ? "assistant" : "user") as "assistant" | "user",
       content: m.fromAgentId === id || m.fromAgentId === "user" ? m.content : `[来自 ${workspace.agentName(m.fromAgentId)}] ${m.content}`,
       timestamp: m.createdAt,
+      images: m.images,
     }));
 });
 
+// 待发送的图片附件（base64；发送给支持视觉的模型，并随消息入库）
+const attachedMsgImages = ref<{ name: string; data: string; mediaType: string }[]>([]);
+const msgImageInputRef = ref<HTMLInputElement | null>(null);
+
+const handleMsgImagesSelected = (event: Event) => {
+  const files = (event.target as HTMLInputElement).files;
+  if (!files) return;
+  for (const file of Array.from(files)) {
+    if (!file.type.startsWith("image/")) continue;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      const commaIdx = dataUrl.indexOf(",");
+      if (commaIdx === -1) return;
+      attachedMsgImages.value.push({
+        name: file.name,
+        data: dataUrl.slice(commaIdx + 1),
+        mediaType: dataUrl.slice(5, dataUrl.indexOf(";")) || file.type,
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+  (event.target as HTMLInputElement).value = "";
+};
+
 const handleSendMessage = async () => {
   const content = newMessageContent.value.trim();
-  if (!selectedAgentId.value || !content) return;
+  if (!selectedAgentId.value || (!content && attachedMsgImages.value.length === 0)) return;
   try {
-    await workspace.sendUserMessage(selectedAgentId.value, content);
+    await workspace.sendUserMessage(
+      selectedAgentId.value,
+      content,
+      attachedMsgImages.value.length > 0
+        ? attachedMsgImages.value.map((i) => ({ data: i.data, mediaType: i.mediaType }))
+        : undefined
+    );
     newMessageContent.value = "";
+    attachedMsgImages.value = [];
   } catch (e) {
     message.error(`发送失败: ${e}`);
   }
@@ -973,16 +1020,24 @@ onBeforeUnmount(() => {
             {{ pendingCountdown(t.createdAt) }}（超时默认拒绝）
           </p>
           <pre class="tool-args">{{ JSON.stringify(t.arguments, null, 2) }}</pre>
-          <n-space justify="end">
-            <n-button @click="handleResolveToolApproval(t, false)">
-              拒绝
-            </n-button>
-            <n-button
-              type="primary"
-              @click="handleResolveToolApproval(t, true)"
-            >
-              批准执行
-            </n-button>
+          <n-space
+            justify="space-between"
+            align="center"
+          >
+            <n-checkbox v-model:checked="rememberApprovalChoices[t.approvalId]">
+              记住选择：此工具对该 Agent 以后自动放行
+            </n-checkbox>
+            <n-space>
+              <n-button @click="handleResolveToolApproval(t, false)">
+                拒绝
+              </n-button>
+              <n-button
+                type="primary"
+                @click="handleResolveToolApproval(t, true)"
+              >
+                批准执行
+              </n-button>
+            </n-space>
           </n-space>
         </n-card>
       </div>
@@ -1244,7 +1299,37 @@ onBeforeUnmount(() => {
                   「{{ selectedAgent.name }}」正在处理…
                 </p>
               </div>
+              <div
+                v-if="attachedMsgImages.length > 0"
+                class="attached-msg-images"
+              >
+                <n-tag
+                  v-for="(img, idx) in attachedMsgImages"
+                  :key="idx"
+                  closable
+                  size="small"
+                  @close="attachedMsgImages.splice(idx, 1)"
+                >
+                  {{ img.name }}
+                </n-tag>
+              </div>
               <div class="message-input-row">
+                <input
+                  ref="msgImageInputRef"
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  style="display: none"
+                  @change="handleMsgImagesSelected"
+                >
+                <n-button
+                  quaternary
+                  @click="msgImageInputRef?.click()"
+                >
+                  <template #icon>
+                    <n-icon><ImageOutline /></n-icon>
+                  </template>
+                </n-button>
                 <n-input
                   v-model:value="newMessageContent"
                   type="textarea"
@@ -1443,6 +1528,40 @@ onBeforeUnmount(() => {
             </n-text>
           </n-space>
         </n-form-item>
+        <n-form-item label="历史回放条数">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="agentForm.historyLimit"
+              :min="1"
+              :max="500"
+              placeholder="默认 40"
+              style="width: 120px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              每次唤醒回放最近多少条消息作为记忆；长任务 Agent 可调高（更多历史 = 更多 token 消耗）
+            </n-text>
+          </n-space>
+        </n-form-item>
+        <n-form-item label="单轮输出上限">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="agentForm.maxTokens"
+              :min="256"
+              :step="1024"
+              placeholder="留空用默认"
+              style="width: 140px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              单轮回复的最大输出 token 数；留空沿用各服务商的宽裕默认值
+            </n-text>
+          </n-space>
+        </n-form-item>
         <n-form-item
           v-if="mcp.servers.length > 0"
           label="MCP 工具"
@@ -1629,6 +1748,63 @@ onBeforeUnmount(() => {
               style="font-size: 12px"
             >
               一次唤醒最多执行多少轮工具调用；需要大量抓取/查询的 Agent 可调高。配额用完会强制它基于已有结果交卷
+            </n-text>
+          </n-space>
+        </n-form-item>
+        <n-form-item label="历史回放条数">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="editAgentForm.historyLimit"
+              :min="1"
+              :max="500"
+              placeholder="默认 40"
+              style="width: 120px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              每次唤醒回放最近多少条消息作为记忆；长任务 Agent 可调高（更多历史 = 更多 token 消耗）
+            </n-text>
+          </n-space>
+        </n-form-item>
+        <n-form-item label="单轮输出上限">
+          <n-space align="center">
+            <n-input-number
+              v-model:value="editAgentForm.maxTokens"
+              :min="256"
+              :step="1024"
+              placeholder="留空用默认"
+              style="width: 140px"
+            />
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              单轮回复的最大输出 token 数；留空沿用各服务商的宽裕默认值
+            </n-text>
+          </n-space>
+        </n-form-item>
+        <n-form-item
+          v-if="editAgentForm.toolWhitelist.length > 0"
+          label="工具放行白名单"
+        >
+          <n-space vertical>
+            <n-space>
+              <n-tag
+                v-for="tool in editAgentForm.toolWhitelist"
+                :key="tool"
+                closable
+                @close="editAgentForm.toolWhitelist = editAgentForm.toolWhitelist.filter((t) => t !== tool)"
+              >
+                {{ tool }}
+              </n-tag>
+            </n-space>
+            <n-text
+              depth="3"
+              style="font-size: 12px"
+            >
+              名单内的高风险工具对该 Agent 自动放行（审批卡片勾选"记住选择"后加入）；点 × 撤销后保存生效
             </n-text>
           </n-space>
         </n-form-item>
@@ -1978,6 +2154,13 @@ onBeforeUnmount(() => {
   flex: 1;
   overflow-y: auto;
   margin-bottom: 12px;
+}
+
+.attached-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
 }
 
 .message-input-row {

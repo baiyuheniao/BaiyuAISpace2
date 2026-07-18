@@ -181,6 +181,17 @@ pub struct WorkspaceAgent {
     /// 常量 8，现按 Agent 可配，默认 20；配额烧完仍有无工具强制收尾轮兜底。
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: i32,
+    /// 每次唤醒回放的消息历史条数上限。原为写死的常量 40，现按 Agent 可配。
+    #[serde(default = "default_history_limit")]
+    pub history_limit: i32,
+    /// 单轮回复的最大输出 token 数；None 时沿用各 provider 的宽裕默认值
+    /// （Anthropic 32000，其余不设限）。
+    #[serde(default)]
+    pub max_tokens: Option<i32>,
+    /// 高风险工具审批的按工具白名单：名单内的工具对该 Agent 永久放行，
+    /// 不再弹审批卡片。由审批卡片上的"记住选择"写入，编辑表单可撤销。
+    #[serde(default)]
+    pub tool_whitelist: Vec<String>,
     /// 软删除时间戳；非 None 表示这个 Agent 已被用户删除，但消息/日志历史里
     /// 引用它的记录仍需要能正确显示名字，所以不做物理删除。
     #[serde(default)]
@@ -195,6 +206,10 @@ pub fn default_require_tool_approval() -> bool {
 
 pub fn default_max_tool_rounds() -> i32 {
     20
+}
+
+pub fn default_history_limit() -> i32 {
+    40
 }
 
 /// Agent 结构化待办清单里的一项，跟自由格式的 `scratchpad` 不是一回事——
@@ -222,6 +237,10 @@ pub struct WorkspaceMessage {
     pub from_agent_id: String,
     pub to_agent_id: String,
     pub content: String,
+    /// 图片附件（base64，不含 data URL 前缀）。目前只有用户发出的消息会带；
+    /// Agent 唤醒回放时会把它们送进支持视觉的模型。
+    #[serde(default)]
+    pub images: Vec<crate::commands::llm::ImageAttachment>,
     pub created_at: i64,
 }
 
@@ -285,6 +304,12 @@ pub struct CreateAgentRequest {
     pub enable_thinking: bool,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: i32,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: i32,
+    #[serde(default)]
+    pub max_tokens: Option<i32>,
+    #[serde(default)]
+    pub tool_whitelist: Vec<String>,
 }
 
 pub fn default_rag_top_k() -> i32 {
@@ -335,6 +360,12 @@ pub struct UpdateAgentRequest {
     pub enable_thinking: bool,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: i32,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: i32,
+    #[serde(default)]
+    pub max_tokens: Option<i32>,
+    #[serde(default)]
+    pub tool_whitelist: Vec<String>,
 }
 
 /// 一个正在等待人工决策的 `workspace_create_agent` 提议 / `workspace_sleep`

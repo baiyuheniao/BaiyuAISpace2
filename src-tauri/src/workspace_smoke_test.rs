@@ -64,6 +64,9 @@ pub async fn run(app_handle: AppHandle) {
             require_tool_approval: true,
             enable_thinking: false,
             max_tool_rounds: 20,
+            history_limit: 40,
+            max_tokens: None,
+            tool_whitelist: vec![],
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -101,6 +104,9 @@ pub async fn run(app_handle: AppHandle) {
             require_tool_approval: true,
             enable_thinking: false,
             max_tool_rounds: 20,
+            history_limit: 40,
+            max_tokens: None,
+            tool_whitelist: vec![],
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -119,6 +125,7 @@ pub async fn run(app_handle: AppHandle) {
         workspace.id.clone(),
         main_agent.id.clone(),
         format!("请确认一下当前工作组里有哪些 Agent，然后跟 {} 打个招呼。", sub_agent.name),
+        None,
         app_handle.clone(),
     )
     .await
@@ -226,6 +233,7 @@ pub async fn run(app_handle: AppHandle) {
         "现在请你调用 workspace_asks 工具，问用户：'我已经完成手头的工作，能否休息一下？'。等用户回答之后，\
          再调用 workspace_sleep 工具申请进入休眠状态，reason 填'已完成打招呼任务'。"
             .to_string(),
+        None,
         app_handle.clone(),
     )
     .await
@@ -341,6 +349,9 @@ pub async fn run(app_handle: AppHandle) {
             require_tool_approval: true,
             enable_thinking: false,
             max_tool_rounds: 20,
+            history_limit: 40,
+            max_tokens: None,
+            tool_whitelist: vec![],
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -379,6 +390,9 @@ pub async fn run(app_handle: AppHandle) {
             require_tool_approval: true,
             enable_thinking: false,
             max_tool_rounds: 20,
+            history_limit: 40,
+            max_tokens: None,
+            tool_whitelist: vec![],
         },
         app_handle.clone(),
         workspace_state.clone(),
@@ -397,6 +411,7 @@ pub async fn run(app_handle: AppHandle) {
         meeting_ws.id.clone(),
         p3_main.id.clone(),
         "请就「今天的工作计划」议题召开一次工作组会议".to_string(),
+        None,
         app_handle.clone(),
     )
     .await
