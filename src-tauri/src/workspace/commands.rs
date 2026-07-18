@@ -31,7 +31,8 @@ const PROPOSAL_TIMEOUT_SECS: u64 = 600;
 /// 会议轮次（屏障式签到）不计入 Agent 的工具轮上限，否则长会议会被正常
 /// 工具轮上限拦腰截断；这个总轮数是防失控的兜底保险丝。
 const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
-const MAX_HISTORY_MESSAGES: i64 = 40;
+// 每次唤醒回放的历史条数原是写死的常量 40，现按 Agent 可配
+// （`WorkspaceAgent::history_limit`，默认 40，见 types.rs）。
 /// 唤醒频率护栏：滑动窗口内唤醒次数超过这个数就自动暂停这个 Agent，防止
 /// Agent 间来回搭话失控、无节制消耗 API 调用（多 Agent 自主互聊没有刹车的
 /// 那个风险）。正常使用（人工来回对话、一场会议）远远达不到这个频率。
@@ -445,11 +446,17 @@ pub async fn workspace_list_pending_events(
 }
 
 /// 前端在用户批准/拒绝一张 `workspace://tool-approval` 卡片后调用。
+/// `remember` 为 true 且是批准时，把该工具写进这个 Agent 的白名单——之后
+/// 同一工具对它不再弹审批（下次唤醒起生效；编辑表单可撤销）。
 #[tauri::command]
 pub async fn workspace_resolve_tool_approval(
     approval_id: String,
     approved: bool,
+    remember: Option<bool>,
+    agent_id: Option<String>,
+    tool_name: Option<String>,
     pending: State<'_, PendingToolApprovals>,
+    db_state: State<'_, DbState>,
     app_handle: AppHandle,
 ) -> Result<(), WorkspaceError> {
     let sender = {
@@ -460,6 +467,17 @@ pub async fn workspace_resolve_tool_approval(
         mark_pending_event_resolved(&app_handle, &approval_id).await;
         return Err(WorkspaceError::NotFound(format!("工具调用审批 {} 已过期或已被处理", approval_id)));
     };
+
+    if approved && remember.unwrap_or(false) {
+        if let (Some(agent_id), Some(tool_name)) = (agent_id, tool_name) {
+            let db = db_state.0.lock().await;
+            match db::open_conn(&db.path).and_then(|conn| db::add_tool_to_whitelist(&conn, &agent_id, &tool_name)) {
+                Ok(()) => log::info!("[workspace] 工具 {} 已加入 Agent {} 的审批白名单", tool_name, agent_id),
+                Err(e) => log::warn!("[workspace] 写入工具白名单失败: {}", e),
+            }
+        }
+    }
+
     let _ = sender.send(approved);
     mark_pending_event_resolved(&app_handle, &approval_id).await;
     Ok(())
@@ -863,6 +881,9 @@ async fn spawn_agent_internal(
             require_tool_approval: request.require_tool_approval,
             enable_thinking: request.enable_thinking,
             max_tool_rounds: request.max_tool_rounds.max(1),
+            history_limit: request.history_limit.max(1),
+            max_tokens: request.max_tokens.map(|v| v.max(1)),
+            tool_whitelist: request.tool_whitelist.clone(),
             deleted_at: None,
             created_at: now,
             updated_at: now,
@@ -1107,6 +1128,9 @@ async fn process_agent_wake(
     // 每 Agent 可配的工具轮上限；老数据/异常值兜底到至少 1 轮。mut：获批的
     // 轮数扩容申请（workspace_request_more_rounds）会在本次唤醒内当场加额
     let mut max_tool_rounds = agent.max_tool_rounds.max(1) as u32;
+    // 本次唤醒的工具调用摘要，唤醒结束后自动落入 scratchpad——工具轮的中间
+    // 结果不跨唤醒，此前全靠模型自觉记备忘，不自觉就永久失忆
+    let mut wake_tool_notes: Vec<String> = Vec::new();
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -1125,10 +1149,9 @@ async fn process_agent_wake(
             Some(&system_prompt),
             &native_messages,
             &tools,
-            // 传 None——让各个 provider 应用自己那套宽裕的默认值（Anthropic
-            // 是 32000，其余是各模型自己的上限），而不是沿用旧代码里硬编码的
-            // 4096，那会悄悄截断长回复。
-            None,
+            // 未配置时传 None——让各 provider 应用自己那套宽裕的默认值
+            // （Anthropic 是 32000，其余不设限），配置了就按 Agent 的来。
+            agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
         )
         .await
@@ -1180,6 +1203,15 @@ async fn process_agent_wake(
                         result.to_string().chars().take(200).collect::<String>()
                     );
                     results.push(result);
+                }
+                // 采集非 workspace 内部工具的调用摘要（参数截 60 字符、结果
+                // 截 150 字符），唤醒结束后写入 scratchpad 作跨唤醒工作记忆
+                for (call, result) in calls.iter().zip(results.iter()) {
+                    if !call.name.starts_with("workspace_") {
+                        let args: String = call.arguments.to_string().chars().take(60).collect();
+                        let res: String = result.to_string().chars().take(150).collect();
+                        wake_tool_notes.push(format!("- {}({}) → {}", call.name, args, res));
+                    }
                 }
                 // 获批的轮数扩容当场生效：提高本次唤醒的剩余配额
                 for (call, result) in calls.iter().zip(results.iter()) {
@@ -1266,7 +1298,7 @@ async fn process_agent_wake(
             Some(&system_prompt),
             &native_messages,
             &[],
-            None,
+            agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
         )
         .await
@@ -1292,6 +1324,39 @@ async fn process_agent_wake(
             }
             Err(e) => {
                 log::warn!("[workspace] Agent「{}」强制收尾轮请求失败: {}", agent.name, e);
+            }
+        }
+    }
+
+    // 跨唤醒工作记忆：把本次唤醒的工具调用摘要自动落入 scratchpad——不再
+    // 指望模型自觉调用 workspace_scratchpad 记备忘。追加块限 1500 字符，
+    // scratchpad 总量超 6000 字符时从最旧的开头裁剪，防止无限膨胀。
+    if !wake_tool_notes.is_empty() && !cancel.is_cancelled() {
+        let mut block = format!(
+            "\n【{} 唤醒的工具调用记录（系统自动记录）】\n{}",
+            chrono::Local::now().format("%m-%d %H:%M"),
+            wake_tool_notes.join("\n")
+        );
+        if block.chars().count() > 1500 {
+            block = block.chars().take(1500).collect();
+        }
+        let db_state = app_handle.state::<DbState>();
+        let db = db_state.0.lock().await;
+        if let Ok(conn) = db::open_conn(&db.path) {
+            let current = db::get_scratchpad(&conn, agent_id).unwrap_or_default();
+            let mut merged = format!("{}{}", current, block);
+            let total = merged.chars().count();
+            if total > 6000 {
+                merged = merged.chars().skip(total - 6000).collect();
+            }
+            if let Err(e) = db::set_scratchpad(&conn, agent_id, &merged) {
+                log::warn!("[workspace] Agent「{}」自动写入 scratchpad 失败: {}", agent.name, e);
+            } else {
+                log::debug!(
+                    "[workspace] Agent「{}」本次唤醒的 {} 条工具记录已自动写入 scratchpad",
+                    agent.name,
+                    wake_tool_notes.len()
+                );
             }
         }
     }
@@ -1325,7 +1390,7 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
             Ok(c) => c,
             Err(_) => return vec![],
         };
-        let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, MAX_HISTORY_MESSAGES)
+        let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, agent.history_limit.max(1) as i64)
             .unwrap_or_default();
         // 这里也要包含软删除的 Agent——一个已删除 Agent 过去发的消息仍然
         // 落在这个历史窗口里，需要能正确解析出发送者名字，而不是给模型看
@@ -1756,6 +1821,9 @@ async fn dispatch_tool_call(
                     .and_then(|v| v.as_i64())
                     .map(|v| (v as i32).max(1))
                     .unwrap_or_else(default_max_tool_rounds),
+                history_limit: default_history_limit(),
+                max_tokens: None,
+                tool_whitelist: vec![],
             };
 
             let pending = app_handle.state::<PendingProposals>();
@@ -2139,7 +2207,12 @@ async fn dispatch_tool_call(
             // 会去审批——只挑名字/描述命中危险关键词（删除、写入、执行命令等）
             // 的工具走审批，其余照常自动放行；用户也可以直接关掉这个开关，
             // 全部自动放行（自担风险）。
-            if agent.require_tool_approval && is_dangerous_tool(&tool.name, &tool.description) {
+            // 白名单内的工具对该 Agent 永久放行（审批卡片上勾选"记住选择"
+            // 后写入，编辑表单可撤销），不再反复弹审批
+            if agent.require_tool_approval
+                && is_dangerous_tool(&tool.name, &tool.description)
+                && !agent.tool_whitelist.contains(&call.name)
+            {
                 let approved = request_tool_approval(app_handle, &workspace.id, agent, &call.name, &call.arguments, cancel).await;
                 if !approved {
                     return serde_json::json!({ "error": format!("用户未批准执行工具 {}", call.name) });

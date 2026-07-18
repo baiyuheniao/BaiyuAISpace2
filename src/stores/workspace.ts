@@ -71,6 +71,12 @@ export interface WorkspaceAgent {
   /** 单次唤醒允许的最大工具调用轮数（会议签到轮不计入），默认 20；
    *  配额烧完后仍会走无工具强制收尾轮兜底。 */
   maxToolRounds: number;
+  /** 每次唤醒回放的消息历史条数上限，默认 40。 */
+  historyLimit: number;
+  /** 单轮回复的最大输出 token 数；null 时沿用各 provider 的宽裕默认值。 */
+  maxTokens: number | null;
+  /** 高风险工具审批白名单：名单内工具对该 Agent 永久放行（审批卡片"记住选择"写入）。 */
+  toolWhitelist: string[];
   /** 非 null 表示已被删除（软删除），仍保留用于历史消息里解析发送者名字。 */
   deletedAt: number | null;
   createdAt: number;
@@ -97,6 +103,9 @@ export interface UpdateAgentRequest {
   requireToolApproval: boolean;
   enableThinking: boolean;
   maxToolRounds: number;
+  historyLimit: number;
+  maxTokens: number | null;
+  toolWhitelist: string[];
 }
 
 export interface WorkspaceAgentTask {
@@ -147,6 +156,9 @@ export interface CreateAgentRequest {
   requireToolApproval?: boolean;
   enableThinking?: boolean;
   maxToolRounds?: number;
+  historyLimit?: number;
+  maxTokens?: number | null;
+  toolWhitelist?: string[];
 }
 
 export interface AgentProposalEvent {
@@ -468,10 +480,22 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     questions.value = questions.value.filter((q) => q.questionId !== questionId);
   };
 
-  const resolveToolApproval = async (approvalId: string, approved: boolean) => {
-    console.log(`[Workspace] 处理工具调用审批: approvalId=${approvalId} approved=${approved}`);
-    await invoke("workspace_resolve_tool_approval", { approvalId, approved });
+  const resolveToolApproval = async (
+    approvalId: string,
+    approved: boolean,
+    options?: { remember?: boolean; agentId?: string; toolName?: string }
+  ) => {
+    console.log(`[Workspace] 处理工具调用审批: approvalId=${approvalId} approved=${approved} remember=${options?.remember ?? false}`);
+    await invoke("workspace_resolve_tool_approval", {
+      approvalId,
+      approved,
+      remember: options?.remember ?? false,
+      agentId: options?.agentId ?? null,
+      toolName: options?.toolName ?? null,
+    });
     toolApprovals.value = toolApprovals.value.filter((t) => t.approvalId !== approvalId);
+    // 勾了"记住选择"意味着该 Agent 的白名单变了，重拉一次让编辑表单能看到
+    if (approved && options?.remember) await loadAgents();
   };
 
   /** 手动紧急停止 / 恢复一个 Agent。 */
