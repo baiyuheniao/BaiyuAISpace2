@@ -7,10 +7,6 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "website:dev": "vite website",
-    "website:build": "vite build website --outDir dist",
-    "website:preview": "vite preview website --outDir dist",
-    "website:deploy": "wrangler deploy --config website/wrangler.jsonc",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
@@ -53,7 +49,6 @@
     "sass": "^1.72.0",
     "typescript": "^5.4.2",
     "vite": "^5.2.0",
-    "wrangler": "4.88.0",
     "vue-tsc": "^2.0.6"
   }
 }
