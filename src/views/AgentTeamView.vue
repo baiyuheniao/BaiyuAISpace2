@@ -524,13 +524,14 @@ const logKindLabels: Record<string, string> = {
   auto_paused: "自动暂停",
   paused: "手动暂停",
   resumed: "恢复运行",
+  auto_resumed: "自动恢复",
   tool_approval: "工具调用审批",
   pending_expired: "待处理事项过期",
 };
 
 const logTimelineType = (kind: string): "default" | "success" | "warning" | "error" | "info" => {
   if (kind === "error") return "error";
-  if (kind === "agent_created" || kind === "resumed") return "success";
+  if (kind === "agent_created" || kind === "resumed" || kind === "auto_resumed") return "success";
   if (kind === "sleep_request" || kind === "agent_proposal" || kind === "auto_paused" || kind === "paused" || kind === "tool_approval") return "warning";
   if (kind === "scheduled_trigger") return "info";
   return "info";

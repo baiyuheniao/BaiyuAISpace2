@@ -36,8 +36,15 @@ const MAX_TOTAL_ROUNDS_PER_WAKE: u32 = 500;
 /// 唤醒频率护栏：滑动窗口内唤醒次数超过这个数就自动暂停这个 Agent，防止
 /// Agent 间来回搭话失控、无节制消耗 API 调用（多 Agent 自主互聊没有刹车的
 /// 那个风险）。正常使用（人工来回对话、一场会议）远远达不到这个频率。
+/// 暂停是冷却式的：`WAKE_RATE_COOLDOWN_SECS` 后自动恢复并通知；如果同一个
+/// Agent 连续 `WAKE_RATE_ESCALATION_THRESHOLD` 次触发（中间没有一次正常唤醒
+/// 把连续计数清零），说明短冷却压不住，升级为 `WAKE_RATE_ESCALATED_COOLDOWN_SECS`
+/// 的长冷却，并额外给主 Agent 发消息让它介入判断。
 const WAKE_RATE_WINDOW_SECS: i64 = 300;
 const MAX_WAKES_PER_WINDOW: usize = 20;
+const WAKE_RATE_COOLDOWN_SECS: i64 = 300;
+const WAKE_RATE_ESCALATION_THRESHOLD: u32 = 3;
+const WAKE_RATE_ESCALATED_COOLDOWN_SECS: i64 = 3600;
 
 /// 一个运行中 Agent 的唤醒信号 + 停止开关。只存在于内存里，但 `main.rs` 的
 /// `setup()` 在启动时会对每个活跃 Agent 再调一次 `start_agent_loop`（走的是
@@ -96,6 +103,19 @@ pub struct PendingToolApprovals(pub Arc<Mutex<HashMap<String, oneshot::Sender<bo
 /// 就够了。
 #[derive(Default)]
 pub struct WakeRateState(pub Arc<Mutex<HashMap<String, VecDeque<i64>>>>);
+
+/// 每个 Agent 当前这一次自动暂停的"版本号"（`token`）+ 连续触发计数。
+/// `token` 用来让冷却计时器在到点时确认自己对应的仍是最新一次自动暂停——
+/// 如果期间用户手动暂停/恢复过，或者又触发了一次新的自动暂停，`token` 会
+/// 变化，旧计时器发现对不上就直接放弃，不会去覆盖更新的状态。
+#[derive(Default, Clone, Copy)]
+pub struct AutoPauseEntry {
+    pub consecutive_trips: u32,
+    pub token: u64,
+}
+
+#[derive(Default)]
+pub struct AutoPauseState(pub Arc<Mutex<HashMap<String, AutoPauseEntry>>>);
 
 pub fn init_workspace_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     db::init_workspace_tables(conn)
@@ -242,6 +262,13 @@ pub async fn workspace_pause_agent(
     let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
     set_agent_status(&app_handle, &agent_id, AgentStatus::Paused).await;
     insert_workspace_log(&app_handle, &agent.workspace_id, Some(agent_id.clone()), "paused", format!("「{}」已手动暂停", agent.name)).await;
+    // 手动暂停优先级更高：让任何正在冷却中的自动恢复计时器失效，避免它到点
+    // 后把用户刚下的手动暂停指令当成自己那次自动暂停给恢复掉。
+    {
+        let pause_state = app_handle.state::<AutoPauseState>();
+        let mut map = pause_state.0.lock().unwrap();
+        map.entry(agent_id.clone()).or_default().token += 1;
+    }
     Ok(())
 }
 
@@ -832,6 +859,78 @@ async fn notify_main_agent_of_error(app_handle: &AppHandle, workspace_id: &str, 
     .await;
 }
 
+/// 唤醒频率护栏连续多次触发同一个 Agent（见 `WAKE_RATE_ESCALATION_THRESHOLD`），
+/// 短冷却压不住，已经升级为长冷却——顺带给主 Agent 发条消息，让它判断这是
+/// 不是真出了问题（比如两个 Agent 陷入无意义的来回搭话），需不需要人工介入。
+async fn notify_main_agent_of_guardrail_escalation(
+    app_handle: &AppHandle,
+    workspace_id: &str,
+    agent_id: &str,
+    consecutive_trips: u32,
+) {
+    let agents = list_agents_for_workspace(app_handle, workspace_id).await;
+    let Some(paused) = agents.iter().find(|a| a.id == agent_id) else {
+        return;
+    };
+    if paused.role == AgentRole::Main {
+        // 主 Agent 自己触发的护栏没有"上级"可以通知，日志里已经记过一笔了。
+        return;
+    }
+    let Some(main) = agents.iter().find(|a| a.role == AgentRole::Main) else {
+        return;
+    };
+    send_workspace_message(
+        app_handle,
+        workspace_id,
+        "system",
+        &main.id,
+        &format!(
+            "Agent「{}」连续 {} 次触发唤醒频率护栏（短时间内被唤醒次数过多），已升级为 {} 分钟长冷却，\
+             到点会自动恢复。这通常意味着它和别的 Agent 陷入了无意义的来回搭话，或者收到了异常密集的消息。\
+             建议看一下工作区日志排查原因，必要时手动暂停它或调整它的配置。",
+            paused.name, consecutive_trips, WAKE_RATE_ESCALATED_COOLDOWN_SECS / 60
+        ),
+    )
+    .await;
+}
+
+/// 唤醒频率护栏自动暂停后，冷却计时器到点时调用：确认这次暂停仍是"最新"
+/// 的（`token` 没被更新的自动暂停或用户手动操作超越），且状态仍是 Paused，
+/// 才把它恢复成 Idle 并重新唤醒一次（冷却期间积压的消息此时才会被处理）。
+async fn auto_resume_after_cooldown(app_handle: &AppHandle, workspace_id: &str, agent_id: &str, token: u64) {
+    let still_current = {
+        let pause_state = app_handle.state::<AutoPauseState>();
+        let map = pause_state.0.lock().unwrap();
+        map.get(agent_id).map(|e| e.token) == Some(token)
+    };
+    if !still_current {
+        return;
+    }
+    let Ok(Some(agent)) = load_agent(app_handle, agent_id).await else {
+        return;
+    };
+    if agent.status != AgentStatus::Paused {
+        // 用户已经手动恢复/重新暂停过，不要用这个过时的定时器覆盖当前状态。
+        return;
+    }
+    set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
+    insert_workspace_log(
+        app_handle,
+        workspace_id,
+        Some(agent_id.to_string()),
+        "auto_resumed",
+        format!("「{}」冷却结束，已自动恢复运行", agent.name),
+    )
+    .await;
+    // 暂停期间到达的消息，其唤醒已经消耗掉了 `Notify` 的 permit（然后在暂停
+    // 检查那里被空操作跳过了）——不显式再 notify 一次，积压的消息就会一直
+    // 没人回应，直到某条不相关的未来消息碰巧再把循环唤醒。
+    let workspace_state = app_handle.state::<WorkspaceState>();
+    if let Some(handle) = workspace_state.0.lock().unwrap().get(agent_id) {
+        handle.notify.notify_one();
+    };
+}
+
 /// 手动创建命令和一个被批准的 `workspace_create_agent` 提议共用这个函数：
 /// 校验 Agent 数量安全上限、插入数据库行、启动 Agent 的后台循环。
 async fn spawn_agent_internal(
@@ -1007,7 +1106,8 @@ async fn process_agent_wake(
         .ok_or_else(|| WorkspaceError::NotFound(workspace_id.to_string()))?;
 
     // 暂停中：用户手动暂停过，或已经被下面的唤醒频率护栏自动暂停过，静默
-    // 跳过，直到用户手动 workspace_resume_agent。
+    // 跳过。手动暂停要等用户手动 workspace_resume_agent；护栏自动暂停会在
+    // 冷却时间到后由 `auto_resume_after_cooldown` 自己恢复。
     if agent.status == AgentStatus::Paused {
         log::debug!("[workspace] Agent「{}」处于暂停状态，跳过本次唤醒", agent.name);
         return Ok(());
@@ -1027,9 +1127,24 @@ async fn process_agent_wake(
             entry.len() > MAX_WAKES_PER_WINDOW
         };
         if exceeded {
+            // 连续触发计数：中间只要有一次唤醒没撞阈值（见下方 else 分支），
+            // 这个计数就会被清零——"连续"指的是一次冷却恢复后立刻又撞线，
+            // 而不是历史上累计撞过几次。
+            let (consecutive_trips, token) = {
+                let pause_state = app_handle.state::<AutoPauseState>();
+                let mut map = pause_state.0.lock().unwrap();
+                let entry = map.entry(agent_id.to_string()).or_default();
+                entry.consecutive_trips += 1;
+                entry.token += 1;
+                (entry.consecutive_trips, entry.token)
+            };
+            let escalated = consecutive_trips >= WAKE_RATE_ESCALATION_THRESHOLD;
+            let cooldown_secs = if escalated { WAKE_RATE_ESCALATED_COOLDOWN_SECS } else { WAKE_RATE_COOLDOWN_SECS };
+
             log::warn!(
-                "[workspace] Agent「{}」{} 秒内被唤醒超过 {} 次，自动暂停以防失控",
-                agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW
+                "[workspace] Agent「{}」{} 秒内被唤醒超过 {} 次，自动暂停以防失控（连续第 {} 次触发，冷却 {} 秒{}）",
+                agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW, consecutive_trips, cooldown_secs,
+                if escalated { "，已升级" } else { "" }
             );
             set_agent_status(app_handle, agent_id, AgentStatus::Paused).await;
             insert_workspace_log(
@@ -1038,12 +1153,30 @@ async fn process_agent_wake(
                 Some(agent_id.to_string()),
                 "auto_paused",
                 format!(
-                    "「{}」{} 秒内被唤醒超过 {} 次，已自动暂停（防止无节制消耗 API 调用），需要手动恢复",
-                    agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW
+                    "「{}」{} 秒内被唤醒超过 {} 次，已自动暂停（防止无节制消耗 API 调用），{} 分钟后自动恢复{}",
+                    agent.name, WAKE_RATE_WINDOW_SECS, MAX_WAKES_PER_WINDOW, cooldown_secs / 60,
+                    if escalated { "（连续多次触发，已升级为长冷却，已通知主 Agent）" } else { "" }
                 ),
             )
             .await;
+            if escalated {
+                notify_main_agent_of_guardrail_escalation(app_handle, workspace_id, agent_id, consecutive_trips).await;
+            }
+
+            let app_handle = app_handle.clone();
+            let workspace_id = workspace_id.to_string();
+            let agent_id = agent_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(cooldown_secs as u64)).await;
+                auto_resume_after_cooldown(&app_handle, &workspace_id, &agent_id, token).await;
+            });
             return Ok(());
+        } else {
+            // 正常唤醒（没撞阈值）：连续触发的记录清零，下次再撞线重新从 1 计起。
+            let pause_state = app_handle.state::<AutoPauseState>();
+            if let Some(entry) = pause_state.0.lock().unwrap().get_mut(agent_id) {
+                entry.consecutive_trips = 0;
+            };
         }
     }
 

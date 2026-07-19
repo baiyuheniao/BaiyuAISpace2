@@ -38,7 +38,7 @@ use secure_storage::{delete_api_key, get_api_key, save_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{
     WorkspaceState, PendingProposals, PendingSleepRequests, PendingRoundsRequests, PendingQuestions, PendingToolApprovals,
-    WakeRateState, init_workspace_tables,
+    WakeRateState, AutoPauseState, init_workspace_tables,
 };
 use workspace::meeting::MeetingsState;
 use scheduler::init_scheduler_tables;
@@ -448,6 +448,7 @@ fn main() {
             app.manage(PendingQuestions::default());
             app.manage(PendingToolApprovals::default());
             app.manage(WakeRateState::default());
+            app.manage(AutoPauseState::default());
             app.manage(MeetingsState::default());
             app.manage(CloseToTrayState(Arc::new(AtomicBool::new(true))));
             log::info!("Database and vector store initialized");
