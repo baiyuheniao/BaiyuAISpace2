@@ -76,7 +76,9 @@ pub enum AgentStatus {
     Sleeping,
     Meeting,
     /// 用户手动暂停，或触发了唤醒频率护栏被自动暂停；暂停期间新消息仍会
-    /// 存进收件箱，但不会触发处理，直到用户手动 `workspace_resume_agent`。
+    /// 存进收件箱，但不会触发处理。用户手动暂停需要手动 `workspace_resume_agent`
+    /// 才能恢复；护栏自动暂停是冷却式的，时间到会自动恢复（见 `commands.rs`
+    /// 的 `auto_resume_after_cooldown`）。
     Paused,
     Error,
 }
