@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "BaiyuAISpace",
-  "version": "0.2.0-beta.20",
+  "version": "0.2.0-beta.21",
   "identifier": "com.baiyu.aispace",
   "build": {
     "frontendDist": "../dist",
@@ -50,7 +50,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVENUI3RkQ3MjAwQjQ4MkEKUldRcVNBc2cxMzliWFRpYVYwUU85UHpWNFV4OTJHd29uTUptMjRRak9Eam1TYkNLTWpsM1E4SHkK",
       "endpoints": [
-        "https://github.com/baiyuheniao/BaiyuAISpace2/releases/download/updater-manifest/latest.json"
+        "https://github.com/baiyuheniao/BaiyuAISpace2/releases/download/updater-manifest-beta/latest.json"
       ],
       "windows": {
         "installMode": "passive"

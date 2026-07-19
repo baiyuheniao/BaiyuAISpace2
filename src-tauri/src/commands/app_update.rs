@@ -4,14 +4,22 @@
 
 //! 设置页"检测最新版本"按钮用：查询 GitHub Releases，分别找出最新正式版
 //! 和最新 Beta 版，连同各自 Release 页面上的更新说明一起返回给前端展示。
-//! 这是纯信息查询，不涉及下载/安装（正式版安装走 tauri-plugin-updater 默认的
-//! updater-manifest 端点，由前端直接调用插件的 `check()`），因此直接用总超时
-//! 即可，不需要读间隔超时。
+//! 这是纯信息查询，不涉及下载/安装（安装走 tauri-plugin-updater 默认的
+//! endpoint，由前端直接调用插件的 `check()`），因此直接用总超时即可，不需要
+//! 读间隔超时。
 //!
-//! Beta 版安装走本文件下方的 `check_and_install_beta_update`：tauri-plugin-
-//! updater 的 JS `check()` 不支持运行时覆盖 endpoint（只认 tauri.conf.json
-//! 里的静态配置，那个配置对应稳定版清单），所以 Beta 安装改在 Rust 侧用
-//! `UpdaterBuilder::endpoints()` 显式指向 `updater-manifest-beta` 清单。
+//! tauri.conf.json 里的默认 endpoint 现指向 `updater-manifest-beta`（项目还
+//! 没有真正的正式版之前，`updater-manifest` 那条"仅正式版"通道会因为所有
+//! 发布都带 `-beta.N` 后缀被判定为 prerelease 而永远没有更新，见
+//! `.github/workflows/release.yml` 的 `prerelease` 判定逻辑）。等项目发布
+//! 真正的非预发布版本后，再把默认 endpoint 切回 `updater-manifest`。
+//!
+//! 本文件下方的 `check_and_install_beta_update` 是设置页"立即更新并安装
+//! Beta"按钮专用：tauri-plugin-updater 的 JS `check()` 不支持运行时覆盖
+//! endpoint（只认 tauri.conf.json 里的静态配置），所以这里在 Rust 侧用
+//! `UpdaterBuilder::endpoints()` 显式指向 `updater-manifest-beta` 清单——
+//! 即便默认 endpoint 现在也指向同一个清单，这个显式指定仍然保留，不依赖
+//! 默认配置将来切回正式版通道后这个按钮还能正常工作。
 
 use std::time::Duration;
 
