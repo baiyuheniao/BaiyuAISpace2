@@ -311,9 +311,25 @@ impl Database {
     }
 
     /**
+     * 删除单条消息
+     * 用于消息编辑（截断编辑点之后的旧消息）和重新生成（删除待重生成的回复）
+     *
+     * @param message_id: 要删除的消息 ID
+     */
+    pub fn delete_message(&self, message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE id = ?1",
+            [message_id],
+        )?;
+
+        log::info!("Message deleted: {}", message_id);
+        Ok(())
+    }
+
+    /**
      * 获取指定会话的所有消息
      * 按时间戳升序排列
-     * 
+     *
      * @param session_id: 会话 ID
      * @return 消息列表
      */

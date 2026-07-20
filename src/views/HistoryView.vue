@@ -21,9 +21,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace } from "naive-ui";
+import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace, NDropdown, useMessage, type DropdownOption } from "naive-ui";
+import { save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "@/stores/chat";
-import { ChatbubblesOutline, TrashOutline, EnterOutline } from "@vicons/ionicons5";
+import { buildConversationExport, type ExportFormat } from "@/utils/exportConversation";
+import { ChatbubblesOutline, TrashOutline, EnterOutline, DownloadOutline } from "@vicons/ionicons5";
 
 // ============ 路由和状态管理 ============
 
@@ -33,12 +36,47 @@ const router = useRouter();
 // 聊天 Store - 管理会话列表
 const chat = useChatStore();
 
+// 提示消息 - 导出结果反馈，统一走左下角弹窗
+const message = useMessage();
+
 // ============ 本地状态 ============
 
 /** 加载状态 - 显示加载动画 */
 const loading = ref(false);
 
 // ============ 方法函数 ============
+
+/** 导出格式下拉菜单选项 */
+const exportOptions: DropdownOption[] = [
+  { label: "导出为 JSON", key: "json" },
+  { label: "导出为 TXT", key: "txt" },
+];
+
+/**
+ * 导出指定会话
+ * 弹出系统保存对话框选择落盘位置，再调用后端命令写入文件内容
+ *
+ * @param session - 要导出的会话（历史列表里已带全量消息，不用再单独加载）
+ * @param format - 导出格式，"json" 或 "txt"
+ */
+const handleExport = async (session: typeof chat.sessions[0], format: ExportFormat) => {
+  try {
+    const { content, filename } = buildConversationExport(session, format);
+    const filePath = await save({
+      defaultPath: filename,
+      filters: [{
+        name: format === "json" ? "JSON 文件" : "文本文件",
+        extensions: [format],
+      }],
+    });
+    if (!filePath) return; // 用户取消了保存对话框
+
+    await invoke("export_text_file_cmd", { filePath, content });
+    message.success(`对话已导出到：${filePath}`);
+  } catch (error) {
+    message.error(`导出失败：${error}`);
+  }
+};
 
 /**
  * 加载会话列表
@@ -233,6 +271,25 @@ onMounted(() => {
                   >
                     {{ formatDate(session.updatedAt) }}
                   </n-text>
+                  <!-- 导出按钮 (悬停时显示) -->
+                  <n-dropdown
+                    trigger="click"
+                    :options="exportOptions"
+                    @select="(key: string) => handleExport(session, key as ExportFormat)"
+                  >
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      class="export-btn"
+                      title="导出对话"
+                      @click.stop
+                    >
+                      <template #icon>
+                        <n-icon><DownloadOutline /></n-icon>
+                      </template>
+                    </n-button>
+                  </n-dropdown>
                   <!-- 删除按钮 (悬停时显示) -->
                   <n-popconfirm
                     positive-text="删除"
@@ -402,13 +459,15 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* 删除按钮 - 默认隐藏 */
+/* 导出/删除按钮 - 默认隐藏 */
+.export-btn,
 .delete-btn {
   opacity: 0;
   transition: opacity 0.2s;
 }
 
-/* 悬停时显示删除按钮 */
+/* 悬停时显示导出/删除按钮 */
+.history-item:hover .export-btn,
 .history-item:hover .delete-btn {
   opacity: 1;
 }

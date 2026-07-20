@@ -205,6 +205,8 @@ fn main() {
             save_message_cmd,
             get_sessions_cmd,
             delete_session_cmd,
+            delete_message_cmd,
+            export_text_file_cmd,
             clear_database_cmd,
             // 安全存储相关命令
             save_api_key,
@@ -572,6 +574,23 @@ async fn delete_session_cmd(
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
     db.delete_session(&session_id).map_err(|e| commands::local_model::friendly_err("删除会话失败，请重试", e))
+}
+
+#[tauri::command]
+async fn delete_message_cmd(
+    message_id: String,
+    db_state: tauri::State<'_, DbState>,
+) -> Result<(), String> {
+    let db = db_state.0.lock().await;
+    db.delete_message(&message_id).map_err(|e| commands::local_model::friendly_err("删除消息失败，请重试", e))
+}
+
+/// 导出对话为文本文件（JSON/TXT）：前端已用 save() 对话框拿到用户选择的落盘路径，
+/// 这里只负责把拼好的文本写进去。跟 copy_log_file 一样直接用 std::fs，不引入
+/// tauri-plugin-fs——避免为这一个功能新增插件依赖和权限声明。
+#[tauri::command]
+fn export_text_file_cmd(file_path: String, content: String) -> Result<(), String> {
+    std::fs::write(&file_path, content).map_err(|e| format!("导出失败: {}", e))
 }
 
 /// 清空数据库：删除全部会话、消息、MCP 服务器配置、Skill（设置页“危险操作”按钮对应的后端命令）
