@@ -2080,8 +2080,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
 
-  :deep(.n-card__content) {
+  :deep(.n-card-content) {
     flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -2144,6 +2145,8 @@ onBeforeUnmount(() => {
 }
 
 .agent-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -2153,6 +2156,7 @@ onBeforeUnmount(() => {
 
 .message-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   margin-bottom: 12px;
 }
@@ -2176,6 +2180,7 @@ onBeforeUnmount(() => {
 
 .timeline-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 </style>
