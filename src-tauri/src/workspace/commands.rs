@@ -1268,11 +1268,93 @@ async fn process_agent_wake(
     // 本次唤醒的工具调用摘要，唤醒结束后自动落入 scratchpad——工具轮的中间
     // 结果不跨唤醒，此前全靠模型自觉记备忘，不自觉就永久失忆
     let mut wake_tool_notes: Vec<String> = Vec::new();
-    loop {
+    // 子 Agent 真正断供前的最后一次求救机会：request_more_rounds 本身免
+    // 配额，但轮数耗尽后强制收尾轮会把 tools 字段整个摘掉（见下方），这个
+    // 逃生舱反而在最需要它的时刻不可用了。每次唤醒只给一次求救机会，避免
+    // 模型靠反复申请刷无限轮数；主 Agent 没有这个工具（额度由用户在配置里
+    // 调整，见 workspace_request_more_rounds 的 dispatch 分支），不参与求救。
+    let mut rescue_attempted = false;
+    'main: loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
         if counted_rounds >= max_tool_rounds || total_rounds >= MAX_TOTAL_ROUNDS_PER_WAKE {
+            if agent.role != AgentRole::Main && !rescue_attempted && total_rounds < MAX_TOTAL_ROUNDS_PER_WAKE {
+                rescue_attempted = true;
+                total_rounds += 1;
+                let rescue_tools: Vec<MCPTool> = tools
+                    .iter()
+                    .filter(|t| t.name == "workspace_request_more_rounds")
+                    .cloned()
+                    .collect();
+                let rescue_hint = ChatMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: "user".to_string(),
+                    content: "【系统】本次唤醒的工具调用轮数配额已用完。如果任务确实还没做完，现在是最后机会调用 workspace_request_more_rounds 申请追加轮数（这个调用本身不占配额）；如果已有信息已经够用，直接给出最终回复即可，不要调用其他工具。".to_string(),
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    error: None,
+                    images: vec![],
+                    videos: vec![],
+                };
+                native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&rescue_hint)));
+
+                let rescue_outcome = run_turn(
+                    &agent.provider,
+                    &agent.model,
+                    &api_key,
+                    &agent.base_url,
+                    Some(&system_prompt),
+                    &native_messages,
+                    &rescue_tools,
+                    agent.max_tokens.map(|v| v.max(1) as u32),
+                    agent.enable_thinking,
+                )
+                .await
+                .map_err(|e| WorkspaceError::LlmError(e.to_string()))?;
+
+                match rescue_outcome {
+                    TurnOutcome::Text(text) if !text.trim().is_empty() => {
+                        append_text_reply(&agent.provider, &mut native_messages, &text);
+                        send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
+                        produced_final_text = true;
+                        break 'main;
+                    }
+                    TurnOutcome::Text(_) => {
+                        break 'main;
+                    }
+                    TurnOutcome::ToolCalls(calls) => {
+                        let mut results = Vec::with_capacity(calls.len());
+                        for call in &calls {
+                            insert_workspace_log(
+                                app_handle,
+                                workspace_id,
+                                Some(agent_id.to_string()),
+                                "tool_call",
+                                format!("调用工具 {} 参数: {}", call.name, call.arguments),
+                            )
+                            .await;
+                            let result = dispatch_tool_call(app_handle, &workspace, &agent, call, cancel).await;
+                            results.push(result);
+                        }
+                        for (call, result) in calls.iter().zip(results.iter()) {
+                            if call.name == "workspace_request_more_rounds" {
+                                if let Some(extra) = result.get("extra_rounds").and_then(|v| v.as_u64()) {
+                                    max_tool_rounds += extra as u32;
+                                    log::info!(
+                                        "[workspace] Agent「{}」求救轮获批追加 {} 轮工具调用，本次唤醒上限提升至 {}",
+                                        agent.name, extra, max_tool_rounds
+                                    );
+                                }
+                            }
+                        }
+                        append_tool_round(&agent.provider, &mut native_messages, &calls, &results);
+                        // 求救轮不占普通工具轮配额，直接回到循环顶部：获批了
+                        // max_tool_rounds 已提高，会正常进入下一轮；没获批则
+                        // 上限不变，下一次判断仍会成立，落入强制收尾轮兜底
+                        continue 'main;
+                    }
+                }
+            }
             break;
         }
         total_rounds += 1;
