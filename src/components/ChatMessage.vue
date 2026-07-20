@@ -28,6 +28,10 @@ import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from "vue"
 // 导入 NaiveUI 组件
 import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 
+// 聊天 Store - 编辑/重新生成都要落库并重新发起生成请求，这两件事和消息本身
+// 的截断/删除逻辑都在 store 里，组件只负责触发
+import { useChatStore } from "@/stores/chat";
+
 // Markdown 渲染管线。marked/KaTeX/DOMPurify/hljs/Mermaid 的全局配置都在该
 // 模块顶层完成，整个应用只执行一次——不能放回本组件的 <script setup>：
 // setup 顶层语句每挂载一条消息都会重新执行，会给全局单例反复叠加扩展/钩子，
@@ -38,13 +42,15 @@ import { renderMarkdown, renderMermaidDiagrams } from "@/utils/markdown";
 import type { Message } from "@/stores/chat";
 
 // 导入图标
-import { Person, Sparkles, Copy } from "@vicons/ionicons5";
+import { Person, Sparkles, Copy, Create, Refresh, Checkmark, Close } from "@vicons/ionicons5";
 
 // ============ Props 定义 ============
 
 const props = defineProps<{
   message: Message;
 }>();
+
+const chat = useChatStore();
 
 // ref 指向渲染 markdown 的 DOM 节点，用于查找 Mermaid 占位元素
 const contentRef = ref<HTMLElement | null>(null);
@@ -160,6 +166,61 @@ const handleCopy = async () => {
     console.error("Failed to copy:", err);
   }
 };
+
+// ============ 编辑用户消息 ============
+
+// 是否处于编辑态；编辑框草稿内容
+const isEditing = ref(false);
+const editDraft = ref("");
+const editTextareaRef = ref<HTMLTextAreaElement | null>(null);
+
+// 编辑框随内容自动长高，避免长消息挤成一小格滚动条
+const autoGrowEditTextarea = () => {
+  const el = editTextareaRef.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+};
+
+const startEdit = async () => {
+  editDraft.value = props.message.content;
+  isEditing.value = true;
+  await nextTick();
+  autoGrowEditTextarea();
+  editTextareaRef.value?.focus();
+};
+
+const cancelEdit = () => {
+  isEditing.value = false;
+  editDraft.value = "";
+};
+
+// 保存编辑：截断该消息之后的旧回复分支，重新请求一次生成
+const confirmEdit = async () => {
+  if (!editDraft.value.trim() || chat.isLoading) return;
+  const content = editDraft.value;
+  isEditing.value = false;
+  editDraft.value = "";
+  await chat.editUserMessage(props.message.id, content);
+};
+
+// Enter 保存，Shift+Enter 换行，Esc 取消——跟 ChatInput 的发送框键位保持一致
+const handleEditKeydown = (e: KeyboardEvent) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    confirmEdit();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    cancelEdit();
+  }
+};
+
+// ============ 重新生成 AI 回复 ============
+
+const handleRegenerate = async () => {
+  if (chat.isLoading) return;
+  await chat.regenerateMessage(props.message.id);
+};
 </script>
 
 <template>
@@ -217,13 +278,50 @@ const handleCopy = async () => {
           >
         </div>
 
+        <!-- 编辑态：用户消息点"编辑"后把正文换成文本框 -->
         <div
+          v-if="isEditing"
+          class="message-edit"
+        >
+          <textarea
+            ref="editTextareaRef"
+            v-model="editDraft"
+            class="edit-textarea"
+            placeholder="编辑消息内容..."
+            @input="autoGrowEditTextarea"
+            @keydown="handleEditKeydown"
+          />
+          <div class="edit-actions">
+            <button
+              class="edit-btn edit-btn-primary"
+              :disabled="!editDraft.trim() || chat.isLoading"
+              @click="confirmEdit"
+            >
+              <n-icon :size="14">
+                <Checkmark />
+              </n-icon>
+              保存并重新生成
+            </button>
+            <button
+              class="edit-btn"
+              @click="cancelEdit"
+            >
+              <n-icon :size="14">
+                <Close />
+              </n-icon>
+              取消
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-else
           ref="contentRef"
           class="markdown-content"
           @click="handleMarkdownClick"
           v-html="renderedContent"
         />
-        
+
         <!-- Streaming indicator -->
         <div
           v-if="message.streaming"
@@ -280,9 +378,30 @@ const handleCopy = async () => {
 
       <!-- Actions -->
       <div
-        v-if="!isUser && !message.streaming"
+        v-if="!message.streaming && !isEditing"
         class="message-actions"
       >
+        <button
+          v-if="isUser"
+          class="action-btn"
+          title="编辑"
+          @click="startEdit"
+        >
+          <n-icon :size="14">
+            <Create />
+          </n-icon>
+        </button>
+        <button
+          v-if="isAssistant"
+          class="action-btn"
+          title="重新生成"
+          :disabled="chat.isLoading"
+          @click="handleRegenerate"
+        >
+          <n-icon :size="14">
+            <Refresh />
+          </n-icon>
+        </button>
         <n-tooltip
           placement="top"
           :show="copied"
@@ -673,6 +792,76 @@ const handleCopy = async () => {
   word-break: break-word;
 }
 
+/* 编辑态：用户消息就地改成文本框 */
+.message-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.edit-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 10px 12px;
+  background: $bg;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  color: $ink;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: $leading-body;
+  resize: none;
+  overflow: hidden;
+  transition: border-color $duration $ease;
+
+  &:focus {
+    outline: none;
+    border-color: $ink;
+  }
+}
+
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.edit-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  background: $bg;
+  color: $ink-soft;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition:
+    background $duration $ease,
+    color $duration $ease;
+
+  &:hover:not(:disabled) {
+    background: $ink;
+    color: $bg;
+  }
+
+  &:disabled {
+    color: $ink-faint;
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+}
+
+.edit-btn-primary {
+  background: $ink;
+  border-color: $ink;
+  color: $bg;
+
+  &:hover:not(:disabled) {
+    background: $bg;
+    color: $ink;
+  }
+}
+
 .streaming-indicator {
   display: flex;
   align-items: center;
@@ -768,6 +957,17 @@ const handleCopy = async () => {
   transition:
     background $duration $ease,
     color $duration $ease;
+
+  &:disabled {
+    color: $ink-faint;
+    cursor: not-allowed;
+    opacity: 0.5;
+
+    &:hover {
+      background: $bg;
+      color: $ink-faint;
+    }
+  }
 }
 
 .streaming-text {

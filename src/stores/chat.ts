@@ -501,37 +501,27 @@ export const useChatStore = defineStore("chat", () => {
   };
 
   /**
-   * 发送消息 (核心函数)
-   * 处理用户消息发送、LLM 调用、流式响应等完整流程
+   * 校验当前会话可用于生成回复的 API 配置
+   * sendMessage / regenerateMessage / editUserMessage 共用同一份校验逻辑
    *
-   * @param content - 消息内容
-   * @param attachedFiles - 附件文件列表 (可选, 仅元数据)
-   * @param images - 图片附件 (可选, 含 base64 数据)
-   * @returns void
+   * @returns 校验通过的配置对象，失败返回 null（已弹出 alert 提示）
    */
-  const sendMessage = async (
-    content: string,
-    attachedFiles?: Array<{ name: string; size: number }>,
-    images?: ImageAttachment[],
-    videos?: VideoAttachment[],
-    documentContents?: Array<{ name: string; content: string }>
-  ) => {
-    // 检查是否有当前会话
-    if (!currentSession.value) return;
+  const resolveActiveConfig = () => {
+    if (!currentSession.value) return null;
 
     // 优先使用当前激活的 API 配置（允许在不新建会话的情况下切换 API）
-    const effectiveConfigId = settings.activeConfigId ?? currentSession.value!.apiConfigId;
+    const effectiveConfigId = settings.activeConfigId ?? currentSession.value.apiConfigId;
     const config = settings.apiConfigs.find(c => c.id === effectiveConfigId);
     if (!config) {
       console.error("API config not found for session");
       alert("未找到 API 配置，请检查设置");
-      return;
+      return null;
     }
     // 若与会话绑定的配置不同，同步更新当前会话（影响 History 显示）
-    if (effectiveConfigId !== currentSession.value!.apiConfigId) {
-      currentSession.value!.apiConfigId = config.id;
-      currentSession.value!.provider = config.provider;
-      currentSession.value!.model = config.model;
+    if (effectiveConfigId !== currentSession.value.apiConfigId) {
+      currentSession.value.apiConfigId = config.id;
+      currentSession.value.provider = config.provider;
+      currentSession.value.model = config.model;
     }
 
     // 检查 API 密钥是否已加载
@@ -539,63 +529,32 @@ export const useChatStore = defineStore("chat", () => {
     if (config.provider !== "local" && !config.apiKey) {
       console.error("API key not loaded for config:", config.id);
       alert("API 密钥未加载，请重启应用或重新设置");
-      return;
+      return null;
     }
 
-    // 初始化内容变量
-    let enhancedContent = content;
+    return config;
+  };
 
-    // ============ 文档上下文注入 ============
-    let docContext = "";
-    if (documentContents && documentContents.length > 0) {
-      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
-      docContext = `[用户附加文档]\n${docParts.join('\n---\n')}`;
-    }
+  /**
+   * 基于当前会话已有的消息列表向 LLM 请求一次新回复 (核心生成函数)
+   * 发送新消息、编辑用户消息后重新生成、点击"重新生成"共用这一段逻辑——
+   * 三者的差异只在调用前如何整理 currentSession.value.messages，生成本身
+   * (占位消息、构建 API 消息数组、system prompt 注入、流式调用、标题更新、
+   * 错误处理) 完全一致，不应该抄三份。
+   *
+   * @param contentOverride - 仅用于 sendMessage 的 RAG/文档上下文注入：某条
+   *   消息在聊天气泡里显示原始输入，但发给模型的那一份要换成注入过上下文的
+   *   增强内容。不传则每条消息都按 m.content 原样发送。
+   * @returns void
+   */
+  const generateReply = async (contentOverride?: { messageId: string; content: string }) => {
+    if (!currentSession.value) return;
 
-    // ============ RAG 检索增强 ============
-    let retrievalContext = "";
-    if (ragEnabled.value && selectedKnowledgeBaseId.value) {
-      const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
-      if (kb) {
-        const result = await kbStore.searchKnowledgeBase(
-          selectedKnowledgeBaseId.value,
-          content
-        );
-        if (result && result.chunks.length > 0) {
-          lastRetrievalResult.value = result;
-          retrievalContext = buildRagContext(result);
-        }
-      }
-    }
+    const config = resolveActiveConfig();
+    if (!config) return;
 
-    // 合并上下文，构建最终发送内容
-    const contextParts: string[] = [];
-    if (retrievalContext) contextParts.push(retrievalContext);
-    if (docContext) contextParts.push(docContext);
-    if (contextParts.length > 0) {
-      enhancedContent = `${contextParts.join('\n\n')}\n\n问题：${content}`;
-    }
-
-    // 构建用户消息对象
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content,
-      timestamp: Date.now(),
-      files: attachedFiles && attachedFiles.length > 0 ? attachedFiles : undefined,
-      images: images && images.length > 0 ? images : undefined,
-      videos: videos && videos.length > 0 ? videos : undefined,
-    };
-
-    // 添加到当前会话
-    currentSession.value.messages.push(userMessage);
-    currentSession.value.updatedAt = Date.now();
     isLoading.value = true;
     currentStreamContent.value = "";
-
-    // 保存到数据库（先保存 session，再保存 message，满足外键约束）
-    await saveSessionToDb();
-    await saveMessageToDb(userMessage);
 
     try {
       // 创建助手消息占位
@@ -609,34 +568,18 @@ export const useChatStore = defineStore("chat", () => {
       currentSession.value.messages.push(assistantMessage);
 
       // ============ 构建 API 消息列表 ============
-      // Use userMessage.id to identify the RAG target — positional index is
-      // unreliable when prior error messages have been filtered out of the array.
       const apiMessages = currentSession.value.messages
         // 过滤掉流式中和有错误的消息
         .filter(m => !m.streaming && !m.error)
-        .map((m) => {
-          // 如果有增强内容（RAG 或文档注入），在当前用户消息中替换
-          if (m.id === userMessage.id && enhancedContent !== content) {
-            return {
-              id: m.id,
-              role: m.role,
-              content: enhancedContent,
-              timestamp: m.timestamp,
-              error: m.error,
-              images: m.images ?? [],
-              videos: m.videos ?? [],
-            };
-          }
-          return {
-            id: m.id,
-            role: m.role,
-            content: m.content,
-            timestamp: m.timestamp,
-            error: m.error,
-            images: m.images ?? [],
-            videos: m.videos ?? [],
-          };
-        });
+        .map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: (contentOverride && m.id === contentOverride.messageId) ? contentOverride.content : m.content,
+          timestamp: m.timestamp,
+          error: m.error,
+          images: m.images ?? [],
+          videos: m.videos ?? [],
+        }));
 
       // ============ 全局 System Prompt ============
       const globalSystemPrompt = settings.systemPrompt.trim();
@@ -701,11 +644,11 @@ export const useChatStore = defineStore("chat", () => {
 
       // ============ 调用后端流式消息 API ============
       try {
-        console.log("[sendMessage] Calling stream_message, sessionId:", requestPayload.sessionId, "messageCount:", requestPayload.messages.length);
+        console.log("[generateReply] Calling stream_message, sessionId:", requestPayload.sessionId, "messageCount:", requestPayload.messages.length);
         await invoke('stream_message', { request: requestPayload });
-        console.log("[sendMessage] stream_message completed");
+        console.log("[generateReply] stream_message completed");
       } catch (e) {
-        console.error('[sendMessage] stream_message error:', e);
+        console.error('[generateReply] stream_message error:', e);
         if (import.meta.env.DEV) console.error('stream_message error', e);
         throw e;
       }
@@ -713,7 +656,8 @@ export const useChatStore = defineStore("chat", () => {
       // ============ 更新会话标题 ============
       // 如果是第一条对话 (用户消息 + 助手回复)，更新标题
       if (currentSession.value.messages.length === 2) {
-        currentSession.value.title = content.slice(0, 30) + (content.length > 30 ? "..." : "");
+        const firstUserMessage = currentSession.value.messages[0];
+        currentSession.value.title = firstUserMessage.content.slice(0, 30) + (firstUserMessage.content.length > 30 ? "..." : "");
         await saveSessionToDb();
         // 只局部更新 sessions 列表的标题，不调用 loadSessionsFromDb()
         // 原因：loadSessionsFromDb 会用 DB 旧数据覆盖内存中正在 streaming 的 assistantMessage，导致消息消失
@@ -740,18 +684,176 @@ export const useChatStore = defineStore("chat", () => {
       // ============ 错误处理 ============
       const errorInfo = classifyError(error);
       const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-      
+
       // 将错误信息保存到消息中
       if (lastMessage.role === "assistant") {
         lastMessage.error = errorInfo.message;
         lastMessage.streaming = false;
         await saveMessageToDb(lastMessage);
       }
-      
+
       console.error(`[${errorInfo.type}] ${error}`);
       isLoading.value = false;
       currentStreamContent.value = "";
     }
+  };
+
+  /**
+   * 发送消息 (核心函数)
+   * 处理用户消息发送、LLM 调用、流式响应等完整流程
+   *
+   * @param content - 消息内容
+   * @param attachedFiles - 附件文件列表 (可选, 仅元数据)
+   * @param images - 图片附件 (可选, 含 base64 数据)
+   * @returns void
+   */
+  const sendMessage = async (
+    content: string,
+    attachedFiles?: Array<{ name: string; size: number }>,
+    images?: ImageAttachment[],
+    videos?: VideoAttachment[],
+    documentContents?: Array<{ name: string; content: string }>
+  ) => {
+    // 检查是否有当前会话
+    if (!currentSession.value) return;
+    if (!resolveActiveConfig()) return;
+
+    // 初始化内容变量
+    let enhancedContent = content;
+
+    // ============ 文档上下文注入 ============
+    let docContext = "";
+    if (documentContents && documentContents.length > 0) {
+      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
+      docContext = `[用户附加文档]\n${docParts.join('\n---\n')}`;
+    }
+
+    // ============ RAG 检索增强 ============
+    let retrievalContext = "";
+    if (ragEnabled.value && selectedKnowledgeBaseId.value) {
+      const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
+      if (kb) {
+        const result = await kbStore.searchKnowledgeBase(
+          selectedKnowledgeBaseId.value,
+          content
+        );
+        if (result && result.chunks.length > 0) {
+          lastRetrievalResult.value = result;
+          retrievalContext = buildRagContext(result);
+        }
+      }
+    }
+
+    // 合并上下文，构建最终发送内容
+    const contextParts: string[] = [];
+    if (retrievalContext) contextParts.push(retrievalContext);
+    if (docContext) contextParts.push(docContext);
+    if (contextParts.length > 0) {
+      enhancedContent = `${contextParts.join('\n\n')}\n\n问题：${content}`;
+    }
+
+    // 构建用户消息对象——聊天气泡展示原始输入，RAG/文档增强内容只通过
+    // generateReply 的 contentOverride 参数注入发给模型的那份拷贝，不写进
+    // 消息本身（写进去用户编辑这条消息时会看到一堆检索上下文，体验很差）
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content,
+      timestamp: Date.now(),
+      files: attachedFiles && attachedFiles.length > 0 ? attachedFiles : undefined,
+      images: images && images.length > 0 ? images : undefined,
+      videos: videos && videos.length > 0 ? videos : undefined,
+    };
+
+    // 添加到当前会话
+    currentSession.value.messages.push(userMessage);
+    currentSession.value.updatedAt = Date.now();
+
+    // 保存到数据库（先保存 session，再保存 message，满足外键约束）
+    await saveSessionToDb();
+    await saveMessageToDb(userMessage);
+
+    await generateReply(
+      enhancedContent !== content ? { messageId: userMessage.id, content: enhancedContent } : undefined
+    );
+  };
+
+  /**
+   * 从数据库批量删除消息（编辑/重新生成截断旧分支时用）
+   * 失败塞进 dbSaveErrorNotices 队列走统一弹窗，理由同 saveMessageToDb——
+   * store 里拿不到 NMessageProvider 上下文，没法直接弹窗
+   *
+   * @param messages - 要删除的消息列表
+   * @returns void
+   */
+  const deleteMessagesFromDb = async (messages: Message[]) => {
+    for (const m of messages) {
+      try {
+        await invoke("delete_message_cmd", { messageId: m.id });
+      } catch (error) {
+        console.error("Failed to delete message:", error);
+        dbSaveErrorNotices.value.push(`旧消息清理失败：${classifyError(error).message}`);
+      }
+    }
+  };
+
+  /**
+   * 编辑一条已发送的用户消息并重新生成回复
+   * 截断该消息之后的所有旧消息（含旧的 AI 回复），更新消息内容，再重新请求一次生成——
+   * 与 ChatGPT/Claude 官方客户端的"编辑并重新生成"行为一致，不支持只改文字不重新生成，
+   * 因为旧回复是针对旧内容生成的，留着会造成上下文和回复对不上。
+   *
+   * @param messageId - 要编辑的用户消息 ID
+   * @param newContent - 编辑后的新内容
+   * @returns void
+   */
+  const editUserMessage = async (messageId: string, newContent: string) => {
+    if (!currentSession.value) return;
+    if (isLoading.value) return;
+
+    const idx = currentSession.value.messages.findIndex(m => m.id === messageId);
+    if (idx === -1) return;
+    const target = currentSession.value.messages[idx];
+    if (target.role !== "user") return;
+
+    const trimmed = newContent.trim();
+    if (!trimmed) return;
+
+    // 截断该消息之后的所有消息（旧回复分支作废）
+    const removed = currentSession.value.messages.splice(idx + 1);
+
+    target.content = trimmed;
+    target.error = undefined;
+    currentSession.value.updatedAt = Date.now();
+
+    // 先删库里的旧消息，再保存编辑后的内容
+    await deleteMessagesFromDb(removed);
+    await saveMessageToDb(target);
+    await saveSessionToDb();
+
+    await generateReply();
+  };
+
+  /**
+   * 重新生成指定的 AI 回复
+   * 删除该回复（及其后的所有消息，理论上只会有它自己），基于剩余上下文重新请求一次生成
+   *
+   * @param messageId - 要重新生成的 assistant 消息 ID
+   * @returns void
+   */
+  const regenerateMessage = async (messageId: string) => {
+    if (!currentSession.value) return;
+    if (isLoading.value) return;
+
+    const idx = currentSession.value.messages.findIndex(m => m.id === messageId);
+    if (idx === -1) return;
+    const target = currentSession.value.messages[idx];
+    if (target.role !== "assistant") return;
+
+    const removed = currentSession.value.messages.splice(idx);
+    await deleteMessagesFromDb(removed);
+
+    await generateReply();
   };
 
   /**
@@ -893,6 +995,8 @@ export const useChatStore = defineStore("chat", () => {
     createSession,           // 创建新会话
     loadSession,             // 加载会话
     sendMessage,             // 发送消息
+    editUserMessage,         // 编辑用户消息并重新生成
+    regenerateMessage,       // 重新生成 AI 回复
     deleteSession,           // 删除会话
     clearSession,            // 清除当前会话
     toggleSkillActive,       // 切换 Skill 手动激活状态
