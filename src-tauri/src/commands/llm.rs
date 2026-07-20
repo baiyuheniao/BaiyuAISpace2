@@ -213,14 +213,18 @@ impl Serialize for LLMError {
 
 /// LLM 提供商配置
 /// 格式: (提供商标识符, API 端点, 认证头类型)
-/// 
+///
+/// 第三个字段仅供人工参考，实际请求头由 build_headers() 按 provider 名
+/// 单独匹配决定（google/azure/anthropic 各有专属分支，其余走 Bearer）。
 /// - bearer: 使用 Authorization: Bearer token
 /// - x_api_key: 使用 x-api-key 头
+/// - api_key: 使用 api-key 头（Azure）
+/// - x_goog_api_key: 使用 x-goog-api-key 头（Google）
 const PROVIDER_CONFIGS: &[(&str, &str, &str)] = &[
     ("openai", "https://api.openai.com/v1/chat/completions", "bearer"),
     ("anthropic", "https://api.anthropic.com/v1/messages", "x_api_key"),
-    ("google", "https://generativelanguage.googleapis.com/v1beta/models/", "bearer"),
-    ("azure", "", "bearer"),
+    ("google", "https://generativelanguage.googleapis.com/v1beta/models/", "x_goog_api_key"),
+    ("azure", "", "api_key"),
     ("mistral", "https://api.mistral.ai/v1/chat/completions", "bearer"),
     ("moonshot", "https://api.moonshot.cn/v1/chat/completions", "bearer"),
     ("zhipu", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "bearer"),

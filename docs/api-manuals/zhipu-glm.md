@@ -60,8 +60,14 @@ curl https://open.bigmodel.cn/api/paas/v4/chat/completions \
 - glm-4
 - glm-3-turbo
 - glm-4v-plus / glm-4.5v / glm-4.6v（视觉）
+- glm-5.1（当前旗舰对话模型）
+
+## Embedding
+
+代码 `src-tauri/src/knowledge_base/embedding.rs` 目前只接了 `embedding-2`（1024 维）。智谱官方已上线更新的 `embedding-3`，尚未在代码里接入，属于待办事项，不影响现有功能。
 
 ## 更新日志
 
+- 2026-07-20: 补充 glm-5.1 旗舰模型；记录 embedding-3 尚未接入
 - 2026-07-02: 核实并补充图片输入格式（OpenAI 兼容端点下需要 data URI 前缀）
 - 2026-04-25: 初始文档

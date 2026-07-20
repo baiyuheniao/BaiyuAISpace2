@@ -8,8 +8,10 @@
 ## API 端点
 
 ```
-https://api.minimax.chat/v1/text/chatcompletion_v2
+https://api.minimax.io/v1/text/chatcompletion_v2
 ```
+
+⚠️ 域名是 `api.minimax.io`，不是 `api.minimax.chat`（旧文档常见笔误，代码 `PROVIDER_CONFIGS` 用的是 `.io`）。另外 `chatcompletion_v2` 目前官方已标记为 deprecated，推荐迁移路径是 OpenAI 兼容的 `/v1/chat/completions`；`.io` + `chatcompletion_v2` 组合仍可用，但属于过渡期端点，未来可能下线。
 
 ## 认证方式
 
@@ -20,7 +22,7 @@ Authorization: Bearer YOUR_API_KEY
 ## 请求示例
 
 ```bash
-curl https://api.minimax.chat/v1/text/chatcompletion_v2 \
+curl https://api.minimax.io/v1/text/chatcompletion_v2 \
   -H "Authorization: Bearer $MINIMAX_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -32,7 +34,7 @@ curl https://api.minimax.chat/v1/text/chatcompletion_v2 \
 ## 流式请求
 
 ```bash
-curl https://api.minimax.chat/v1/text/chatcompletion_v2 \
+curl https://api.minimax.io/v1/text/chatcompletion_v2 \
   -H "Authorization: Bearer $MINIMAX_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -66,5 +68,6 @@ curl https://api.minimax.chat/v1/text/chatcompletion_v2 \
 
 ## 更新日志
 
+- 2026-07-20: 修正端点域名笔误（`.chat` → `.io`，与代码一致）；补充 `chatcompletion_v2` 已被官方标记 deprecated 的提醒
 - 2026-07-02: 补充图片/视频输入格式说明；记录代码尚未适配 MiniMax 视频输入这一缺口
 - 2026-04-25: 初始文档

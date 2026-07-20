@@ -12,6 +12,8 @@
 https://api.deepseek.com/chat/completions
 ```
 
+代码 `PROVIDER_CONFIGS` 实际用的是 `https://api.deepseek.com/v1/chat/completions`（多了 `/v1`）。据官方文档，`v1` 在 DeepSeek 这里不是真实的版本号、只是为了兼容 OpenAI SDK 保留的路径段，两种写法效果完全一致，纯粹是文档措辞差异，不是代码 bug。
+
 ## 认证方式
 
 ```http
@@ -54,5 +56,6 @@ curl https://api.deepseek.com/chat/completions \
 
 ## 更新日志
 
+- 2026-07-20: 补充说明代码端点带 `/v1` 与本文档示例的差异（两者等效，非 bug）
 - 2026-07-02: 核实确认官方 API 不支持图片/视频输入
 - 2026-04-25: 初始文档

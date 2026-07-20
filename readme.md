@@ -134,7 +134,6 @@
 
 ### 开发中 / 规划中
 
-- [ ] **会议异常恢复**：App 重启后清理残留 `meeting` 状态；LLM 报错时立即发信号而非等满超时
 - [ ] **插件系统**：第三方工具扩展
 - [ ] **Web UI**：浏览器端访问
 - [ ] **移动端**：Android/iOS 适配（计划新建独立子项目，主项目不优先实现本地推理等重型功能）
@@ -278,7 +277,7 @@ BaiyuAISpace2/
 │   │   ├── local_model.rs      # Ollama 安装/服务/模型管理
 │   │   ├── lmstudio.rs         # LM Studio 集成
 │   │   ├── docker.rs           # Docker 镜像/容器管理
-│   │   └── auth.rs             # 百度 Access Token 等认证
+│   │   └── app_update.rs       # 应用内自动更新检测
 │   ├── workspace/              # Agent Team 后端
 │   │   ├── commands.rs         # Tauri 命令 + Agent 循环 + 会议逻辑
 │   │   ├── db.rs
@@ -326,6 +325,7 @@ pnpm tauri build
 | **零一万物 (Yi)**          | 🇨🇳 中国 | yi-large, yi-medium                                    | 开源+商用 我没怎么见         |
 | **本地（Ollama）**         | 🌐 本地   | Llama 3、Qwen3、Gemma 等                             | 完全离线，数据不出设备          |
 | **本地（LM Studio）**      | 🌐 本地   | 任意 GGUF 模型                                        | GUI 友好，OpenAI 兼容接口   |
+| **OpenClaw（本地网关）**    | 🌐 本地   | 任意 OpenClaw 网关代理的模型                          | 需在 OpenClaw 侧手动开启 chatCompletions 端点并配置鉴权 token |
 | **自定义**                | 🌐 全球   | 任意 OpenAI 兼容接口                                   | 灵活配置 Base URL        |
 
 > 💡 各服务商模型更新频繁，完整列表请查看官方文档。设置中可直接输入模型名称添加新模型。
@@ -335,7 +335,6 @@ pnpm tauri build
 ## 🐛 已知问题
 
 1. **Windows 首次编译慢**：Rust 链接器在 Windows 上较慢，首次编译需 3-5 分钟
-2. **会议中途 App 重启**：重启后 Agent 的 `meeting` 状态不会自动清理，需手动操作
 
 ***
 

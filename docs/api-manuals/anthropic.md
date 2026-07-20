@@ -68,12 +68,15 @@ curl https://api.anthropic.com/v1/messages \
 
 ## 常用模型
 
-- claude-opus-4-20250514
-- claude-sonnet-4-20250514
-- claude-3-5-sonnet-20241022
-- claude-3-opus-20240229
+（模型名是用户在设置里自由填写的字符串，代码不做硬编码校验，以下仅为 2026-07 时点的当前主力型号，会持续变化）
+
+- claude-fable-5
+- claude-opus-4-8
+- claude-sonnet-5
+- claude-haiku-4-5-20251001
 
 ## 更新日志
 
+- 2026-07-20: 更新常用模型列表为当前主力型号（原列表 claude-sonnet/opus-4-20250514 等已是旧代际）
 - 2026-07-02: 补充图片输入格式 (data 字段为纯 base64，无 data URI 前缀) 与 Prompt Caching 说明
 - 2026-04-25: 初始文档
