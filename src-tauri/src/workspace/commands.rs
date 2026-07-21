@@ -1749,12 +1749,12 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
             server_id: "workspace".to_string(),
             server_name: "workspace".to_string(),
             name: "workspace_message".to_string(),
-            description: "向工作组内的其他 Agent 或用户发送一条消息。to_agent_id 填具体 Agent 的 id，或填 \"all\" 广播给所有人。"
+            description: "向工作组内的其他 Agent 或用户发送一条消息。to_agent_id 填具体 Agent 的 id（推荐，用 workspace_agent_list 获取），也可以直接填它的名字；或填 \"all\" 广播给所有人。"
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "to_agent_id": { "type": "string", "description": "目标 Agent 的 id，或 \"all\" 广播给所有人" },
+                    "to_agent_id": { "type": "string", "description": "目标 Agent 的 id 或名字，或 \"all\" 广播给所有人" },
                     "content": { "type": "string", "description": "消息内容" }
                 },
                 "required": ["to_agent_id", "content"]
@@ -1965,11 +1965,33 @@ async fn dispatch_tool_call(
 ) -> serde_json::Value {
     match call.name.as_str() {
         "workspace_message" => {
-            let to_agent_id = call.arguments.get("to_agent_id").and_then(|v| v.as_str()).unwrap_or("all").to_string();
+            let raw_to = call.arguments.get("to_agent_id").and_then(|v| v.as_str()).unwrap_or("all").to_string();
             let content = call.arguments.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if content.trim().is_empty() {
                 return serde_json::json!({ "error": "content 不能为空" });
             }
+            // 模型经常记不住创建时拿到的 UUID，只记得自己给 Agent 起的名字，
+            // 于是拿名字当 id 传进来——如果不在这里兜底解析，消息会带着一个
+            // 谁都不认的 to_agent_id 静默落库：唤醒查不到 handle、历史回放也
+            // 按真实 id 过滤不出这条消息，目标 Agent 永远收不到，模型却拿到
+            // 一个 "sent" 的假成功，会一直误以为对方在处理。
+            let to_agent_id = if raw_to == "all" {
+                raw_to
+            } else {
+                let members = list_agents_for_workspace(app_handle, &workspace.id).await;
+                if members.iter().any(|a| a.id == raw_to) {
+                    raw_to
+                } else if let Some(matched) = members.iter().find(|a| a.name == raw_to) {
+                    matched.id.clone()
+                } else {
+                    return serde_json::json!({
+                        "error": format!(
+                            "找不到 id 或名字为「{}」的 Agent，请先调用 workspace_agent_list 确认目标 Agent 的真实 id",
+                            raw_to
+                        )
+                    });
+                }
+            };
             if to_agent_id == agent.id {
                 return serde_json::json!({ "error": "不能给自己发消息，请使用 workspace_agent_list 查看其他 Agent 的 id" });
             }
