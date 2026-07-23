@@ -233,6 +233,28 @@ const MCP_MARKET_EXTRA: MCPPreset[] = [
     needsConfig: "请将数据库路径改为你本地的 .db 文件路径",
     category: "文件与数据",
   },
+  {
+    id: "dingtalk",
+    name: "钉钉机器人通知",
+    description: "向钉钉群机器人发送文本/Markdown/链接消息，适合任务完成、会话结束等场景的主动通知",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "claude-code-dingtalk-mcp"],
+    needsConfig:
+      "无需预先修改参数：添加后让 AI 调用 dingtalk_configure 工具，传入钉钉群机器人的 Webhook 地址（和可选的加签密钥）即可完成配置",
+    category: "通知与协作",
+  },
+  {
+    id: "feishu-lark",
+    name: "飞书 / Lark 官方工具集",
+    description: "飞书官方 OpenAPI MCP，覆盖消息、文档、多维表格、知识库、日历等接口，可读写飞书工作区内容",
+    serverType: "stdio",
+    command: "npx",
+    args: ["-y", "@larksuiteoapi/lark-mcp", "mcp", "-a", "your_app_id", "-s", "your_app_secret"],
+    needsConfig:
+      "请将 -a 后的值改为飞书应用的 App ID，-s 后的值改为 App Secret（在飞书开放平台创建企业自建应用后获取）",
+    category: "通知与协作",
+  },
 ];
 
 /** 市场目录 = 推荐能力里的预设 + 市场专属条目，二者共享同一套"填表单/查状态"逻辑 */
