@@ -29,6 +29,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -58,6 +60,25 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Annotated Tag 的正文就是人工确认过的更新说明。把它直接带进草稿 Release，
+      # 避免构建完成后只剩安装包说明、漏写本次实际更新内容。
+      - name: Prepare release notes from annotated tag
+        id: release-notes
+        shell: pwsh
+        run: |
+          $tagNotes = (git for-each-ref "refs/tags/$env:GITHUB_REF_NAME" --format="%(contents)" | Out-String).Trim()
+          if ([string]::IsNullOrWhiteSpace($tagNotes)) {
+            $tagNotes = "更新内容：`n`n- 请在发布前补充本次更新内容。"
+          }
+          $body = @"
+          $tagNotes
+
+          各平台安装包见下方 Assets。Windows 提供 .exe 安装包（NSIS）和便携版单文件 exe（免安装，双击运行），macOS 用 .dmg，Linux 用 .AppImage。
+          "@
+          "body<<RELEASE_BODY_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $body.Trim() | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "RELEASE_BODY_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       # tauri-action 会自动执行 beforeBuildCommand（pnpm build）、
       # 打包 tauri.conf.json 里声明的 targets，并把产物挂到 Release
       - uses: tauri-apps/tauri-action@v0
@@ -69,7 +90,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'BaiyuAISpace ${{ github.ref_name }}'
-          releaseBody: '各平台安装包见下方 Assets。Windows 提供 .exe 安装包（NSIS）和便携版单文件 exe（免安装，双击运行），macOS 用 .dmg，Linux 用 .AppImage。'
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
           # 带 “-” 的标签（如 v0.2.0-beta.1）自动标为预发布版本
           prerelease: ${{ contains(github.ref_name, '-') }}

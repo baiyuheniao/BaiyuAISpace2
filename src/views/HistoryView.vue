@@ -19,14 +19,16 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace, NDropdown, useMessage, type DropdownOption } from "naive-ui";
 import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { useChatStore } from "@/stores/chat";
+import { useChatStore, type ChatSession } from "@/stores/chat";
 import { buildConversationExport, type ExportFormat } from "@/utils/exportConversation";
 import { ChatbubblesOutline, TrashOutline, EnterOutline, DownloadOutline } from "@vicons/ionicons5";
+import TokenCount from "@/components/TokenCount.vue";
+import { countMessageTokens } from "@/utils/tokenCount";
 
 // ============ 路由和状态管理 ============
 
@@ -43,6 +45,14 @@ const message = useMessage();
 
 /** 加载状态 - 显示加载动画 */
 const loading = ref(false);
+
+/** 当前已加载的全部历史会话可见文本 Token 估算。 */
+const historyTokenCount = computed(() =>
+  chat.sessions.reduce(
+    (total: number, session: ChatSession) => total + countMessageTokens(session.messages),
+    0
+  )
+);
 
 // ============ 方法函数 ============
 
@@ -163,9 +173,15 @@ onMounted(() => {
         <!-- 页面标题 -->
         <header class="page-header enter-up">
           <span class="eyebrow">History</span>
-          <h1 class="page-title">
-            历史记录
-          </h1>
+          <div class="page-heading-row">
+            <h1 class="page-title">
+              历史记录
+            </h1>
+            <TokenCount
+              label="全部历史"
+              :count="historyTokenCount"
+            />
+          </div>
           <p class="page-desc">
             所有对话会话的存档，点击任意条目继续对话。
           </p>
@@ -255,6 +271,10 @@ onMounted(() => {
                   >
                     {{ session.messages.length }} 条消息
                   </n-text>
+                  <TokenCount
+                    label="会话"
+                    :count="countMessageTokens(session.messages)"
+                  />
                 </n-space>
               </template>
               
@@ -372,6 +392,13 @@ onMounted(() => {
   font-weight: 700;
   line-height: $leading-display;
   color: $ink;
+}
+
+.page-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
 }
 
 /* 页面描述 */

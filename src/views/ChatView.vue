@@ -24,6 +24,8 @@ import { useChatStore } from "@/stores/chat";
 import { useSettingsStore } from "@/stores/settings";
 import ChatMessage from "@/components/ChatMessage.vue";
 import ChatInput from "@/components/ChatInput.vue";
+import TokenCount from "@/components/TokenCount.vue";
+import { countMessageTokens } from "@/utils/tokenCount";
 
 // ============ 状态管理 ============
 
@@ -45,6 +47,11 @@ const messagesContainer = ref<HTMLDivElement | null>(null);
 const hasMessages = computed(() => {
   return chat.currentSession && chat.currentSession.messages.length > 0;
 });
+
+/** 当前会话全部可见消息的文本 Token 估算，流式输出时实时增长。 */
+const sessionTokenCount = computed(() =>
+  countMessageTokens(chat.currentSession?.messages ?? [])
+);
 
 // ============ 方法函数 ============
 
@@ -102,6 +109,17 @@ onMounted(async () => {
 <template>
   <!-- 聊天主布局容器 -->
   <div class="chat-view">
+    <div
+      v-if="chat.currentSession"
+      class="session-token-bar"
+    >
+      <span class="session-token-eyebrow">Session Context</span>
+      <TokenCount
+        label="本会话"
+        :count="sessionTokenCount"
+      />
+    </div>
+
     <!-- 消息区域 (滚动容器) -->
     <div
       ref="messagesContainer"
@@ -222,6 +240,26 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   background: $bg;
+}
+
+.session-token-bar {
+  min-height: 36px;
+  padding: 0 32px;
+  border-bottom: $border-faint;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: $bg;
+}
+
+.session-token-eyebrow {
+  color: $ink-faint;
+  font-family: $font-sans;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: $label-tracking;
+  text-transform: uppercase;
 }
 
 /* 消息区域 - 占据剩余空间并承担滚动 */

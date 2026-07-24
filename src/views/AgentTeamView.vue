@@ -27,6 +27,8 @@ import {
 } from "@vicons/ionicons5";
 
 import ChatMessage from "@/components/ChatMessage.vue";
+import TokenCount from "@/components/TokenCount.vue";
+import { countMessageTokens } from "@/utils/tokenCount";
 import {
   useWorkspaceStore, AGENT_GUIDELINES_BASE, AGENT_GUIDELINES_SUB,
   type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest,
@@ -424,6 +426,10 @@ const agentMessages = computed(() => {
     }));
 });
 
+/** 当前工作组与所选 Agent 对话中，已经加载到前端的可见文本 Token。 */
+const workspaceTokenCount = computed(() => countMessageTokens(workspace.messages));
+const agentTokenCount = computed(() => countMessageTokens(agentMessages.value));
+
 // 待发送的图片附件（base64；发送给支持视觉的模型，并随消息入库）
 const attachedMsgImages = ref<{ name: string; data: string; mediaType: string }[]>([]);
 const msgImageInputRef = ref<HTMLInputElement | null>(null);
@@ -777,7 +783,16 @@ onBeforeUnmount(() => {
           协作团队
         </h1>
       </div>
-      <n-space>
+      <n-space align="center">
+        <TokenCount
+          v-if="workspace.currentWorkspace"
+          :label="workspace.hasMoreMessages ? '已载入工作组' : '当前工作组'"
+          :count="workspaceTokenCount"
+          :description="workspace.hasMoreMessages
+            ? '估算值，仅统计已经加载的工作组消息；点击加载更早消息后会继续累加'
+            : '估算值，仅统计工作组消息的可见文本；不含图片、系统提示词和工具上下文'"
+          class="workspace-token-count"
+        />
         <n-select
           :value="workspace.currentWorkspaceId"
           :options="workspaceOptions"
@@ -1223,8 +1238,17 @@ onBeforeUnmount(() => {
             <template #header-extra>
               <n-space
                 v-if="selectedAgent"
+                align="center"
                 size="small"
               >
+                <TokenCount
+                  :label="workspace.hasMoreMessages ? '已载入对话' : '当前对话'"
+                  :count="agentTokenCount"
+                  :description="workspace.hasMoreMessages
+                    ? '估算值，仅统计已经加载且与当前 Agent 相关的消息'
+                    : '估算值，仅统计当前 Agent 对话的可见文本'"
+                  class="agent-token-count"
+                />
                 <n-button
                   size="small"
                   quaternary
@@ -2030,6 +2054,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.75rem;
+}
+
+.workspace-token-count,
+.agent-token-count {
+  padding-right: 12px;
+  border-right: $border-faint;
 }
 
 .page-title {
