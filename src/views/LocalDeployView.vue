@@ -39,10 +39,10 @@ import {
   NModal,
   NForm,
   NFormItem,
-  useMessage,
 } from "naive-ui";
 import { useRouter } from "vue-router";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
+import { useMessage } from "@/composables/useNotify";
 import {
   useLocalModelStore,
   type ModelSource,

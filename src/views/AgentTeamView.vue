@@ -19,13 +19,14 @@ import { useRouter } from "vue-router";
 import {
   NButton, NIcon, NSpace, NSelect, NEmpty, NModal, NForm, NFormItem, NInput, NInputNumber,
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
-  NTag, NText, NTimeline, NTimelineItem, NPopconfirm, NSwitch, NTooltip, useMessage,
+  NTag, NText, NTimeline, NTimelineItem, NPopconfirm, NSwitch, NTooltip,
 } from "naive-ui";
 import {
   Add, TrashOutline, EnterOutline, AlarmOutline, PencilOutline, MegaphoneOutline,
   PauseOutline, PlayOutline, RefreshOutline, DocumentTextOutline, ImageOutline,
 } from "@vicons/ionicons5";
 
+import { useMessage } from "@/composables/useNotify";
 import ChatMessage from "@/components/ChatMessage.vue";
 import TokenCount from "@/components/TokenCount.vue";
 import { countMessageTokens } from "@/utils/tokenCount";
@@ -564,8 +565,8 @@ const logCategory = (kind: string): TimelineCategory => {
   return "system";
 };
 
-/** tool_call 日志带着完整 JSON 参数，原样放进时间线会刷屏；截断展示，
- *  完整参数仍在应用日志和数据库里。 */
+/** tool_call 日志带着完整 JSON 参数、Agent 间消息也可能很长，原样放进时间线
+ *  会刷屏；截断展示，完整内容仍在对应的对话面板/应用日志/数据库里能看到。 */
 const clipContent = (s: string, max = 160) => (s.length > max ? `${s.slice(0, max)} …` : s);
 
 const timeline = computed(() => {
@@ -576,7 +577,7 @@ const timeline = computed(() => {
           createdAt: m.createdAt,
           type: "success" as const,
           title: `${workspace.agentName(m.fromAgentId)} → ${workspace.agentName(m.toAgentId)}`,
-          content: m.content,
+          content: clipContent(m.content, 200),
         }))
       : [];
   const fromLogs = workspace.logs
@@ -626,26 +627,6 @@ const openSchedulerPage = () => {
   const wid = workspace.currentWorkspace?.id;
   router.push({ name: "Scheduler", query: wid ? { workspace: wid } : {} });
 };
-
-// ============ 提醒：目标 Agent 没有存活的后台任务 ============
-
-// Agent 的后台循环只存在于内存里；应用启动时会自动把每个工作组里的 Agent
-// 重新挂回循环，正常情况下不该再看到这个提醒。真出现了多半是极端时序问题
-// （比如启动过程中就有消息打进来），收到就弹一条警告，然后清空队列。
-watch(
-  () => workspace.inactiveAgentNotices.length,
-  () => {
-    while (workspace.inactiveAgentNotices.length > 0) {
-      const notice = workspace.inactiveAgentNotices.shift();
-      if (notice) {
-        message.warning(
-          `「${notice.agentName}」当前没有存活的后台任务，消息已发送但暂时不会有回复。通常重启一下应用就能自动恢复；如果重启后仍然这样，再考虑删除重建。`,
-          { duration: 8000 }
-        );
-      }
-    }
-  }
-);
 
 // ============ 待处理事项：主 Agent 创建子 Agent 提议 ============
 

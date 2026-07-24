@@ -21,9 +21,10 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace, NDropdown, useMessage, type DropdownOption } from "naive-ui";
+import { NEmpty, NList, NListItem, NThing, NTag, NText, NButton, NIcon, NSpin, NPopconfirm, NSpace, NDropdown, type DropdownOption } from "naive-ui";
 import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { useMessage } from "@/composables/useNotify";
 import { useChatStore, type ChatSession } from "@/stores/chat";
 import { buildConversationExport, type ExportFormat } from "@/utils/exportConversation";
 import { ChatbubblesOutline, TrashOutline, EnterOutline, DownloadOutline } from "@vicons/ionicons5";

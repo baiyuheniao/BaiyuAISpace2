@@ -36,8 +36,8 @@ import {
   NCheckboxGroup,
   NSwitch,
   NDivider,
-  useNotification,
 } from "naive-ui";
+import { useNotification } from "@/composables/useNotify";
 
 // 导入 Store
 import { useChatStore } from "@/stores/chat";

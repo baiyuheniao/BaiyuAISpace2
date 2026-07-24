@@ -50,15 +50,16 @@ import {
   NModal,
   NIcon,
   NText,
-  NEmpty,
-  useMessage
+  NEmpty
 } from "naive-ui";
+import { useMessage } from "@/composables/useNotify";
 import {
   useSettingsStore,
   PRESET_PROVIDERS,
   type ApiConfig,
   type EmbeddingApiConfig,
-  type RerankerApiConfig
+  type RerankerApiConfig,
+  type ErrorSoundLevel
 } from "@/stores/settings";
 import {
   KeyOutline,
@@ -81,6 +82,21 @@ const settings = useSettingsStore();
 
 // 消息提示 - 用于操作反馈
 const message = useMessage();
+
+const errorSoundLevelOptions: Array<{
+  label: string;
+  value: ErrorSoundLevel;
+}> = [
+  { label: "仅严重错误", value: "critical" },
+  { label: "所有错误", value: "all" },
+  { label: "关闭声音", value: "off" },
+];
+
+const handleErrorSoundLevelChange = (value: string) => {
+  if (value === "off" || value === "critical" || value === "all") {
+    settings.errorSoundLevel = value;
+  }
+};
 
 // ============ 日志导出 ============
 
@@ -1223,6 +1239,25 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             <n-switch
               :value="settings.closeToTray"
               @update:value="handleCloseToTrayChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">报错声音提醒</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                报错弹窗始终会显示。选择“仅严重错误”时，只有后台 Agent 中断、本地保存失败等需要立即介入的问题会响；选择“所有错误”后，普通操作失败也会响。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.errorSoundLevel"
+              :options="errorSoundLevelOptions"
+              placeholder="请选择报错声音等级"
+              style="width: 180px;"
+              @update:value="handleErrorSoundLevelChange"
             />
           </div>
 

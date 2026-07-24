@@ -138,6 +138,9 @@ export interface RerankerApiConfig {
   createdAt: number;
 }
 
+/** 报错弹窗始终显示；此设置只决定哪些报错需要声音提醒。 */
+export type ErrorSoundLevel = "off" | "critical" | "all";
+
 // 存储版本号 - 当数据结构变更时需要递增
 const STORAGE_VERSION = "6";
 const STORAGE_VERSION_KEY = "baiyu-aispace-version";
@@ -195,6 +198,9 @@ export const useSettingsStore = defineStore(
 
     // 关闭窗口按钮的行为：true = 最小化到系统托盘，false = 直接退出程序
     const closeToTray = ref(true);
+
+    // 默认只让后台 Agent 中断、本地保存失败等严重错误发出声音。
+    const errorSoundLevel = ref<ErrorSoundLevel>("critical");
 
     // 设置关闭按钮行为，并同步给 Rust 后端（窗口关闭事件在后端拦截，需要后端知道当前设置）
     const setCloseToTray = async (enabled: boolean) => {
@@ -611,6 +617,7 @@ export const useSettingsStore = defineStore(
       initTheme,
       syncErrorNotices,
       closeToTray,
+      errorSoundLevel,
       setCloseToTray,
       syncCloseToTray,
       showHotkey,
@@ -658,7 +665,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "errorSoundLevel", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

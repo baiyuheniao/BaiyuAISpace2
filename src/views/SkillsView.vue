@@ -35,9 +35,9 @@ import {
   NIcon,
   NTabs,
   NTabPane,
-  useMessage,
 } from "naive-ui";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { useMessage } from "@/composables/useNotify";
 import {
   Add,
   TrashOutline,

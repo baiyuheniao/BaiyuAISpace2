@@ -237,6 +237,15 @@ export interface AgentInactiveEvent {
   agentName: string;
 }
 
+/** Agent 后台任务出错（多半是 API 调用失败）。原本只写进活动时间线，容易被
+ *  错过——用户没盯着时间线看的话，Agent 静静地进了 Error 状态也不会有人发现。 */
+export interface AgentErrorLogNotice {
+  workspaceId: string;
+  agentId: string | null;
+  agentName: string;
+  content: string;
+}
+
 export const useWorkspaceStore = defineStore("workspace", () => {
   const workspaces = ref<Workspace[]>([]);
   const currentWorkspaceId = ref<string | null>(null);
@@ -256,6 +265,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   // 一次性提醒事件的队列，视图层 watch 它、用 message.warning() 弹出后自行清空 --
   // 这里不直接调用 useMessage()，因为 store 不在组件树里，拿不到 NMessageProvider 的上下文。
   const inactiveAgentNotices = ref<AgentInactiveEvent[]>([]);
+  const errorLogNotices = ref<AgentErrorLogNotice[]>([]);
 
   const currentWorkspace = computed(() => workspaces.value.find((w) => w.id === currentWorkspaceId.value) ?? null);
 
@@ -275,6 +285,21 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       }),
       listen<WorkspaceLogEntry>("workspace://log", (e) => {
         console.debug(`[Workspace] 日志 [${e.payload.kind}]: ${e.payload.content.slice(0, 80)}`);
+        // Agent 后台任务出错（API 调用失败等）原本只进时间线，用户很容易错过；
+        // 先于当前工作组过滤放入全局队列，确保用户停留在其他工作组或其他模块
+        // 时也能收到提示。
+        if (e.payload.kind === "error") {
+          const resolvedName = e.payload.agentId ? agentName(e.payload.agentId) : "";
+          errorLogNotices.value.push({
+            workspaceId: e.payload.workspaceId,
+            agentId: e.payload.agentId,
+            agentName:
+              resolvedName && resolvedName !== e.payload.agentId
+                ? resolvedName
+                : "协作团队 Agent",
+            content: e.payload.content,
+          });
+        }
         if (e.payload.workspaceId !== currentWorkspaceId.value) return;
         logs.value.push(e.payload);
         // 主 Agent 的提议被批准后，子 Agent 是在其后台任务里异步创建的：
@@ -571,6 +596,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     questions,
     toolApprovals,
     inactiveAgentNotices,
+    errorLogNotices,
     initListeners,
     disposeListeners,
     listWorkspaces,

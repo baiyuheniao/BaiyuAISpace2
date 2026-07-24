@@ -25,8 +25,8 @@ import { useRoute, useRouter } from "vue-router";
 // 导入 Tauri 窗口 API (全屏切换)
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-// 导入 NaiveUI 通知 API (左下角统一弹窗机制)
-import { useNotification } from "naive-ui";
+// 导入通知 API（左下角统一弹窗；声音按用户设置和错误等级决定）
+import { useNotification } from "@/composables/useNotify";
 
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
@@ -123,6 +123,7 @@ const handleFullscreenHotkey = async (e: KeyboardEvent) => {
 
 // 通知 API (供更新提示弹窗使用)
 const notification = useNotification();
+const criticalNotification = useNotification("critical");
 
 // 待处理事项新增、且用户没停在协作团队页面时，左下角弹一条提醒（在页面上
 // 时卡片本身就是提醒，不重复弹）。
@@ -136,6 +137,46 @@ watch(workspacePendingCount, (count, prev) => {
   }
 });
 
+// 后台 Agent 在用户浏览任意模块时都可能出错或失去运行循环。监听放在全局布局
+// 层，确保不会因为 Agent Team 页面未挂载而漏掉提醒。
+watch(
+  () => workspace.errorLogNotices.length,
+  () => {
+    while (workspace.errorLogNotices.length > 0) {
+      const notice = workspace.errorLogNotices.shift();
+      if (notice) {
+        criticalNotification.error({
+          title: `「${notice.agentName}」出错了`,
+          description:
+            notice.content.length > 300
+              ? `${notice.content.slice(0, 300)} …`
+              : notice.content,
+          duration: 10000,
+        });
+      }
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => workspace.inactiveAgentNotices.length,
+  () => {
+    while (workspace.inactiveAgentNotices.length > 0) {
+      const notice = workspace.inactiveAgentNotices.shift();
+      if (notice) {
+        notification.warning({
+          title: `「${notice.agentName}」暂时不会回复`,
+          description:
+            "消息已经发出，但该 Agent 当前没有存活的后台任务。通常重启应用即可自动恢复。",
+          duration: 8000,
+        });
+      }
+    }
+  },
+  { immediate: true },
+);
+
 // 会话/消息写入数据库失败时，chat store 拿不到弹窗上下文，把提醒塞进队列，
 // 这里全局 watch 后弹出并清空——避免用户以为已保存，其实静默丢失了记录。
 watch(
@@ -144,7 +185,7 @@ watch(
     while (chat.dbSaveErrorNotices.length > 0) {
       const msg = chat.dbSaveErrorNotices.shift();
       if (msg) {
-        notification.error({ title: "本地保存失败", description: msg, duration: 6000 });
+        criticalNotification.error({ title: "本地保存失败", description: msg, duration: 6000 });
       }
     }
   }

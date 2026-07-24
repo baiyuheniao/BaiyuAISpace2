@@ -44,7 +44,6 @@ import {
   NSpace,
   NPopconfirm,
   NIcon,
-  useMessage,
 } from "naive-ui";
 import {
   Add,
@@ -59,6 +58,7 @@ import {
   Search,
   Storefront,
 } from "@vicons/ionicons5";
+import { useMessage } from "@/composables/useNotify";
 import { useMCPStore, type MCPServer } from "@/stores/mcp";
 
 // ============ 状态管理 ============

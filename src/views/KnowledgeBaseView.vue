@@ -57,7 +57,6 @@ import {
   NAlert,
   NSwitch,
   NDivider,
-  useMessage,
 } from "naive-ui";
 import {
   Add,
@@ -68,6 +67,7 @@ import {
   ArrowBack,
   Library,
 } from "@vicons/ionicons5";
+import { useMessage } from "@/composables/useNotify";
 import { useKnowledgeBaseStore, type KnowledgeBase, type Document } from "@/stores/knowledgeBase";
 import { useSettingsStore } from "@/stores/settings";
 

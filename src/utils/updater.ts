@@ -12,9 +12,10 @@
  */
 
 import { h } from "vue";
-import { NButton, NSpace, useNotification } from "naive-ui";
+import { NButton, NSpace } from "naive-ui";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import type { useNotification } from "@/composables/useNotify";
 
 type NotificationApi = ReturnType<typeof useNotification>;
 

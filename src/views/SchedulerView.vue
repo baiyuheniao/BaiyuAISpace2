@@ -9,10 +9,11 @@ import {
   NButton, NIcon, NCard, NList, NListItem, NThing, NTag, NEmpty,
   NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
   NRadioGroup, NRadio, NSwitch, NDatePicker, NTimePicker,
-  NSpace, NPopconfirm, useMessage,
+  NSpace, NPopconfirm,
 } from "naive-ui";
 import { Add, TrashOutline } from "@vicons/ionicons5";
 
+import { useMessage } from "@/composables/useNotify";
 import { useSchedulerStore, type CreateScheduleRequest, type Schedule } from "@/stores/scheduler";
 import { useWorkspaceStore, type WorkspaceAgent } from "@/stores/workspace";
 import { invoke } from "@tauri-apps/api/core";

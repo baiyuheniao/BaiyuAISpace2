@@ -336,18 +336,18 @@ const handleRegenerate = async () => {
           <span class="streaming-text">思考中...</span>
         </div>
 
-        <!-- 工具调用列表 -->
+        <!-- 工具调用列表（默认折叠，点击展开，与上面的思考过程同一交互） -->
         <div
           v-if="message.toolCalls && message.toolCalls.length > 0"
           class="tool-calls"
         >
-          <div
+          <details
             v-for="tc in message.toolCalls"
             :key="tc.callId"
             class="tool-call-item"
             :class="{ 'tool-call-error': tc.status === 'error' }"
           >
-            <div class="tool-call-header">
+            <summary class="tool-call-header">
               <n-spin
                 v-if="tc.status === 'calling'"
                 :size="12"
@@ -357,13 +357,13 @@ const handleRegenerate = async () => {
               <span class="tool-call-status-text">{{
                 tc.status === "calling" ? "调用中" : tc.status === "error" ? "调用失败" : "已完成"
               }}</span>
-            </div>
+            </summary>
             <pre class="tool-call-args">{{ tc.arguments }}</pre>
             <pre
               v-if="tc.result"
               class="tool-call-result"
             >{{ tc.result }}</pre>
-          </div>
+          </details>
         </div>
       </div>
 
@@ -899,7 +899,6 @@ const handleRegenerate = async () => {
 .tool-call-item {
   border: $border-faint;
   background: $surface;
-  padding: 10px 12px;
 }
 
 .tool-call-item.tool-call-error {
@@ -910,7 +909,27 @@ const handleRegenerate = async () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 12px;
   font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: color $duration $ease;
+}
+
+.tool-call-header:hover {
+  color: $ink;
+}
+
+/* display: flex 会让 <summary> 丢掉浏览器自带的展开/折叠三角，自己补一个 */
+.tool-call-header::after {
+  content: "▸";
+  margin-left: auto;
+  color: $ink-faint;
+  font-size: 10px;
+}
+
+.tool-call-item[open] > .tool-call-header::after {
+  content: "▾";
 }
 
 .tool-call-status-icon {
@@ -931,7 +950,7 @@ const handleRegenerate = async () => {
 
 .tool-call-args,
 .tool-call-result {
-  margin: 6px 0 0 0;
+  margin: 0 12px 10px 12px;
   padding: 8px 10px;
   background: $bg;
   border: 1px solid rgba(0, 0, 0, 0.15);
