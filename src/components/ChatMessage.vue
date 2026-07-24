@@ -31,6 +31,8 @@ import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 // 聊天 Store - 编辑/重新生成都要落库并重新发起生成请求，这两件事和消息本身
 // 的截断/删除逻辑都在 store 里，组件只负责触发
 import { useChatStore } from "@/stores/chat";
+import TokenCount from "@/components/TokenCount.vue";
+import { estimateTokenCount } from "@/utils/tokenCount";
 
 // Markdown 渲染管线。marked/KaTeX/DOMPurify/hljs/Mermaid 的全局配置都在该
 // 模块顶层完成，整个应用只执行一次——不能放回本组件的 <script setup>：
@@ -140,6 +142,9 @@ const isAssistant = computed(() => props.message.role === "assistant");
 // 渲染后的 Markdown 内容（解析、净化、HTML/Mermaid 预览块生成全部在
 // utils/markdown.ts 的 renderMarkdown 里完成）
 const renderedContent = computed(() => renderMarkdown(props.message.content));
+
+// 流式输出期间也随正文实时更新；只统计消息可见文本。
+const messageTokenCount = computed(() => estimateTokenCount(props.message.content));
 
 // ============ 方法函数 ============
 
@@ -376,6 +381,11 @@ const handleRegenerate = async () => {
         </n-alert>
       </div>
 
+      <TokenCount
+        class="message-token-count"
+        :count="messageTokenCount"
+      />
+
       <!-- Actions -->
       <div
         v-if="!message.streaming && !isEditing"
@@ -497,6 +507,10 @@ const handleRegenerate = async () => {
   color: $ink-faint;
   font-size: 12px;
   font-family: $font-mono;
+}
+
+.message-token-count {
+  padding: 0 4px;
 }
 
 .message-body {

@@ -25,11 +25,15 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: '要同步 latest.json 的已发布 Release 标签，例如 v0.2.0-beta.4'
+        description: "要同步 latest.json 的已发布 Release 标签，例如 v0.2.0-beta.4"
         required: true
 
 permissions:
   contents: write
+
+concurrency:
+  group: publish-update-manifest
+  cancel-in-progress: false
 
 jobs:
   publish-update-manifest:
@@ -41,6 +45,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TARGET_TAG: ${{ github.event.inputs.tag_name || github.event.release.tag_name }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download latest.json from the published release
         run: gh release download "$TARGET_TAG" --repo ${{ github.repository }} --pattern latest.json --dir manifest --clobber
 
@@ -58,7 +64,27 @@ jobs:
             --notes "仅供应用内 Beta 自动更新读取 latest.json，跟踪最新的任意发布（正式版或 Beta），不代表实际版本发布。" \
             --prerelease --latest=false
 
+      - name: Prevent Beta manifest version rollback
+        id: beta-version
+        run: |
+          TARGET_VERSION=$(jq -r .version manifest/latest.json)
+          mkdir -p current-beta
+          if gh release download updater-manifest-beta --repo ${{ github.repository }} \
+            --pattern latest.json --dir current-beta --clobber; then
+            CURRENT_VERSION=$(jq -r .version current-beta/latest.json)
+          else
+            CURRENT_VERSION="0.0.0-0"
+          fi
+          SHOULD_PUBLISH=$(node .github/scripts/is-newer-semver.mjs "$TARGET_VERSION" "$CURRENT_VERSION")
+          echo "target_version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD_PUBLISH" != "true" ]; then
+            echo "::notice::Skip Beta manifest rollback: candidate $TARGET_VERSION is not newer than $CURRENT_VERSION"
+          fi
+
       - name: Publish latest.json to the Beta channel release
+        if: steps.beta-version.outputs.should_publish == 'true'
         run: gh release upload updater-manifest-beta manifest/latest.json --repo ${{ github.repository }} --clobber
 
       - name: Ensure fixed updater-manifest release exists
@@ -70,6 +96,26 @@ jobs:
             --notes "仅供应用内自动更新读取 latest.json，不代表实际版本发布，安装包请在正式版本 Release 里下载。" \
             --prerelease --latest=false
 
-      - name: Publish latest.json to the stable channel release
+      - name: Prevent stable manifest version rollback
         if: steps.release-kind.outputs.is_prerelease == 'false'
+        id: stable-version
+        run: |
+          TARGET_VERSION=$(jq -r .version manifest/latest.json)
+          mkdir -p current-stable
+          if gh release download updater-manifest --repo ${{ github.repository }} \
+            --pattern latest.json --dir current-stable --clobber; then
+            CURRENT_VERSION=$(jq -r .version current-stable/latest.json)
+          else
+            CURRENT_VERSION="0.0.0-0"
+          fi
+          SHOULD_PUBLISH=$(node .github/scripts/is-newer-semver.mjs "$TARGET_VERSION" "$CURRENT_VERSION")
+          echo "target_version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD_PUBLISH" != "true" ]; then
+            echo "::notice::Skip stable manifest rollback: candidate $TARGET_VERSION is not newer than $CURRENT_VERSION"
+          fi
+
+      - name: Publish latest.json to the stable channel release
+        if: steps.release-kind.outputs.is_prerelease == 'false' && steps.stable-version.outputs.should_publish == 'true'
         run: gh release upload updater-manifest manifest/latest.json --repo ${{ github.repository }} --clobber
