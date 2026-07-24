@@ -183,3 +183,15 @@ test_assets/
 
 # 本地调试痕迹（不入库）
 .dbg/
+
+# pnpm 本地包缓存
+.pnpm-store/
+
+# 本机 Codex 连接配置（包含绝对路径，仅保留在本地）
+.codex/
+
+# 独立官网工程暂不纳入桌面应用仓库
+website/
+
+# Tauri UI 驱动的本地运行状态
+.agents/skills/run-baiyuaispace2/driver.state.json
