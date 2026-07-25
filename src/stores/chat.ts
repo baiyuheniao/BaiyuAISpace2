@@ -698,6 +698,48 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
+  const buildEnhancedContent = async (
+    content: string,
+    documentContents?: Array<{ name: string; content: string }>,
+  ): Promise<string> => {
+    const contextParts: string[] = [];
+    lastRetrievalResult.value = null;
+
+    if (ragEnabled.value && selectedKnowledgeBaseId.value) {
+      const kbExists = kbStore.knowledgeBases.some(
+        kb => kb.id === selectedKnowledgeBaseId.value,
+      );
+      if (!kbExists) {
+        kbStore.retrievalNotices.push({
+          type: "error",
+          title: "知识库不可用",
+          message: "所选知识库不存在或已被删除，本次将不使用知识库内容。",
+        });
+      } else {
+        const result = await kbStore.searchKnowledgeBase(
+          selectedKnowledgeBaseId.value,
+          content,
+        );
+        if (result) {
+          // 空结果也要覆盖上一次状态，让界面明确显示“检索到 0 个片段”，
+          // 而不是继续展示上一轮的旧数量。
+          lastRetrievalResult.value = result;
+          const ragContext = buildRagContext(result);
+          if (ragContext) contextParts.push(ragContext);
+        }
+      }
+    }
+
+    if (documentContents && documentContents.length > 0) {
+      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
+      contextParts.push(`[用户附加文档]\n${docParts.join('\n---\n')}`);
+    }
+
+    return contextParts.length > 0
+      ? `${contextParts.join('\n\n')}\n\n问题：${content}`
+      : content;
+  };
+
   /**
    * 发送消息 (核心函数)
    * 处理用户消息发送、LLM 调用、流式响应等完整流程
@@ -718,39 +760,7 @@ export const useChatStore = defineStore("chat", () => {
     if (!currentSession.value) return;
     if (!resolveActiveConfig()) return;
 
-    // 初始化内容变量
-    let enhancedContent = content;
-
-    // ============ 文档上下文注入 ============
-    let docContext = "";
-    if (documentContents && documentContents.length > 0) {
-      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
-      docContext = `[用户附加文档]\n${docParts.join('\n---\n')}`;
-    }
-
-    // ============ RAG 检索增强 ============
-    let retrievalContext = "";
-    if (ragEnabled.value && selectedKnowledgeBaseId.value) {
-      const kb = kbStore.knowledgeBases.find(k => k.id === selectedKnowledgeBaseId.value);
-      if (kb) {
-        const result = await kbStore.searchKnowledgeBase(
-          selectedKnowledgeBaseId.value,
-          content
-        );
-        if (result && result.chunks.length > 0) {
-          lastRetrievalResult.value = result;
-          retrievalContext = buildRagContext(result);
-        }
-      }
-    }
-
-    // 合并上下文，构建最终发送内容
-    const contextParts: string[] = [];
-    if (retrievalContext) contextParts.push(retrievalContext);
-    if (docContext) contextParts.push(docContext);
-    if (contextParts.length > 0) {
-      enhancedContent = `${contextParts.join('\n\n')}\n\n问题：${content}`;
-    }
+    const enhancedContent = await buildEnhancedContent(content, documentContents);
 
     // 构建用户消息对象——聊天气泡展示原始输入，RAG/文档增强内容只通过
     // generateReply 的 contentOverride 参数注入发给模型的那份拷贝，不写进
@@ -831,7 +841,12 @@ export const useChatStore = defineStore("chat", () => {
     await saveMessageToDb(target);
     await saveSessionToDb();
 
-    await generateReply();
+    const enhancedContent = await buildEnhancedContent(trimmed);
+    await generateReply(
+      enhancedContent !== trimmed
+        ? { messageId: target.id, content: enhancedContent }
+        : undefined,
+    );
   };
 
   /**
@@ -853,7 +868,17 @@ export const useChatStore = defineStore("chat", () => {
     const removed = currentSession.value.messages.splice(idx);
     await deleteMessagesFromDb(removed);
 
-    await generateReply();
+    const lastUserMessage = [...currentSession.value.messages]
+      .reverse()
+      .find(message => message.role === "user");
+    if (!lastUserMessage) return;
+
+    const enhancedContent = await buildEnhancedContent(lastUserMessage.content);
+    await generateReply(
+      enhancedContent !== lastUserMessage.content
+        ? { messageId: lastUserMessage.id, content: enhancedContent }
+        : undefined,
+    );
   };
 
   /**

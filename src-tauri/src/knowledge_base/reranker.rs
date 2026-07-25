@@ -79,6 +79,12 @@ pub async fn rerank_chunks(
         })
         .collect();
 
+    if reranked.is_empty() {
+        return Err(KnowledgeBaseError::RetrievalError(
+            "Reranker response contained no valid results".to_string(),
+        ));
+    }
+
     reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(reranked)

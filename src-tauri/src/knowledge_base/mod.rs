@@ -20,4 +20,5 @@ pub mod document;
 pub mod embedding;
 pub mod reranker;
 pub mod retrieval;
+pub mod search_text;
 pub mod types;

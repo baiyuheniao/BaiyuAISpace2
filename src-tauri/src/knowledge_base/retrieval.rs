@@ -5,6 +5,8 @@
 use super::types::*;
 use super::db::VectorStore;
 use super::embedding::generate_single_embedding;
+use super::search_text::{build_fts_query, extract_query_terms, keyword_coverage};
+use rusqlite::types::Value;
 use std::sync::Arc;
 
 pub struct Retriever {
@@ -146,6 +148,7 @@ impl Retriever {
             query: request.query.clone(),
             total_chunks: filtered_chunks.len() as i32,
             chunks: filtered_chunks,
+            warnings: Vec::new(),
         })
     }
 
@@ -165,14 +168,21 @@ impl Retriever {
                 .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
             // 优先尝试 FTS5，失败则回退到 LIKE 查询
-            Self::search_with_fts_blocking(&conn, &kb_id, &query, top_k)
-                .or_else(|_| Self::search_with_like_blocking(&conn, &kb_id, &query, top_k))
+            match Self::search_with_fts_blocking(&conn, &kb_id, &query, top_k) {
+                Ok(chunks) if !chunks.is_empty() => Ok(chunks),
+                Ok(_) => Self::search_with_like_blocking(&conn, &kb_id, &query, top_k),
+                Err(e) => {
+                    log::warn!("[KB] FTS5 检索失败，回退到 LIKE: {}", e);
+                    Self::search_with_like_blocking(&conn, &kb_id, &query, top_k)
+                }
+            }
         }).await.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))??;
 
         Ok(RetrievalResult {
             query: request.query.clone(),
             total_chunks: chunks.len() as i32,
             chunks,
+            warnings: Vec::new(),
         })
     }
 
@@ -224,6 +234,7 @@ impl Retriever {
             query: request.query.clone(),
             total_chunks: filtered.len() as i32,
             chunks: filtered,
+            warnings: Vec::new(),
         })
     }
 
@@ -367,55 +378,67 @@ impl Retriever {
 
         // 构建 FTS 查询：转义特殊字符，并把每个词用双引号包起来
         // FTS5 的特殊字符包括：" * ( ) : ^ [ ] { } + - AND OR NOT NEAR
-        let fts_query: String = query
-            .split_whitespace()
-            .map(|term| {
-                // 转义词内部的双引号
-                let escaped = term.replace('"', "\"\"");
-                format!("\"{}\"", escaped)
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let Some((fts_query, terms)) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let candidate_limit = top_k.max(1).saturating_mul(4);
 
         let mut stmt = conn.prepare(
             r#"
             SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, d.filename,
-                   rank
-            FROM chunks_fts fts
-            JOIN chunks c ON fts.rowid = c.rowid
+                   bm25(chunks_fts) AS fts_rank
+            FROM chunks_fts
+            JOIN chunks c ON chunks_fts.rowid = c.rowid
             JOIN documents d ON c.document_id = d.id
-            WHERE fts.kb_id = ?1 AND fts MATCH ?2
-            ORDER BY rank
+            WHERE chunks_fts.kb_id = ?1 AND chunks_fts MATCH ?2
+            ORDER BY fts_rank
             LIMIT ?3
             "#
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
         let rows = stmt.query_map(
-            rusqlite::params![kb_id, &fts_query, top_k],
+            rusqlite::params![kb_id, &fts_query, candidate_limit],
             |row| {
-                Ok(RetrievedChunk {
-                    chunk: Chunk {
-                        id: row.get(0)?,
-                        document_id: row.get(1)?,
-                        kb_id: kb_id.to_string(),
-                        content: row.get(2)?,
-                        chunk_index: row.get(3)?,
-                        token_count: row.get(4)?,
+                let content: String = row.get(2)?;
+                let coverage = keyword_coverage(&content, &terms);
+                Ok((
+                    RetrievedChunk {
+                        chunk: Chunk {
+                            id: row.get(0)?,
+                            document_id: row.get(1)?,
+                            kb_id: kb_id.to_string(),
+                            content,
+                            chunk_index: row.get(3)?,
+                            token_count: row.get(4)?,
+                        },
+                        score: coverage,
+                        vector_score: None,
+                        keyword_score: Some(coverage),
+                        document_filename: row.get(5)?,
                     },
-                    score: 1.0, // FTS 不会直接给出 0-1 范围的分数
-                    vector_score: None,
-                    keyword_score: Some(1.0),
-                    document_filename: row.get(5)?,
-                })
+                    row.get::<_, f64>(6)?,
+                ))
             }
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        let mut chunks = Vec::new();
+        let mut ranked = Vec::new();
         for row in rows {
-            chunks.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
+            ranked.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
         }
 
-        Ok(chunks)
+        ranked.sort_by(|(a, a_rank), (b, b_rank)| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a_rank
+                        .partial_cmp(b_rank)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        ranked.truncate(top_k.max(0) as usize);
+
+        Ok(ranked.into_iter().map(|(chunk, _)| chunk).collect())
     }
 
     /// 使用 LIKE 查询进行搜索（FTS 不可用时的回退方案）—— 阻塞版本
@@ -427,42 +450,59 @@ impl Retriever {
         top_k: i32,
     ) -> Result<Vec<RetrievedChunk>, KnowledgeBaseError> {
         // 构建带通配符的 LIKE 模式，同时转义 LIKE 的特殊字符
-        let escaped_terms: Vec<String> = query
-            .split_whitespace()
-            .map(|term| {
-                // 转义 % 和 _ 字符
-                let escaped = term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-                escaped
-            })
-            .collect();
+        let terms = extract_query_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let pattern = format!("%{}%", escaped_terms.join("%"));
-
-        let mut stmt = conn.prepare(
+        let candidate_limit = top_k.max(1).saturating_mul(8);
+        let conditions = (0..terms.len())
+            .map(|index| format!("c.content LIKE ?{} ESCAPE '\\'", index + 2))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let limit_param = terms.len() + 2;
+        let sql = format!(
             r#"
             SELECT c.id, c.document_id, c.content, c.chunk_index, c.token_count, d.filename
             FROM chunks c
             JOIN documents d ON c.document_id = d.id
-            WHERE c.kb_id = ?1 AND c.content LIKE ?2 ESCAPE '\'
-            LIMIT ?3
-            "#
+            WHERE c.kb_id = ?1 AND ({})
+            LIMIT ?{}
+            "#,
+            conditions, limit_param
+        );
+        let mut stmt = conn.prepare(
+            &sql
         ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
+        let mut values = Vec::with_capacity(terms.len() + 2);
+        values.push(Value::Text(kb_id.to_string()));
+        for term in &terms {
+            let escaped = term
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            values.push(Value::Text(format!("%{}%", escaped)));
+        }
+        values.push(Value::Integer(candidate_limit as i64));
+
         let rows = stmt.query_map(
-            rusqlite::params![kb_id, &pattern, top_k],
+            rusqlite::params_from_iter(values.iter()),
             |row| {
+                let content: String = row.get(2)?;
+                let coverage = keyword_coverage(&content, &terms);
                 Ok(RetrievedChunk {
                     chunk: Chunk {
                         id: row.get(0)?,
                         document_id: row.get(1)?,
                         kb_id: kb_id.to_string(),
-                        content: row.get(2)?,
+                        content,
                         chunk_index: row.get(3)?,
                         token_count: row.get(4)?,
                     },
-                    score: 0.5, // LIKE 查询无法给出有意义的分数
+                    score: coverage,
                     vector_score: None,
-                    keyword_score: Some(0.5),
+                    keyword_score: Some(coverage),
                     document_filename: row.get(5)?,
                 })
             }
@@ -472,6 +512,13 @@ impl Retriever {
         for row in rows {
             chunks.push(row.map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?);
         }
+
+        chunks.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        chunks.truncate(top_k.max(0) as usize);
 
         Ok(chunks)
     }
@@ -555,4 +602,93 @@ pub fn build_context(chunks: &[RetrievedChunk], query: &str) -> String {
     context_parts.push(format!("问题：{}", query));
     
     context_parts.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge_base::search_text::tokenize_for_fts;
+
+    fn setup_keyword_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL
+            );
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                kb_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                token_count INTEGER NOT NULL
+            );
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                kb_id UNINDEXED,
+                content,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+            INSERT INTO documents (id, filename) VALUES ('doc-1', '英语教材.docx');
+            "#,
+        )
+        .unwrap();
+
+        let chunks = [
+            (
+                "chunk-irrelevant",
+                "spaceship 是由 space 和 ship 构成的合成词。",
+                0,
+            ),
+            (
+                "chunk-answer",
+                "⑤ better（词性：动词；词义：改善，使更好）。",
+                1,
+            ),
+        ];
+        for (id, content, index) in chunks {
+            conn.execute(
+                "INSERT INTO chunks (id, document_id, kb_id, content, chunk_index, token_count)
+                 VALUES (?1, 'doc-1', 'kb-1', ?2, ?3, 20)",
+                rusqlite::params![id, content, index],
+            )
+            .unwrap();
+            let rowid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO chunks_fts (rowid, kb_id, content) VALUES (?1, 'kb-1', ?2)",
+                rusqlite::params![rowid, tokenize_for_fts(content)],
+            )
+            .unwrap();
+        }
+
+        conn
+    }
+
+    #[test]
+    fn chinese_fts_question_finds_answer_without_exact_sentence_match() {
+        let conn = setup_keyword_db();
+        let chunks = Retriever::search_with_fts_blocking(
+            &conn,
+            "kb-1",
+            "根据教材，第16题中第二个 better 是什么词性、意思是什么？",
+            5,
+        )
+        .unwrap();
+
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].chunk.id, "chunk-answer");
+        assert!(chunks[0].keyword_score.unwrap_or_default() > 0.0);
+    }
+
+    #[test]
+    fn like_fallback_matches_individual_chinese_terms() {
+        let conn = setup_keyword_db();
+        let chunks =
+            Retriever::search_with_like_blocking(&conn, "kb-1", "请回答 better 的词性和意思", 5)
+                .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk.id, "chunk-answer");
+    }
 }
