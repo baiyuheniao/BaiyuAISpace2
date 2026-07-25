@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use super::search_text::tokenize_for_fts;
 use super::types::*;
 
 /// 基于 SQLite、用余弦相似度做检索的向量存储
@@ -465,19 +466,15 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
         [],
     )?;
 
-    // 用于全文检索的 FTS5 虚拟表（可选，取决于 FTS5 是否可用）
-    // 对应 #29、#30 的修复：加入 kb_id 列以实现知识库之间的隔离
-    let _ = conn.execute(
-        r#"
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-            kb_id,
-            content,
-            content_rowid=rowid,
-            tokenize='porter'
-        )
-        "#,
-        [],
-    );
+    // 用于全文检索的 FTS5 虚拟表（可选，取决于 FTS5 是否可用）。
+    // 旧表使用 porter，只适合英文；现在文档在写入索引前先经中文分词，
+    // 再交给 unicode61 索引。初始化时会自动重建旧索引，不触碰原文和向量。
+    if let Err(e) = ensure_chinese_fts_index(conn) {
+        log::warn!(
+            "[KB] 中文关键词索引初始化失败，将在检索时回退到 LIKE: {}",
+            e
+        );
+    }
 
     // 索引
     conn.execute(
@@ -512,6 +509,66 @@ pub fn init_sqlite_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::E
     )?;
 
     log::info!("Knowledge base SQLite tables initialized");
+    Ok(())
+}
+
+fn ensure_chinese_fts_index(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    const CREATE_FTS_SQL: &str = r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            kb_id UNINDEXED,
+            content,
+            tokenize='unicode61 remove_diacritics 2'
+        )
+    "#;
+
+    let existing_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let chunks_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    let indexed_count: i64 = if existing_sql.is_some() {
+        conn.query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))
+            .unwrap_or(-1)
+    } else {
+        -1
+    };
+
+    let uses_chinese_index = existing_sql
+        .as_deref()
+        .map(|sql| sql.to_ascii_lowercase().contains("unicode61"))
+        .unwrap_or(false);
+    let needs_rebuild = !uses_chinese_index || indexed_count != chunks_count;
+
+    if !needs_rebuild {
+        return Ok(());
+    }
+
+    conn.execute("DROP TABLE IF EXISTS chunks_fts", [])?;
+    conn.execute(CREATE_FTS_SQL, [])?;
+
+    let rows: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare("SELECT rowid, kb_id, content FROM chunks ORDER BY rowid")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut insert =
+        conn.prepare("INSERT INTO chunks_fts (rowid, kb_id, content) VALUES (?1, ?2, ?3)")?;
+    for (rowid, kb_id, content) in &rows {
+        let search_text = tokenize_for_fts(content);
+        insert.execute(rusqlite::params![rowid, kb_id, search_text])?;
+    }
+
+    log::info!(
+        "[KB] 中文关键词索引已重建，共写入 {} 个分块（无需重新生成向量）",
+        rows.len()
+    );
     Ok(())
 }
 

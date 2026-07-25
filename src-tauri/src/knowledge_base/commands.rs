@@ -7,6 +7,7 @@ use super::document::{parse_document, calculate_file_hash, split_text, estimate_
 use super::embedding::generate_embeddings;
 use super::db::{VectorStore, init_sqlite_tables};
 use super::retrieval::Retriever;
+use super::search_text::tokenize_for_fts;
 use tauri::State;
 use std::sync::Arc;
 
@@ -355,9 +356,10 @@ pub async fn import_document(
             ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
             // 写入 FTS5 —— 出错时记日志而不是直接忽略
+            let search_text = tokenize_for_fts(chunk_text);
             if let Err(e) = conn.execute(
                 "INSERT INTO chunks_fts (rowid, kb_id, content) VALUES (last_insert_rowid(), ?1, ?2)",
-                rusqlite::params![&kb_id, chunk_text],
+                rusqlite::params![&kb_id, search_text],
             ) {
                 log::warn!("[KB] FTS5 insert failed for chunk {}: {}", chunk_id, e);
             }
@@ -606,11 +608,18 @@ pub async fn search_knowledge_base(
         let conn = rusqlite::Connection::open(&kb_state.db_path)
             .map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
 
-        let (config_id, provider, model, base_url): (String, String, String, String) = conn.query_row(
-            "SELECT embedding_api_config_id, COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '') FROM knowledge_bases WHERE id = ?1",
-            [&request.kb_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).map_err(|e| KnowledgeBaseError::DatabaseError(e.to_string()))?;
+        let (config_id, provider, model, base_url): (String, String, String, String) = conn
+            .query_row(
+                "SELECT embedding_api_config_id, COALESCE(embedding_provider, ''), COALESCE(embedding_model, ''), COALESCE(embedding_base_url, '') FROM knowledge_bases WHERE id = ?1",
+                [&request.kb_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    KnowledgeBaseError::NotFound(request.kb_id.clone())
+                }
+                other => KnowledgeBaseError::DatabaseError(other.to_string()),
+            })?;
 
         // 仅对创建于 embedding_provider/model 字段引入之前的旧知识库，
         // 才回退到 OpenAI 默认值。
@@ -635,6 +644,7 @@ pub async fn search_knowledge_base(
                     let base_url = request.reranker_base_url.as_deref().unwrap_or("");
                     let model = request.reranker_model.as_deref().unwrap_or("");
                     let top_n = request.rerank_top_n.unwrap_or(request.top_k) as usize;
+                    let unranked_chunks = result.chunks.clone();
                     match super::reranker::rerank_chunks(
                         &request.query,
                         result.chunks,
@@ -649,13 +659,25 @@ pub async fn search_knowledge_base(
                         }
                         Err(e) => {
                             log::warn!("[KB] Reranker failed, returning unranked results: {}", e);
-                            result.chunks = vec![];
-                            result.total_chunks = 0;
+                            result.chunks = unranked_chunks;
+                            result.total_chunks = result.chunks.len() as i32;
+                            result.warnings.push(RetrievalWarning {
+                                code: "reranker_fallback".to_string(),
+                                message:
+                                    "Reranker 精排暂时不可用，已自动使用原始检索结果。"
+                                        .to_string(),
+                            });
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("[KB] Could not load reranker API key: {}", e);
+                    result.warnings.push(RetrievalWarning {
+                        code: "reranker_fallback".to_string(),
+                        message:
+                            "Reranker 配置不可用，已自动使用原始检索结果，请检查精排配置。"
+                                .to_string(),
+                    });
                 }
             }
         }

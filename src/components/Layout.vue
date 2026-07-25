@@ -32,6 +32,7 @@ import { useNotification } from "@/composables/useNotify";
 import { useSettingsStore } from "@/stores/settings";
 import { useChatStore } from "@/stores/chat";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { useKnowledgeBaseStore } from "@/stores/knowledgeBase";
 
 // 导入快捷键匹配工具
 import { eventMatchesAccelerator } from "@/utils/hotkey";
@@ -55,6 +56,10 @@ const settings = useSettingsStore();
 
 // 聊天 Store
 const chat = useChatStore();
+
+// 知识库检索和 Reranker 可能在对话页、知识库页或后台流程中失败，
+// 统一由全局布局消费通知队列，确保始终显示在左下角。
+const knowledgeBase = useKnowledgeBaseStore();
 
 // 协作团队 Store：事件监听在这里（App 布局层）注册，而不是等用户第一次打开
 // 协作团队页面——否则 Agent 在别的页面提问/申请审批时整个应用毫无反应，
@@ -189,6 +194,31 @@ watch(
       }
     }
   }
+);
+
+watch(
+  () => knowledgeBase.retrievalNotices.length,
+  () => {
+    while (knowledgeBase.retrievalNotices.length > 0) {
+      const notice = knowledgeBase.retrievalNotices.shift();
+      if (!notice) continue;
+
+      if (notice.type === "error") {
+        criticalNotification.error({
+          title: notice.title,
+          description: notice.message,
+          duration: 8000,
+        });
+      } else {
+        notification.warning({
+          title: notice.title,
+          description: notice.message,
+          duration: 8000,
+        });
+      }
+    }
+  },
+  { immediate: true },
 );
 
 // 托盘/快捷键设置同步到后端失败时，同样走队列弹窗，别让用户以为设置已生效。

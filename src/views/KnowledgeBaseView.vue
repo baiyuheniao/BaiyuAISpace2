@@ -68,7 +68,13 @@ import {
   Library,
 } from "@vicons/ionicons5";
 import { useMessage } from "@/composables/useNotify";
-import { useKnowledgeBaseStore, type KnowledgeBase, type Document } from "@/stores/knowledgeBase";
+import {
+  useKnowledgeBaseStore,
+  MIN_SIMILARITY_THRESHOLD,
+  MAX_SIMILARITY_THRESHOLD,
+  type KnowledgeBase,
+  type Document,
+} from "@/stores/knowledgeBase";
 import { useSettingsStore } from "@/stores/settings";
 
 // ============ 状态管理 ============
@@ -728,8 +734,8 @@ const getStatusTag = (status: Document["status"]) => {
               <div class="slider-row">
                 <n-slider
                   v-model:value="kbStore.retrievalSettings.similarityThreshold"
-                  :min="0"
-                  :max="1"
+                  :min="MIN_SIMILARITY_THRESHOLD"
+                  :max="MAX_SIMILARITY_THRESHOLD"
                   :step="0.05"
                   show-tooltip
                 />

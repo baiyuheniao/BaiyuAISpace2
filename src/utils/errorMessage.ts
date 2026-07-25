@@ -22,6 +22,15 @@ export function classifyError(error: unknown): ClassifiedError {
 
   if (errorStr.includes("API key") || errorStr.includes("Unauthorized") || errorStr.includes("401")) {
     return { type: "auth", message: "API 密钥无效或已过期，请检查设置" };
+  } else if (errorStr.includes("Embedding error")) {
+    return {
+      type: "embedding",
+      message: "生成检索向量失败，请检查知识库关联的 Embedding 配置后重试",
+    };
+  } else if (errorStr.includes("Knowledge base not found")) {
+    return { type: "knowledge_base", message: "所选知识库不存在或已被删除，请重新选择" };
+  } else if (errorStr.includes("Retrieval error")) {
+    return { type: "retrieval", message: "知识库检索服务暂时不可用，请检查配置后重试" };
   } else if (errorStr.includes("network") || errorStr.includes("Failed to fetch")) {
     return { type: "network", message: "网络连接错误，请检查网络设置" };
   } else if (errorStr.includes("timeout")) {

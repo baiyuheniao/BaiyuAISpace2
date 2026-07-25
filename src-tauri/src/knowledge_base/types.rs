@@ -136,6 +136,14 @@ pub struct RetrievalResult {
     pub query: String,
     pub chunks: Vec<RetrievedChunk>,
     pub total_chunks: i32,
+    #[serde(default)]
+    pub warnings: Vec<RetrievalWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalWarning {
+    pub code: String,
+    pub message: String,
 }
 
 /// 创建知识库的请求

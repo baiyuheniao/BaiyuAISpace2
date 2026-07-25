@@ -21,6 +21,7 @@ import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore } from "./settings";
+import { classifyError } from "@/utils/errorMessage";
 
 // ============ 类型定义 (与 Rust 后端对应) ============
 
@@ -93,6 +94,18 @@ export interface RetrievalResult {
   query: string;                  // 检索查询文本
   chunks: RetrievedChunk[];       // 检索到的相关分块
   total_chunks: number;           // 符合阈值的总分块数
+  warnings?: RetrievalWarning[];  // 可回退错误，例如 Reranker 失败
+}
+
+export interface RetrievalWarning {
+  code: string;
+  message: string;
+}
+
+export interface KnowledgeBaseNotice {
+  type: "warning" | "error";
+  title: string;
+  message: string;
 }
 
 /**
@@ -129,6 +142,19 @@ export interface RetrievalSettings {
   rerankTopN?: number;            // 精排后保留条数（默认等于 topK）
 }
 
+export const MIN_SIMILARITY_THRESHOLD = 0.3;
+export const MAX_SIMILARITY_THRESHOLD = 0.8;
+export const DEFAULT_SIMILARITY_THRESHOLD = 0.5;
+const RETRIEVAL_SETTINGS_VERSION = 1;
+
+export const normalizeSimilarityThreshold = (value: number): number => {
+  const finiteValue = Number.isFinite(value) ? value : DEFAULT_SIMILARITY_THRESHOLD;
+  return Math.min(
+    MAX_SIMILARITY_THRESHOLD,
+    Math.max(MIN_SIMILARITY_THRESHOLD, finiteValue),
+  );
+};
+
 export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
   // ============ 响应式状态 ============
   
@@ -146,14 +172,34 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
   
   // 文档导入进度
   const importProgress = ref<{ current: number; total: number } | null>(null);
+
+  // Store 无法直接使用 Naive UI 的通知上下文，统一塞进队列，由 Layout 在
+  // 左下角弹出。Reranker 回退是 warning，完整检索失败是 error。
+  const retrievalNotices = ref<KnowledgeBaseNotice[]>([]);
   
   // 检索设置
   const retrievalSettings = ref<RetrievalSettings>({
     mode: "hybrid",
     topK: 5,
-    similarityThreshold: 0.7,
+    similarityThreshold: DEFAULT_SIMILARITY_THRESHOLD,
     enableReranker: false,
   });
+  const retrievalSettingsVersion = ref(0);
+
+  const migrateRetrievalSettings = () => {
+    if (retrievalSettingsVersion.value < RETRIEVAL_SETTINGS_VERSION) {
+      // 0.7 是旧版本的默认值，也正是这次把正确片段全部过滤掉的根因。
+      // 一次性迁移到 0.5；之后用户在新范围内的选择会原样保留。
+      if (Math.abs(retrievalSettings.value.similarityThreshold - 0.7) < 0.0001) {
+        retrievalSettings.value.similarityThreshold = DEFAULT_SIMILARITY_THRESHOLD;
+      }
+      retrievalSettingsVersion.value = RETRIEVAL_SETTINGS_VERSION;
+    }
+
+    retrievalSettings.value.similarityThreshold = normalizeSimilarityThreshold(
+      retrievalSettings.value.similarityThreshold,
+    );
+  };
 
   // ============ 计算属性 ============
   
@@ -167,6 +213,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
 
   // 加载所有知识库列表
   const loadKnowledgeBases = async () => {
+    migrateRetrievalSettings();
     loading.value = true;
     try {
       const result = await invoke<KnowledgeBase[]>("list_knowledge_bases");
@@ -321,6 +368,7 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     kbId: string,
     query: string,
   ): Promise<RetrievalResult | null> => {
+    migrateRetrievalSettings();
     try {
       // Build optional reranker params
       const rerankerParams: Record<string, unknown> = {};
@@ -343,20 +391,37 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
           query,
           topK: retrievalSettings.value.topK,
           retrievalMode: retrievalSettings.value.mode,
-          similarityThreshold: retrievalSettings.value.similarityThreshold,
+          similarityThreshold: normalizeSimilarityThreshold(
+            retrievalSettings.value.similarityThreshold,
+          ),
           windowSize: 1, // fetch ±1 adjacent chunks to give LLM richer context
           ...rerankerParams,
         },
       });
+      for (const warning of result.warnings ?? []) {
+        retrievalNotices.value.push({
+          type: "warning",
+          title: warning.code === "reranker_fallback" ? "精排暂时不可用" : "知识库检索已降级",
+          message: warning.message,
+        });
+      }
       return result;
     } catch (error) {
       console.error("Failed to search knowledge base:", error);
+      retrievalNotices.value.push({
+        type: "error",
+        title: "知识库检索失败",
+        message: `${classifyError(error).message}。本次将不使用知识库内容。`,
+      });
       return null;
     }
   };
 
   const updateRetrievalSettings = (settings: Partial<RetrievalSettings>) => {
     retrievalSettings.value = { ...retrievalSettings.value, ...settings };
+    retrievalSettings.value.similarityThreshold = normalizeSimilarityThreshold(
+      retrievalSettings.value.similarityThreshold,
+    );
   };
 
   // Format file size
@@ -388,6 +453,8 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
     loading,
     importProgress,
     retrievalSettings,
+    retrievalSettingsVersion,
+    retrievalNotices,
     
     // Getters
     currentKbDocuments,
@@ -408,6 +475,6 @@ export const useKnowledgeBaseStore = defineStore("knowledgeBase", () => {
   };
 }, {
   persist: {
-    paths: ["retrievalSettings"],
+    paths: ["retrievalSettings", "retrievalSettingsVersion"],
   },
 });
