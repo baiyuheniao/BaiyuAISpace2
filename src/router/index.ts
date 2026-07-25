@@ -69,6 +69,11 @@ const routes: RouteRecordRaw[] = [
     name: "Scheduler",
     component: () => import("@/views/SchedulerView.vue"),
   },
+  {
+    path: "/migration-center",
+    name: "MigrationCenter",
+    component: () => import("@/views/MigrationCenterView.vue"),
+  },
 ];
 
 // 创建路由器实例

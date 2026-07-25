@@ -229,6 +229,14 @@ fn main() {
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
             commands::mcp::test_mcp_connection,
+            // Agent 配置迁移中心：只解析用户明确选择的文件，导入的 MCP 默认禁用
+            commands::importer::preview_agent_import,
+            commands::importer::import_mcp_servers,
+            commands::importer::import_skill_directory,
+            commands::importer::scan_project_rule_files,
+            commands::importer::read_project_rule_file,
+            commands::importer::save_project_rule_file,
+            commands::importer::import_project_rule_as_skill,
             // 本地模型相关命令
             commands::local_model::list_local_models,
             commands::local_model::pull_local_model,

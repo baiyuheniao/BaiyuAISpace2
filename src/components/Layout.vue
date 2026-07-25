@@ -88,6 +88,7 @@ const navItems = [
   { key: "LocalDeploy", label: "Local", name: "本地部署" },
   { key: "AgentTeam", label: "Agents", name: "协作团队" },
   { key: "Scheduler", label: "Cron", name: "定时任务" },
+  { key: "MigrationCenter", label: "Import", name: "迁移中心" },
   { key: "History", label: "History", name: "历史记录" },
   { key: "Settings", label: "Settings", name: "设置" },
 ];
