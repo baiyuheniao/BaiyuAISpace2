@@ -17,6 +17,7 @@
 pub mod app_update;
 pub mod constants;
 pub mod docker;
+pub mod importer;
 pub mod llm;
 pub mod lmstudio;
 pub mod local_model;
