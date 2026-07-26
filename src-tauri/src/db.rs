@@ -104,11 +104,21 @@ impl Database {
                 content TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 error TEXT,
+                token_usage TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
             "#,
             [],
         )?;
+
+        let has_token_usage = self.conn.query_row(
+            "SELECT 1 FROM pragma_table_info('messages') WHERE name = 'token_usage'",
+            [],
+            |_| Ok(true),
+        ).unwrap_or(false);
+        if !has_token_usage {
+            self.conn.execute("ALTER TABLE messages ADD COLUMN token_usage TEXT", [])?;
+        }
 
         self.conn.execute(
             r#"
@@ -283,21 +293,24 @@ impl Database {
         session_id: &str,
         message: &ChatMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let token_usage = message.token_usage.as_ref().map(serde_json::to_string).transpose()?;
         self.conn.execute(
             r#"
-            INSERT INTO messages (id, session_id, role, content, timestamp, error)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, timestamp, error, token_usage)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
-                error = excluded.error
+                error = excluded.error,
+                token_usage = excluded.token_usage
             "#,
-            [
-                &message.id,
+            rusqlite::params![
+                message.id,
                 session_id,
-                &message.role,
-                &message.content,
-                &message.timestamp.to_string(),
-                &message.error.as_deref().unwrap_or(""),
+                message.role,
+                message.content,
+                message.timestamp,
+                message.error.as_deref().unwrap_or(""),
+                token_usage,
             ],
         )?;
 
@@ -341,7 +354,7 @@ impl Database {
         
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, role, content, timestamp, error 
+            SELECT id, role, content, timestamp, error, token_usage
             FROM messages 
             WHERE session_id = ? 
             ORDER BY timestamp ASC
@@ -350,6 +363,7 @@ impl Database {
         
         let rows = stmt.query_map([session_id], |row| {
             let error: Option<String> = row.get(4)?;
+            let token_usage_json: Option<String> = row.get(5)?;
             Ok(ChatMessage {
                 id: row.get(0)?,
                 role: row.get(1)?,
@@ -358,6 +372,7 @@ impl Database {
                 error: if error.as_deref() == Some("") { None } else { error },
                 images: vec![],
                 videos: vec![],
+                token_usage: token_usage_json.as_deref().and_then(|value| serde_json::from_str(value).ok()),
             })
         })?;
 

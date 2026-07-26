@@ -10,9 +10,11 @@ const props = withDefaults(defineProps<{
   count: number;
   label?: string;
   description?: string;
+  exact?: boolean;
 }>(), {
   label: "",
   description: "估算值，仅统计可见文本；不含图片、隐藏系统提示词和工具上下文",
+  exact: false,
 });
 
 const formattedCount = computed(() => formatTokenCount(props.count));
@@ -27,7 +29,7 @@ const formattedCount = computed(() => formatTokenCount(props.count));
       v-if="label"
       class="token-label"
     >{{ label }}</span>
-    <span class="token-value">≈ {{ formattedCount }} Tokens</span>
+    <span class="token-value">{{ exact ? "" : "≈ " }}{{ formattedCount }} Tokens</span>
   </span>
 </template>
 

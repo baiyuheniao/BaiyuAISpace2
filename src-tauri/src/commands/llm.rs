@@ -79,6 +79,16 @@ pub struct ChatMessage {
     /// 视频附件 (仅 Gemini provider 有效, 其他 provider 忽略)
     #[serde(default)]
     pub videos: Vec<VideoAttachment>,
+    #[serde(default)]
+    pub token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
 }
 
 /// 聊天会话结构
@@ -184,6 +194,14 @@ pub struct StreamChunk {
     pub is_thinking: bool,
     /// 是否完成
     pub done: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageEvent {
+    pub session_id: String,
+    pub message_id: String,
+    pub usage: TokenUsage,
 }
 
 // 每个正在进行的流对应一个取消令牌，以 session_id 为键，
@@ -524,6 +542,7 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 "model": model,
                 "messages": msgs,
                 "stream": true,
+                "stream_options": { "include_usage": true },
             });
 
             // 未设置时直接省略字段，而不是拿一个猜测值去顶替；这些 provider 并不
@@ -956,6 +975,9 @@ fn parse_sse_line(provider: &str, line: &str) -> Option<StreamContent> {
         }
         _ => {
             // OpenAI 格式
+            if let Some(usage) = parse_openai_usage(&json) {
+                return Some(StreamContent::Usage(usage));
+            }
             if let Some(choices) = json["choices"].as_array() {
                 if let Some(first_choice) = choices.first() {
                     let delta = &first_choice["delta"];
@@ -1020,7 +1042,17 @@ enum StreamContent {
     /// 思考型模型的思考过程增量（reasoning/reasoning_content/thinking_delta）
     Thinking(String),
     ToolCallDeltas(Vec<ToolCallDelta>),
+    Usage(TokenUsage),
     Done,
+}
+
+fn parse_openai_usage(json: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = json.get("usage")?;
+    Some(TokenUsage {
+        prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
+        completion_tokens: usage.get("completion_tokens")?.as_u64()?,
+        total_tokens: usage.get("total_tokens")?.as_u64()?,
+    })
 }
 
 /// 流式工具调用的一个片段，以 `index` 为键。`id`/`name` 只出现在某个 index
@@ -1156,6 +1188,7 @@ pub async fn stream_message(
                     error: None,
                     images: vec![],
                     videos: vec![],
+                    token_usage: None,
                 });
             }
         }
@@ -1282,6 +1315,13 @@ pub async fn stream_message(
                                                 entry.arguments.push_str(&fragment);
                                             }
                                         }
+                                    }
+                                    StreamContent::Usage(usage) => {
+                                        let _ = app_handle.emit("token-usage", TokenUsageEvent {
+                                            session_id: request.session_id.clone(),
+                                            message_id: message_id.clone(),
+                                            usage,
+                                        });
                                     }
                                     StreamContent::Done => {
                                         return finalize_turn(
@@ -2567,7 +2607,7 @@ mod provider_tool_calling_tests {
     fn anthropic_request_body_carries_tools_in_anthropic_shape() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![], videos: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
         }];
         let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -2580,7 +2620,7 @@ mod provider_tool_calling_tests {
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
             id: content.into(), role: role.into(), content: content.into(),
-            timestamp: 0, error: None, images: vec![], videos: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
         }
     }
 
@@ -2624,7 +2664,7 @@ mod provider_tool_calling_tests {
     fn google_request_body_groups_tools_under_function_declarations() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![], videos: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
         }];
         let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -2706,12 +2746,25 @@ mod provider_tool_calling_tests {
     fn openai_shape_unaffected_by_provider_branching() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![], videos: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
         }];
         let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "get_weather");
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn openai_usage_chunk_is_parsed_before_empty_choices() {
+        let parsed = parse_sse_line(
+            "openai",
+            r#"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}"#,
+        );
+        match parsed {
+            Some(StreamContent::Usage(usage)) => assert_eq!(usage.total_tokens, 20),
+            _ => panic!("expected OpenAI usage chunk"),
+        }
     }
 
     #[test]
@@ -2770,7 +2823,7 @@ mod provider_tool_calling_tests {
     fn local_providers_get_reasoning_effort_none_only_when_thinking_disabled() {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
-            timestamp: 0, error: None, images: vec![], videos: vec![],
+            timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
         }];
 
         // 本地服务 + 思考关闭：显式关思考（LM Studio 上 qwen3.5 这类默认思考
@@ -2801,6 +2854,7 @@ mod provider_tool_calling_tests {
             timestamp: 0, error: None,
             images: vec![ImageAttachment { data: "AAAA".into(), media_type: "image/png".into() }],
             videos: vec![],
+            token_usage: None,
         }
     }
 
@@ -2885,9 +2939,9 @@ mod provider_tool_calling_tests {
     #[test]
     fn build_native_messages_matches_provider_shapes() {
         let messages = vec![
-            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
-            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
-            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![], videos: vec![] },
+            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
+            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
+            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
         ];
 
         let anthropic = build_native_messages("anthropic", &messages);

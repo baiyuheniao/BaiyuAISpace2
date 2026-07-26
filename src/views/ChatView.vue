@@ -25,7 +25,6 @@ import { useSettingsStore } from "@/stores/settings";
 import ChatMessage from "@/components/ChatMessage.vue";
 import ChatInput from "@/components/ChatInput.vue";
 import TokenCount from "@/components/TokenCount.vue";
-import { countMessageTokens } from "@/utils/tokenCount";
 
 // ============ 状态管理 ============
 
@@ -48,9 +47,12 @@ const hasMessages = computed(() => {
   return chat.currentSession && chat.currentSession.messages.length > 0;
 });
 
-/** 当前会话全部可见消息的文本 Token 估算，流式输出时实时增长。 */
+/** 已完成交互由服务端返回的实际总用量；未返回 usage 的旧会话不纳入。 */
 const sessionTokenCount = computed(() =>
-  countMessageTokens(chat.currentSession?.messages ?? [])
+  (chat.currentSession?.messages ?? []).reduce(
+    (total, message) => total + (message.tokenUsage?.totalTokens ?? 0),
+    0,
+  )
 );
 
 // ============ 方法函数 ============
@@ -113,10 +115,12 @@ onMounted(async () => {
       v-if="chat.currentSession"
       class="session-token-bar"
     >
-      <span class="session-token-eyebrow">Session Context</span>
+      <span class="session-token-eyebrow">Session Usage</span>
       <TokenCount
-        label="本会话"
+        label="累计"
         :count="sessionTokenCount"
+        :exact="true"
+        description="已完成交互的 API 实际 total_tokens 累计；未返回 Usage 的交互不计入"
       />
     </div>
 
