@@ -131,6 +131,32 @@ const handleFullscreenHotkey = async (e: KeyboardEvent) => {
 const notification = useNotification();
 const criticalNotification = useNotification("critical");
 
+// Chat 的请求、续写和收尾错误也必须跨页面可见。队列去重由 chat store
+// 完成，这里消费后立即移除，避免重复弹出。
+watch(
+  () => chat.errorNotices.length,
+  () => {
+    while (chat.errorNotices.length > 0) {
+      const notice = chat.errorNotices.shift();
+      if (notice) {
+        criticalNotification.error({ title: "对话未能完成", description: notice, duration: 10000 });
+      }
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => chat.warningNotices.length,
+  () => {
+    while (chat.warningNotices.length > 0) {
+      const notice = chat.warningNotices.shift();
+      if (notice) notification.warning({ title: "工具调用有问题", description: notice, duration: 8000 });
+    }
+  },
+  { immediate: true },
+);
+
 // 待处理事项新增、且用户没停在协作团队页面时，左下角弹一条提醒（在页面上
 // 时卡片本身就是提醒，不重复弹）。
 watch(workspacePendingCount, (count, prev) => {

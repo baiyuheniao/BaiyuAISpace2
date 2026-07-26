@@ -1426,6 +1426,24 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               </n-input-number>
             </n-space>
           </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">最大工具调用轮数</span>
+              <n-text depth="3" style="font-size: 12px;">
+                普通 Chat 在一次回答中最多连续调用工具的轮数。达到上限后，模型会基于已获得的结果收尾并说明未完成项。
+              </n-text>
+            </div>
+            <n-input-number
+              v-model:value="settings.maxToolRounds"
+              placeholder="请输入 1–100"
+              :min="1"
+              :max="100"
+              style="width: 140px;"
+            >
+              <template #suffix>轮</template>
+            </n-input-number>
+          </div>
         </n-card>
 
         <!-- 关于卡片 -->

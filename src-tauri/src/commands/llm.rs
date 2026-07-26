@@ -33,6 +33,13 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// 普通 Chat 的保护线。这里是确定性压缩，不会再调用一个模型产生费用或新失败链路。
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 20;
+const MAX_TOOL_ROUNDS: usize = 100;
+const TOOL_RESULT_TOKEN_BUDGET: usize = 6_000;
+const TOOL_ROUND_TOKEN_BUDGET: usize = 12_000;
+const TOOL_RESULT_CHAR_BUDGET: usize = TOOL_RESULT_TOKEN_BUDGET * 4;
+
 // ============ 类型定义 ============
 
 /// 图片附件 (base64 编码, 不含 data URL 前缀)
@@ -137,6 +144,9 @@ pub struct SendMessageRequest {
     /// 每次重试之间的等待秒数（None 时用 DEFAULT_LLM_RETRY_INTERVAL_SECS）
     #[serde(default)]
     pub retry_interval_secs: Option<u32>,
+    /// 普通 Chat 每次回答允许连续调用工具的最大轮数。前端设置缺失或异常时后端仍兜底。
+    #[serde(default)]
+    pub max_tool_rounds: Option<u32>,
 }
 
 /// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
@@ -1320,6 +1330,121 @@ pub async fn stream_message(
 
 /// 执行一轮工具调用（可能是自主的 Skill 调用，也可能是真正的 MCP 工具调用），
 /// 按 `tool_calls` 原来的顺序返回它们各自的结果。
+fn truncate_text(value: &str, limit: usize) -> (String, bool) {
+    if value.chars().count() <= limit { return (value.to_string(), false); }
+    (format!("{}…[已截断]", value.chars().take(limit).collect::<String>()), true)
+}
+
+fn find_text_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| object.get(*key).and_then(|v| v.as_str()).map(str::to_string))
+}
+
+fn is_web_tool(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("search") || name.contains("web") || name.contains("browser") || name.contains("fetch")
+}
+
+/// 供模型继续推理的确定性压缩结果。小结果保持原样；大结果限制字符串、数组和嵌套，
+/// 并附带明确标记，避免模型误以为它看到了完整原始资料。
+fn compact_tool_result(value: &serde_json::Value, tool_name: &str) -> serde_json::Value {
+    let original = value.to_string();
+    if original.len() <= TOOL_RESULT_CHAR_BUDGET && !is_web_tool(tool_name) { return value.clone(); }
+
+    fn compact(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+        if depth >= 4 { return serde_json::json!("[嵌套内容已省略]"); }
+        match value {
+            serde_json::Value::String(s) => {
+                if s.len() > 12_000 || s.starts_with("data:") || s.len() > 512 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')) {
+                    serde_json::json!(truncate_text(s, 4_000).0)
+                } else { value.clone() }
+            }
+            serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().take(12).map(|item| compact(item, depth + 1)).collect()),
+            serde_json::Value::Object(map) => {
+                let mut result = serde_json::Map::new();
+                for (key, item) in map.iter().take(24) {
+                    if matches!(key.as_str(), "html" | "rawHtml" | "base64" | "binary" | "data") && item.is_string() { continue; }
+                    result.insert(key.clone(), compact(item, depth + 1));
+                }
+                serde_json::Value::Object(result)
+            }
+            _ => value.clone(),
+        }
+    }
+
+    let mut compacted = compact(value, 0);
+    if is_web_tool(tool_name) {
+        // 搜索结果是一个数组，不能只在顶层找标题/URL，否则会把对模型最有用的
+        // 定位信息压成“网页结果”。抓取则保留 URL 与有限正文节选。
+        if tool_name.to_ascii_lowercase().contains("search") {
+            let results: Vec<_> = value.get("results").and_then(|v| v.as_array()).into_iter().flatten().take(10)
+                .map(|item| serde_json::json!({
+                    "title": find_text_field(item, &["title", "name"]).unwrap_or_else(|| "未命名结果".to_string()),
+                    "url": find_text_field(item, &["url", "link", "href"]).unwrap_or_default(),
+                    "snippet": find_text_field(item, &["snippet", "description", "content"]).map(|s| truncate_text(&s, 500).0).unwrap_or_default(),
+                }))
+                .collect();
+            compacted = serde_json::json!({ "query": value.get("query").cloned().unwrap_or_default(), "results": results, "truncated": true });
+        } else {
+            let title = find_text_field(value, &["title", "name"]).unwrap_or_else(|| "网页结果".to_string());
+            let url = find_text_field(value, &["url", "link", "href"]).unwrap_or_default();
+            let excerpt = find_text_field(value, &["snippet", "description", "content", "text", "body"])
+                .map(|s| truncate_text(&s, 2_000).0).unwrap_or_default();
+            compacted = serde_json::json!({ "title": title, "url": url, "excerpt": excerpt, "truncated": true });
+        }
+    }
+    let before = original.len();
+    let (serialized, truncated) = truncate_text(&compacted.to_string(), TOOL_RESULT_CHAR_BUDGET);
+    let mut output = serde_json::from_str(&serialized).unwrap_or_else(|_| serde_json::json!({ "content": serialized }));
+    if truncated || before > output.to_string().len() {
+        if let Some(object) = output.as_object_mut() { object.insert("_truncated".to_string(), serde_json::json!(true)); }
+    }
+    output
+}
+
+/// 仅用于界面，绝不影响模型上下文。网页工具显示黑白卡片所需的元数据，不透传正文。
+fn tool_display_result(value: &serde_json::Value, tool_name: &str) -> serde_json::Value {
+    if is_web_tool(tool_name) {
+        let search_results = value.get("results").and_then(|v| v.as_array());
+        let first_result = search_results.and_then(|results| results.first());
+        let title = first_result.and_then(|item| find_text_field(item, &["title", "name"]))
+            .or_else(|| find_text_field(value, &["title", "name"]))
+            .unwrap_or_else(|| "网页结果".to_string());
+        let url = first_result.and_then(|item| find_text_field(item, &["url", "link", "href"]))
+            .or_else(|| find_text_field(value, &["url", "link", "href"]))
+            .unwrap_or_default();
+        let count = search_results.map(|v| v.len());
+        return serde_json::json!({ "display_type": if tool_name.to_ascii_lowercase().contains("search") { "web_search" } else { "web_fetch" }, "title": title, "url": url, "result_count": count, "truncated": true });
+    }
+    let (preview, truncated) = truncate_text(&value.to_string(), 1_500);
+    serde_json::json!({ "display_type": "preview", "preview": preview, "truncated": truncated })
+}
+
+fn enforce_round_tool_budget(rounds: &mut [(Vec<ToolCall>, Vec<serde_json::Value>)]) {
+    let mut used = 0usize;
+    // 倒序优先保留最近工具结果；较早结果退化为可追溯元信息。
+    for (calls, results) in rounds.iter_mut().rev() {
+        for (call, result) in calls.iter().zip(results.iter_mut()).rev() {
+            let size = result.to_string().len();
+            if used + size <= TOOL_ROUND_TOKEN_BUDGET * 4 {
+                used += size;
+                continue;
+            }
+            let title = find_text_field(result, &["title", "name"]).unwrap_or_default();
+            let url = find_text_field(result, &["url", "link", "href"]).unwrap_or_default();
+            *result = serde_json::json!({
+                "tool": call.function.name,
+                "status": "completed",
+                "title": title,
+                "url": url,
+                "_truncated": true,
+                "note": "较早工具结果因本轮上下文预算已省略；如有必要请缩小查询范围后重新调用工具。"
+            });
+            used += result.to_string().len();
+        }
+    }
+}
+
 async fn execute_tool_calls(
     app_handle: &AppHandle,
     state: tauri::State<'_, DbState>,
@@ -1361,7 +1486,7 @@ async fn execute_tool_calls(
                 serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
             ).await {
                 Ok(result) => {
-                    log::info!("Tool execution result: {:?}", result);
+                    log::info!("Tool execution result: tool={} original_bytes={}", tool.name, result.to_string().len());
                     result
                 }
                 Err(e) => {
@@ -1375,6 +1500,10 @@ async fn execute_tool_calls(
         };
 
         let is_error = result.get("error").is_some();
+        let original_size = result.to_string().len();
+        let display_result = tool_display_result(&result, &tool_call.function.name);
+        let compact_result = compact_tool_result(&result, &tool_call.function.name);
+        log::info!("Tool result compacted: tool={} original_bytes={} kept_bytes={} truncated={}", tool_call.function.name, original_size, compact_result.to_string().len(), original_size > compact_result.to_string().len());
         let _ = app_handle.emit("tool-call-status", ToolCallEvent {
             session_id: session_id.to_string(),
             message_id: message_id.to_string(),
@@ -1382,10 +1511,10 @@ async fn execute_tool_calls(
             tool_name: tool_call.function.name.clone(),
             arguments: tool_call.function.arguments.clone(),
             status: if is_error { "error".to_string() } else { "done".to_string() },
-            result: Some(result.to_string()),
+            result: Some(display_result.to_string()),
         });
 
-        tool_results.push(result);
+        tool_results.push(compact_result);
     }
     tool_results
 }
@@ -1427,13 +1556,16 @@ async fn finalize_turn(
         // 允许访问的目录"，再"列出该目录下的文件"）。循环处理，每次续写
         // 请求都把模型自己的工具重新带上，直到它返回纯文本，或者达到轮次
         // 上限为止——没有这个上限的话，一个行为异常的模型可能会无限循环下去。
-        const MAX_TOOL_ROUNDS: usize = 5;
+        let max_tool_rounds = request.max_tool_rounds
+            .map(|value| value.clamp(1, MAX_TOOL_ROUNDS as u32) as usize)
+            .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
         let mut rounds: Vec<(Vec<ToolCall>, Vec<serde_json::Value>)> = Vec::new();
         let mut current_calls = tool_calls;
 
-        for round in 0..MAX_TOOL_ROUNDS {
+        for round in 0..max_tool_rounds {
             let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills).await;
             rounds.push((current_calls, tool_results));
+            enforce_round_tool_budget(&mut rounds);
 
             match continue_after_tool_calls(
                 &request.provider,
@@ -1447,6 +1579,7 @@ async fn finalize_turn(
                 max_tokens,
                 request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
                 request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS),
+                false,
             )
             .await
             {
@@ -1470,8 +1603,24 @@ async fn finalize_turn(
                     break;
                 }
                 Ok(ContinuationResult::ToolCalls(next_calls)) => {
-                    if round == MAX_TOOL_ROUNDS - 1 {
-                        log::warn!("Tool-call round limit ({}) reached, stopping", MAX_TOOL_ROUNDS);
+                    if round == max_tool_rounds - 1 {
+                        log::warn!("Tool-call round limit ({}) reached; requesting a final answer without tools", max_tool_rounds);
+                        match continue_after_tool_calls(
+                            &request.provider, &request.model, &request.api_key, &request.base_url,
+                            effective_messages, &rounds, mcp_tools, all_skills, max_tokens,
+                            request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
+                            request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS), true,
+                        ).await {
+                            Ok(ContinuationResult::Text { text, thinking }) => {
+                                if let Some(th) = thinking.filter(|t| !t.is_empty()) {
+                                    let _ = app_handle.emit("stream-chunk", StreamChunk { session_id: request.session_id.clone(), message_id: message_id.to_string(), content: th, is_thinking: true, done: false });
+                                }
+                                let _ = app_handle.emit("stream-chunk", StreamChunk { session_id: request.session_id.clone(), message_id: message_id.to_string(), content: text, is_thinking: false, done: false });
+                                break;
+                            }
+                            Ok(ContinuationResult::ToolCalls(_)) => return Err(LLMError::ApiError("达到工具调用上限后，模型仍试图调用工具，无法生成最终回答".to_string())),
+                            Err(err) => return Err(LLMError::ApiError(format!("达到工具调用上限后的强制收尾失败: {}", err))),
+                        }
                     } else {
                         current_calls = next_calls;
                         continue;
@@ -1479,9 +1628,9 @@ async fn finalize_turn(
                 }
                 Err(err) => {
                     log::error!("Failed to continue reasoning after tool calls: {}", err);
+                    return Err(LLMError::ApiError(format!("工具调用后的续写失败: {}", err)));
                 }
             }
-            break;
         }
     }
 
@@ -1524,6 +1673,7 @@ async fn continue_after_tool_calls(
     max_tokens: Option<u32>,
     retry_count: u32,
     retry_interval_secs: u32,
+    force_final: bool,
 ) -> Result<ContinuationResult, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client(&url)?;
@@ -1582,7 +1732,11 @@ async fn continue_after_tool_calls(
                         })
                     })
                     .collect();
-                msgs.push(serde_json::json!({ "role": "user", "content": tool_result_blocks }));
+                let mut content = tool_result_blocks;
+                if force_final {
+                    content.push(serde_json::json!({ "type": "text", "text": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+                }
+                msgs.push(serde_json::json!({ "role": "user", "content": content }));
             }
 
             // 和 build_stream_request_body 一样的原因：Anthropic 强制要求这个
@@ -1608,6 +1762,7 @@ async fn continue_after_tool_calls(
                 }).collect();
                 b["tools"] = serde_json::json!(tools_json);
             }
+            if force_final { b["tool_choice"] = serde_json::json!({ "type": "none" }); }
             b
         }
         "google" => {
@@ -1652,7 +1807,11 @@ async fn continue_after_tool_calls(
                     .collect();
                 // Gemini REST API 要求 functionResponse 部分的 role 必须是
                 // "user"，不能是 "function"——模型角色是 "model"，用户输入是 "user"。
-                contents.push(serde_json::json!({ "role": "user", "parts": response_parts }));
+                let mut parts = response_parts;
+                if force_final {
+                    parts.push(serde_json::json!({ "text": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+                }
+                contents.push(serde_json::json!({ "role": "user", "parts": parts }));
             }
 
             let mut generation_config = serde_json::json!({});
@@ -1676,6 +1835,7 @@ async fn continue_after_tool_calls(
                 }).collect();
                 b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
             }
+            if force_final { b["toolConfig"] = serde_json::json!({ "functionCallingConfig": { "mode": "NONE" } }); }
             b
         }
         _ => {
@@ -1713,6 +1873,9 @@ async fn continue_after_tool_calls(
                     }));
                 }
             }
+            if force_final {
+                msgs.push(serde_json::json!({ "role": "user", "content": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+            }
 
             let mut b = serde_json::json!({
                 "model": model,
@@ -1735,6 +1898,7 @@ async fn continue_after_tool_calls(
                 }).collect();
                 b["tools"] = serde_json::json!(tools_json);
             }
+            if force_final { b["tool_choice"] = serde_json::json!("none"); }
             b
         }
     };
@@ -2868,7 +3032,7 @@ mod provider_tool_calling_tests {
 
         let outcome = continue_after_tool_calls(
             "custom", "test-model", "test-key", &base_url,
-            &original_messages, &rounds, &[], &[], None, 0, 0,
+            &original_messages, &rounds, &[], &[], None, 0, 0, false,
         ).await.expect("continuation call should succeed");
 
         match outcome {
@@ -2928,7 +3092,7 @@ mod provider_tool_calling_tests {
         };
         let mut rounds = vec![(vec![call_1], vec![result_1])];
 
-        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0)
+        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0, false)
             .await
             .expect("round 1 continuation");
         let next_calls = match outcome {
@@ -2938,7 +3102,7 @@ mod provider_tool_calling_tests {
         assert_eq!(next_calls[0].id, "call_2");
 
         rounds.push((next_calls, vec![result_2]));
-        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0)
+        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0, false)
             .await
             .expect("round 2 continuation");
         match outcome_2 {
@@ -3063,5 +3227,40 @@ mod provider_tool_calling_tests {
         let openai = build_run_turn_body("openai", "gpt-4o", None, &msgs, &[tool], None, false);
         assert_eq!(openai["tools"][0]["type"], "function");
         assert!(openai["tools"][0]["function"].get("parameters").is_some());
+    }
+
+    #[test]
+    fn compact_tool_result_keeps_small_values_and_limits_large_payloads() {
+        let small = serde_json::json!({ "answer": 42, "unit": "km" });
+        assert_eq!(compact_tool_result(&small, "calculator"), small);
+
+        let large = serde_json::json!({ "html": "x".repeat(40_000), "base64": "A".repeat(40_000), "items": (0..30).collect::<Vec<_>>() });
+        let compacted = compact_tool_result(&large, "external_mcp_tool");
+        assert!(compacted.to_string().len() <= TOOL_RESULT_CHAR_BUDGET + 128);
+        assert_eq!(compacted.get("base64"), None);
+    }
+
+    #[test]
+    fn web_display_never_exposes_page_body() {
+        let result = serde_json::json!({ "title": "Example", "url": "https://example.test", "content": "private body" });
+        let display = tool_display_result(&result, "web_search");
+        assert_eq!(display["display_type"], "web_search");
+        assert_eq!(display["title"], "Example");
+        assert!(display.get("content").is_none());
+    }
+
+    #[test]
+    fn web_search_display_uses_first_result_title_and_count() {
+        let result = serde_json::json!({ "query": "OpenAI", "results": [
+            { "title": "OpenAI", "url": "https://openai.com", "snippet": "ignored in UI" },
+            { "title": "News", "url": "https://openai.com/news" }
+        ] });
+        let display = tool_display_result(&result, "builtin__web_search");
+        assert_eq!(display["title"], "OpenAI");
+        assert_eq!(display["url"], "https://openai.com");
+        assert_eq!(display["result_count"], 2);
+        let context = compact_tool_result(&result, "builtin__web_search");
+        assert_eq!(context["results"][0]["title"], "OpenAI");
+        assert_eq!(context["results"][0]["url"], "https://openai.com");
     }
 }
