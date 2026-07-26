@@ -1295,6 +1295,7 @@ async fn process_agent_wake(
                     error: None,
                     images: vec![],
                     videos: vec![],
+                    token_usage: None,
                 };
                 native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&rescue_hint)));
 
@@ -1478,6 +1479,7 @@ async fn process_agent_wake(
                         error: None,
                         images: vec![],
                         videos: vec![],
+                        token_usage: None,
                     };
                     native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&warn)));
                 }
@@ -1506,6 +1508,7 @@ async fn process_agent_wake(
             error: None,
             images: vec![],
             videos: vec![],
+            token_usage: None,
         };
         native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&nudge)));
 
@@ -1647,6 +1650,7 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
                 // （build_native_messages 只对 user 角色构造多模态块）
                 images: m.images,
                 videos: vec![],
+                token_usage: None,
             }
         })
         .collect()

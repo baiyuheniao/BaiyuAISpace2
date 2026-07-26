@@ -46,6 +46,13 @@ export interface Message {
   images?: ImageAttachment[];     // 图片附件（已转 base64）
   videos?: VideoAttachment[];     // 视频附件（已转 base64，仅 Gemini）
   toolCalls?: ToolCallInfo[];     // 本轮回复中触发的工具调用（按发生顺序）
+  tokenUsage?: TokenUsage;        // 服务端返回的本次交互真实 Token 用量
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 /** 单次工具调用的状态信息，用于在消息里展示"正在调用/已完成/失败" */
@@ -84,6 +91,12 @@ interface StreamChunk {
   done: boolean;                  // 是否完成
 }
 
+interface TokenUsageEvent {
+  sessionId: string;
+  messageId: string;
+  usage: TokenUsage;
+}
+
 /**
  * 工具调用状态事件类型
  * 从后端接收的 tool-call-status 事件数据结构
@@ -108,6 +121,7 @@ interface DbMessage {
   content: string;
   timestamp: number;
   error?: string;
+  token_usage?: TokenUsage;
 }
 
 /**
@@ -161,6 +175,7 @@ export const useChatStore = defineStore("chat", () => {
 
   /** 工具调用状态事件监听器取消函数 */
   let unlistenToolCallFn: UnlistenFn | null = null;
+  let unlistenTokenUsageFn: UnlistenFn | null = null;
 
   /** RAG (检索增强生成) 是否启用 */
   const ragEnabled = ref(false);
@@ -213,6 +228,7 @@ export const useChatStore = defineStore("chat", () => {
           content: m.content,
           timestamp: m.timestamp,
           error: m.error,
+          tokenUsage: m.token_usage,
         })),
       }));
       console.log("[Chat] sessions.value updated, first session messages:", sessions.value[0]?.messages?.length);
@@ -354,6 +370,18 @@ export const useChatStore = defineStore("chat", () => {
     });
   };
 
+  /** 将后端最终 SSE chunk 中的 usage 绑定到本轮 assistant 消息。 */
+  const setupTokenUsageListener = async () => {
+    if (unlistenTokenUsageFn) unlistenTokenUsageFn();
+    unlistenTokenUsageFn = await listen<TokenUsageEvent>("token-usage", (event) => {
+      const usageEvent = event.payload;
+      if (!currentSession.value || String(usageEvent.sessionId) !== String(currentSession.value.id)) return;
+      const message = currentSession.value.messages.find(m => m.id === usageEvent.messageId)
+        ?? [...currentSession.value.messages].reverse().find(m => m.role === "assistant");
+      if (message) message.tokenUsage = usageEvent.usage;
+    });
+  };
+
   /**
    * 保存当前会话到数据库
    * 包含会话基本信息，不包含消息内容
@@ -397,6 +425,7 @@ export const useChatStore = defineStore("chat", () => {
         content: message.content,
         timestamp: message.timestamp,
         error: message.error,
+        token_usage: message.tokenUsage,
       };
       await invoke("save_message_cmd", {
         sessionId: currentSession.value.id,
@@ -451,6 +480,7 @@ export const useChatStore = defineStore("chat", () => {
     // 否则每次点"新建对话"都会在历史记录里留下一条"新对话/0条消息"的僵尸记录
     await setupStreamListener();
     await setupToolCallListener();
+    await setupTokenUsageListener();
 
     return session;
   };
@@ -505,6 +535,7 @@ export const useChatStore = defineStore("chat", () => {
     console.log("[Chat] currentSession set, messages:", currentSession.value?.messages?.length);
     await setupStreamListener();
     await setupToolCallListener();
+    await setupTokenUsageListener();
   };
 
   /**
