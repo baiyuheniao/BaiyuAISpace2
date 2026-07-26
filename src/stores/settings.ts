@@ -262,6 +262,9 @@ export const useSettingsStore = defineStore(
     const retryCount = ref(3);
     const retryIntervalSecs = ref(2);
 
+    // 普通 Chat 的工具调用轮数。Agent Team 使用自己的运行配置，不能共用这里的值。
+    const maxToolRounds = ref(20);
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -630,6 +633,7 @@ export const useSettingsStore = defineStore(
       systemPrompt,
       retryCount,
       retryIntervalSecs,
+      maxToolRounds,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -665,7 +669,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "errorSoundLevel", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "errorSoundLevel", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

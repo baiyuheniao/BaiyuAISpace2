@@ -44,7 +44,7 @@ import { renderMarkdown, renderMermaidDiagrams } from "@/utils/markdown";
 import type { Message } from "@/stores/chat";
 
 // 导入图标
-import { Person, Sparkles, Copy, Create, Refresh, Checkmark, Close } from "@vicons/ionicons5";
+import { Person, Sparkles, Copy, Create, Refresh, Checkmark, Close, GlobeOutline } from "@vicons/ionicons5";
 
 // ============ Props 定义 ============
 
@@ -53,6 +53,25 @@ const props = defineProps<{
 }>();
 
 const chat = useChatStore();
+
+interface ToolDisplayResult {
+  display_type?: "web_search" | "web_fetch" | "preview";
+  title?: string;
+  url?: string;
+  result_count?: number | null;
+  preview?: string;
+  truncated?: boolean;
+}
+
+const parseToolDisplay = (result?: string): ToolDisplayResult | null => {
+  if (!result) return null;
+  try { return JSON.parse(result) as ToolDisplayResult; } catch { return { display_type: "preview", preview: result }; }
+};
+
+const isWebDisplay = (result?: string) => {
+  const display = parseToolDisplay(result);
+  return display?.display_type === "web_search" || display?.display_type === "web_fetch";
+};
 
 // ref 指向渲染 markdown 的 DOM 节点，用于查找 Mermaid 占位元素
 const contentRef = ref<HTMLElement | null>(null);
@@ -358,11 +377,25 @@ const handleRegenerate = async () => {
                 tc.status === "calling" ? "调用中" : tc.status === "error" ? "调用失败" : "已完成"
               }}</span>
             </summary>
-            <pre class="tool-call-args">{{ tc.arguments }}</pre>
-            <pre
-              v-if="tc.result"
-              class="tool-call-result"
-            >{{ tc.result }}</pre>
+            <template v-if="isWebDisplay(tc.result)">
+              <div class="web-tool-card">
+                <n-icon :size="18" class="web-tool-icon"><GlobeOutline /></n-icon>
+                <div class="web-tool-content">
+                  <strong>{{ parseToolDisplay(tc.result)?.title || "网页结果" }}</strong>
+                  <a v-if="parseToolDisplay(tc.result)?.url" :href="parseToolDisplay(tc.result)?.url" target="_blank" rel="noopener noreferrer">
+                    {{ parseToolDisplay(tc.result)?.url }}
+                  </a>
+                  <span v-if="parseToolDisplay(tc.result)?.display_type === 'web_search'">
+                    搜索结果 {{ parseToolDisplay(tc.result)?.result_count ?? 0 }} 条；部分结果已省略
+                  </span>
+                  <span v-else>网页抓取{{ tc.status === "error" ? "失败" : "完成" }}</span>
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              <pre class="tool-call-args">{{ tc.arguments }}</pre>
+              <pre v-if="tc.result" class="tool-call-result">{{ parseToolDisplay(tc.result)?.preview || tc.result }}</pre>
+            </template>
           </details>
         </div>
       </div>
@@ -959,7 +992,23 @@ const handleRegenerate = async () => {
   color: $ink-soft;
   white-space: pre-wrap;
   word-break: break-all;
+  max-height: 180px;
+  overflow: auto;
 }
+
+.web-tool-card {
+  display: flex;
+  gap: 10px;
+  margin: 0 12px 10px;
+  padding: 10px;
+  border: $border-faint;
+  background: $bg;
+}
+
+.web-tool-icon { flex: 0 0 auto; color: $ink; }
+.web-tool-content { min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: $ink-soft; }
+.web-tool-content strong { color: $ink; font-weight: 600; }
+.web-tool-content a { color: $ink-soft; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .message-error {
   margin-top: 8px;

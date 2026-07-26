@@ -931,6 +931,16 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
         .map_err(|e| MCPError::CommunicationError(format!("读取网页内容失败: {}", e)))?;
 
     let document = scraper::Html::parse_document(&html);
+    // 给调用方一个稳定的网页标题：优先 <title>，部分简单页面没有它时回退到首个 h1。
+    let title_selector = scraper::Selector::parse("title").unwrap();
+    let heading_selector = scraper::Selector::parse("h1").unwrap();
+    let title = document
+        .select(&title_selector)
+        .next()
+        .or_else(|| document.select(&heading_selector).next())
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "网页结果".to_string());
     // 只从块级内容标签里取文本，而不是整个文档 -- 真正的正文内容几乎总是在
     // 这些标签里，而导航栏/脚本/样式/页脚这些界面元素不会用它们，这样就不用
     // 再显式地把它们过滤掉。
@@ -960,7 +970,7 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
         text = text.chars().take(BUILTIN_FETCH_TEXT_LIMIT).collect();
     }
 
-    Ok(serde_json::json!({ "url": url, "content": text, "truncated": truncated }))
+    Ok(serde_json::json!({ "title": title, "url": url, "content": text, "truncated": truncated }))
 }
 
 /// 通过 Stdio 调用 MCP 工具（JSON-RPC 通过 stdin/stdout 传输）

@@ -143,6 +143,9 @@ export const useChatStore = defineStore("chat", () => {
    * 上下文，没法直接弹窗，改成让 Layout.vue watch 这个队列后弹出，弹完自行清空。
    * 静默丢弃这类失败会让用户误以为记录已保存，其实压根没写进数据库。 */
   const dbSaveErrorNotices = ref<string[]>([]);
+  /** 普通 Chat 的终止性错误统一由全局 Layout 弹出，避免依赖当前页面。 */
+  const errorNotices = ref<string[]>([]);
+  const warningNotices = ref<string[]>([]);
   
   /** 是否正在加载/生成回复 */
   const isLoading = ref(false);
@@ -343,6 +346,10 @@ export const useChatStore = defineStore("chat", () => {
           status: evt.status,
           result: evt.result,
         });
+      }
+      if (evt.status === "error") {
+        const notice = `工具「${evt.tool_name}」执行失败；模型会尝试基于已有结果继续。`;
+        if (!warningNotices.value.includes(notice)) warningNotices.value.push(notice);
       }
     });
   };
@@ -623,6 +630,7 @@ export const useChatStore = defineStore("chat", () => {
         maxTokens: config.maxTokens ?? null,
         retryCount: settings.retryCount,
         retryIntervalSecs: settings.retryIntervalSecs,
+        maxToolRounds: settings.maxToolRounds,
       };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
@@ -693,6 +701,8 @@ export const useChatStore = defineStore("chat", () => {
       }
 
       console.error(`[${errorInfo.type}] ${error}`);
+      const notice = errorInfo.message;
+      if (!errorNotices.value.includes(notice)) errorNotices.value.push(notice);
       isLoading.value = false;
       currentStreamContent.value = "";
     }
@@ -1009,6 +1019,8 @@ export const useChatStore = defineStore("chat", () => {
     currentStreamContent,
     ragEnabled,
     dbSaveErrorNotices,
+    errorNotices,
+    warningNotices,
     selectedKnowledgeBaseId,
     lastRetrievalResult,
     mcpEnabled,
