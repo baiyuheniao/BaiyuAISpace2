@@ -45,6 +45,7 @@ use scheduler::init_scheduler_tables;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
@@ -58,6 +59,126 @@ struct CloseToTrayState(Arc<AtomicBool>);
 // 从托盘唤起主窗口的全局快捷键，默认 Ctrl+Alt+Space，可在设置页修改。
 const DEFAULT_SHOW_HOTKEY: &str = "Ctrl+Alt+Space";
 struct ShowHotkeyState(StdMutex<String>);
+
+/// 启动窗口偏好与上一次可恢复的窗口状态。它放在应用数据目录而非前端
+/// localStorage，使窗口在 WebView 初始化前就能以正确状态显示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StartupWindowMode {
+    Window,
+    Fullscreen,
+}
+
+impl Default for StartupWindowMode {
+    fn default() -> Self {
+        Self::Window
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WindowPreferences {
+    #[serde(default)]
+    startup_mode: StartupWindowMode,
+    #[serde(default)]
+    saved_state: Option<SavedWindowState>,
+}
+
+struct WindowPreferencesState {
+    path: PathBuf,
+    value: StdMutex<WindowPreferences>,
+}
+
+fn load_window_preferences(path: PathBuf) -> WindowPreferencesState {
+    let value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default();
+    WindowPreferencesState {
+        path,
+        value: StdMutex::new(value),
+    }
+}
+
+fn persist_window_preferences(state: &WindowPreferencesState) {
+    let Ok(value) = state.value.lock() else {
+        log::warn!("窗口状态保存失败：内部状态锁不可用");
+        return;
+    };
+    let Ok(serialized) = serde_json::to_string_pretty(&*value) else {
+        log::warn!("窗口状态保存失败：序列化失败");
+        return;
+    };
+    if let Err(error) = std::fs::write(&state.path, serialized) {
+        log::warn!("窗口状态保存失败: {}", error);
+    }
+}
+
+fn persist_captured_window_state(
+    state: &WindowPreferencesState,
+    is_fullscreen: bool,
+    position: Option<tauri::PhysicalPosition<i32>>,
+    size: Option<tauri::PhysicalSize<u32>>,
+    maximized: bool,
+) {
+    let Ok(mut preferences) = state.value.lock() else {
+        return;
+    };
+
+    // 全屏时窗口的尺寸会变成显示器尺寸；保留之前的普通窗口尺寸，退出全屏后才能正确恢复。
+    if is_fullscreen {
+        if let Some(saved) = preferences.saved_state.as_mut() {
+            saved.fullscreen = true;
+        } else {
+            preferences.saved_state = Some(SavedWindowState {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+                maximized: false,
+                fullscreen: true,
+            });
+        }
+    } else if let (Some(position), Some(size)) = (position, size) {
+        preferences.saved_state = Some(SavedWindowState {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            maximized,
+            fullscreen: false,
+        });
+    }
+    drop(preferences);
+    persist_window_preferences(state);
+}
+
+fn restore_window_state(window: &tauri::WebviewWindow, state: &WindowPreferencesState) {
+    let Ok(preferences) = state.value.lock() else {
+        return;
+    };
+    if let Some(saved) = &preferences.saved_state {
+        let _ = window.set_size(tauri::PhysicalSize::new(saved.width, saved.height));
+        let _ = window.set_position(tauri::PhysicalPosition::new(saved.x, saved.y));
+        if saved.maximized {
+            let _ = window.maximize();
+        }
+        if saved.fullscreen {
+            let _ = window.set_fullscreen(true);
+        }
+    } else if matches!(preferences.startup_mode, StartupWindowMode::Fullscreen) {
+        let _ = window.set_fullscreen(true);
+    }
+}
 
 // 进程实际在写的日志文件路径——只在 init_logging() 里算一次。
 // 不能让 copy_log_file 用"现在的日期"重新拼文件名：
@@ -180,7 +301,23 @@ fn main() {
             if window.label() != "main" {
                 return;
             }
+            if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+                persist_captured_window_state(
+                    window.state::<WindowPreferencesState>().inner(),
+                    window.is_fullscreen().unwrap_or(false),
+                    window.outer_position().ok(),
+                    window.outer_size().ok(),
+                    window.is_maximized().unwrap_or(false),
+                );
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                persist_captured_window_state(
+                    window.state::<WindowPreferencesState>().inner(),
+                    window.is_fullscreen().unwrap_or(false),
+                    window.outer_position().ok(),
+                    window.outer_size().ok(),
+                    window.is_maximized().unwrap_or(false),
+                );
                 let close_to_tray = window
                     .state::<CloseToTrayState>()
                     .0
@@ -306,6 +443,8 @@ fn main() {
             // 系统托盘相关命令
             set_close_to_tray,
             set_show_hotkey,
+            set_startup_window_mode,
+            save_current_window_state,
         ])
         // 应用初始化设置
         .setup(move |app| {
@@ -346,6 +485,7 @@ fn main() {
                     return Err(Box::new(e) as Box<dyn std::error::Error>);
                 }
             };
+            app.manage(load_window_preferences(app_data_dir.join("window-preferences.json")));
             let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap_or("vector_store").to_string();
             
             let vector_store = runtime.block_on(async {
@@ -534,6 +674,7 @@ fn main() {
             // 确保主窗口显示并聚焦（解决窗口启动后被遮挡的问题）
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Showing and focusing main window...");
+                restore_window_state(&window, window.state::<WindowPreferencesState>().inner());
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
@@ -632,6 +773,45 @@ fn set_show_hotkey(
     let _ = app.global_shortcut().unregister(current.as_str());
     *current = accelerator;
     Ok(())
+}
+
+#[tauri::command]
+fn set_startup_window_mode(
+    mode: String,
+    state: tauri::State<WindowPreferencesState>,
+) -> Result<(), String> {
+    let startup_mode = match mode.as_str() {
+        "window" => StartupWindowMode::Window,
+        "fullscreen" => StartupWindowMode::Fullscreen,
+        _ => return Err("启动窗口模式仅支持 window 或 fullscreen".to_string()),
+    };
+    {
+        let mut preferences = state
+            .value
+            .lock()
+            .map_err(|_| "窗口状态设置暂时不可用".to_string())?;
+        preferences.startup_mode = startup_mode;
+        // 用户修改默认启动方式时，应让下一次启动立刻按新选择生效。
+        preferences.saved_state = None;
+    }
+    persist_window_preferences(state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+fn save_current_window_state(
+    app: tauri::AppHandle,
+    state: tauri::State<WindowPreferencesState>,
+) {
+    if let Some(window) = app.get_webview_window("main") {
+        persist_captured_window_state(
+            state.inner(),
+            window.is_fullscreen().unwrap_or(false),
+            window.outer_position().ok(),
+            window.outer_size().ok(),
+            window.is_maximized().unwrap_or(false),
+        );
+    }
 }
 
 #[tauri::command]

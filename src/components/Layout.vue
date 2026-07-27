@@ -23,6 +23,7 @@ import { computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 // 导入 Tauri 窗口 API (全屏切换)
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 导入通知 API（左下角统一弹窗；声音按用户设置和错误等级决定）
@@ -126,6 +127,7 @@ const handleFullscreenHotkey = async (e: KeyboardEvent) => {
   const win = getCurrentWindow();
   const isFullscreen = await win.isFullscreen();
   await win.setFullscreen(!isFullscreen);
+  await invoke("save_current_window_state");
 };
 
 // 通知 API (供更新提示弹窗使用)
@@ -287,10 +289,16 @@ onBeforeUnmount(() => {
 <template>
   <div class="layout">
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside
+      class="sidebar"
+      :class="{ 'sidebar--with-internal-borders': settings.sidebarInternalBordersEnabled }"
+    >
       <!-- Logo -->
       <div class="logo-section">
-        <div class="logo rotating-frame">
+        <div
+          class="logo"
+          :class="{ 'rotating-frame': settings.sidebarInternalBordersEnabled }"
+        >
           <img
             :src="logoImg"
             alt="BaiyuAI"
@@ -333,7 +341,7 @@ onBeforeUnmount(() => {
 
       <!-- Footer decoration -->
       <div class="sidebar-footer">
-        <div class="footer-orbit orbit-ring" />
+        <div v-if="settings.sidebarInternalBordersEnabled" class="footer-orbit orbit-ring" />
         <span class="footer-note">Baiyu AI Space — Monochrome</span>
       </div>
     </aside>
@@ -381,12 +389,8 @@ onBeforeUnmount(() => {
   width: 44px;
   height: 44px;
   flex-shrink: 0;
-  border: $border;
   padding: 4px;
 
-  &.rotating-frame::before {
-    inset: -8px;
-  }
 }
 
 .logo-img {
@@ -395,6 +399,14 @@ onBeforeUnmount(() => {
   object-fit: contain;
   // 强制黑白: logo 也纳入单色系统
   filter: grayscale(1) contrast(1.1);
+}
+
+.sidebar--with-internal-borders .logo {
+  border: $border;
+
+  &.rotating-frame::before {
+    inset: -8px;
+  }
 }
 
 .logo-meta {
@@ -423,7 +435,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   background: $ink;
   color: $bg;
-  border: $border;
+  border: 0;
   text-align: left;
   transition:
     background $duration $ease,
@@ -433,6 +445,10 @@ onBeforeUnmount(() => {
     background: $bg;
     color: $ink;
   }
+}
+
+.sidebar--with-internal-borders .new-chat-btn {
+  border: $border;
 }
 
 .new-chat-label {
@@ -455,6 +471,9 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+.sidebar--with-internal-borders .nav {
   border-top: $border-faint;
 }
 
@@ -465,7 +484,6 @@ onBeforeUnmount(() => {
   padding: 0.8rem 1.5rem;
   background: transparent;
   border: none;
-  border-bottom: $border-faint;
   cursor: pointer;
   text-align: left;
   color: $ink-soft;
@@ -491,6 +509,10 @@ onBeforeUnmount(() => {
       opacity: 0.55;
     }
   }
+}
+
+.sidebar--with-internal-borders .nav-item {
+  border-bottom: $border-faint;
 }
 
 .nav-index {
@@ -535,10 +557,13 @@ onBeforeUnmount(() => {
 // ---------- 底部装饰 ----------
 .sidebar-footer {
   padding: 1.25rem 1.5rem 0;
-  border-top: $border-faint;
   display: flex;
   align-items: center;
   gap: 1rem;
+}
+
+.sidebar--with-internal-borders .sidebar-footer {
+  border-top: $border-faint;
 }
 
 .footer-orbit {

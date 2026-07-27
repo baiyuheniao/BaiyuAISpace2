@@ -59,7 +59,8 @@ import {
   type ApiConfig,
   type EmbeddingApiConfig,
   type RerankerApiConfig,
-  type ErrorSoundLevel
+  type ErrorSoundLevel,
+  type StartupWindowMode
 } from "@/stores/settings";
 import {
   KeyOutline,
@@ -95,6 +96,21 @@ const errorSoundLevelOptions: Array<{
 const handleErrorSoundLevelChange = (value: string) => {
   if (value === "off" || value === "critical" || value === "all") {
     settings.errorSoundLevel = value;
+  }
+};
+
+const startupWindowModeOptions: Array<{ label: string; value: StartupWindowMode }> = [
+  { label: "普通窗口", value: "window" },
+  { label: "全屏", value: "fullscreen" },
+];
+
+const handleStartupWindowModeChange = async (value: string) => {
+  if (value !== "window" && value !== "fullscreen") return;
+  try {
+    await settings.setStartupWindowMode(value);
+    message.success(`已设置：下次启动时${value === "fullscreen" ? "全屏打开" : "以普通窗口打开"}`);
+  } catch (error) {
+    message.error(`启动窗口模式设置失败：${error}`);
   }
 };
 
@@ -1240,6 +1256,38 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               :value="settings.closeToTray"
               @update:value="handleCloseToTrayChange"
             />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">默认启动窗口模式</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                选择首次启动或重新选择模式后的打开方式。软件会自动记住上次的窗口位置、尺寸、最大化和全屏状态；之后启动时优先恢复该状态。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.startupWindowMode"
+              :options="startupWindowModeOptions"
+              placeholder="请选择默认启动窗口模式"
+              style="width: 180px;"
+              @update:value="handleStartupWindowModeChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">显示侧边栏内部框线</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                开启后显示 Logo、新建对话、导航和底部区域的装饰框线；关闭时使用更简洁的无框线侧边栏。
+              </n-text>
+            </div>
+            <n-switch v-model:value="settings.sidebarInternalBordersEnabled" />
           </div>
 
           <div class="general-setting-item">

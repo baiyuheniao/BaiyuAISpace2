@@ -445,7 +445,7 @@ const getDocDisplayName = (name: string): string => {
 
 <template>
   <div class="chat-input-wrapper">
-    <!-- API Config Indicator -->
+    <div class="context-strip">
     <div
       v-if="currentApiConfig"
       class="api-indicator"
@@ -560,6 +560,16 @@ const getDocDisplayName = (name: string): string => {
       </n-tag>
     </div>
 
+      <div v-if="chat.thinkingEnabled" class="context-card">
+        <n-icon :size="15"><BulbOutline /></n-icon>
+        <span class="context-card-label">思考</span>
+        <strong>已开启</strong>
+        <button class="context-card-close" type="button" aria-label="关闭思考模式" @click="chat.thinkingEnabled = false">
+          <n-icon :size="14"><Close /></n-icon>
+        </button>
+      </div>
+    </div>
+
     <div class="input-container">
       <div class="input-box">
         <textarea
@@ -581,6 +591,7 @@ const getDocDisplayName = (name: string): string => {
       </div>
 
       <div class="input-actions">
+        <div class="toolbar-group attachment-group">
         <!-- File Upload -->
         <input
           ref="fileInputRef"
@@ -590,7 +601,7 @@ const getDocDisplayName = (name: string): string => {
           style="display: none"
           @change="handleFilesSelected"
         >
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               tertiary
@@ -624,14 +635,14 @@ const getDocDisplayName = (name: string): string => {
         </n-tooltip>
 
         <!-- Document Attach -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               tertiary
               circle
               size="large"
-              :type="attachedDocuments.length > 0 ? 'info' : 'default'"
               class="doc-btn"
+              :class="{ 'is-active': attachedDocuments.length > 0 }"
               @click="handleDocumentAttach"
             >
               <template #icon>
@@ -666,15 +677,18 @@ const getDocDisplayName = (name: string): string => {
           }}
         </n-tooltip>
 
+        </div>
+
+        <div class="toolbar-group capability-group">
         <!-- MCP Toggle -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               quaternary
               circle
               size="large"
-              :type="chat.mcpEnabled && availableMcpToolsCount > 0 ? 'warning' : 'default'"
               class="mcp-btn"
+              :class="{ 'is-active': chat.mcpEnabled && availableMcpToolsCount > 0 }"
               :disabled="availableMcpToolsCount === 0"
               @click="handleMcpToggle"
             >
@@ -701,22 +715,22 @@ const getDocDisplayName = (name: string): string => {
         </n-tooltip>
 
         <!-- RAG Selector -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               quaternary
               circle
               size="large"
-              :type="chat.ragEnabled ? 'success' : 'default'"
               :disabled="availableKbCount === 0"
               class="rag-btn"
+              :class="{ 'is-active': chat.ragEnabled }"
               @click="handleToggleRagSelector"
             >
               <template #icon>
                 <n-badge
                   v-if="chat.ragEnabled"
                   dot
-                  type="success"
+                  color="#000000"
                 >
                   <n-icon><Library /></n-icon>
                 </n-badge>
@@ -732,15 +746,15 @@ const getDocDisplayName = (name: string): string => {
         </n-tooltip>
 
         <!-- Skill Selector -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               quaternary
               circle
               size="large"
-              :type="activeSkillNames.length > 0 || chat.skillAutonomyEnabled ? 'info' : 'default'"
               :disabled="skillsStore.enabledSkills.length === 0"
               class="skill-btn"
+              :class="{ 'is-active': activeSkillNames.length > 0 || chat.skillAutonomyEnabled }"
               @click="showSkillSelector = !showSkillSelector"
             >
               <template #icon>
@@ -761,14 +775,14 @@ const getDocDisplayName = (name: string): string => {
         </n-tooltip>
 
         <!-- Thinking Mode Toggle -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               quaternary
               circle
               size="large"
-              :type="chat.thinkingEnabled ? 'warning' : 'default'"
               class="thinking-btn"
+              :class="{ 'is-active': chat.thinkingEnabled }"
               @click="chat.thinkingEnabled = !chat.thinkingEnabled"
             >
               <template #icon>
@@ -779,8 +793,10 @@ const getDocDisplayName = (name: string): string => {
           {{ chat.thinkingEnabled ? "关闭思考模式" : "开启思考模式" }}
         </n-tooltip>
 
+        </div>
+
         <!-- Send/Stop Button -->
-        <n-tooltip placement="top">
+        <n-tooltip class="input-tooltip" placement="top" :show-arrow="false" :delay="150">
           <template #trigger>
             <n-button
               type="primary"
@@ -1080,17 +1096,86 @@ const getDocDisplayName = (name: string): string => {
   position: relative;
 }
 
-.api-indicator {
+.context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.context-strip > div {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-  padding: 0 4px;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 8px;
+  background: $surface;
+  border: $border;
+  color: $ink;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.context-strip > div::before {
+  font-size: $label-size;
+  font-weight: 700;
+  letter-spacing: $label-tracking;
+  color: $ink-soft;
+}
+
+.api-indicator::before {
+  content: "模型";
+}
+
+.rag-indicator::before {
+  content: "知识库";
+}
+
+.mcp-indicator::before {
+  content: "MCP";
+}
+
+.skill-indicator::before {
+  content: "SKILL";
+}
+
+.context-card-label {
+  font-size: $label-size;
+  font-weight: 700;
+  letter-spacing: $label-tracking;
+  color: $ink-soft;
+}
+
+.context-card-close {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-left: 2px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: $ink;
+  cursor: pointer;
+  transition: background $duration-fast $ease, color $duration-fast $ease;
+
+  &:hover {
+    background: $ink;
+    color: $bg;
+  }
+}
+
+.context-strip :deep(.n-tag) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: $ink;
+  font-size: 12px;
 }
 
 .api-tag {
   cursor: pointer;
-  transition: all 0.2s;
+  transition: opacity $duration-fast $ease;
 
   &:hover {
     opacity: 0.8;
@@ -1099,7 +1184,7 @@ const getDocDisplayName = (name: string): string => {
 
 .chevron-icon {
   margin-left: 4px;
-  transition: transform 0.2s;
+  transition: transform $duration-fast $ease;
 }
 
 .model-text {
@@ -1107,11 +1192,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .rag-indicator {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-  padding: 0 4px;
+  gap: 8px;
 }
 
 .rag-result-info {
@@ -1119,14 +1200,11 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .mcp-indicator {
-  display: flex;
   gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
 }
 
 .mcp-btn {
-  transition: all 0.2s;
+  transition: background $duration-fast $ease;
 }
 
 .mcp-btn:hover:not(:disabled) {
@@ -1134,14 +1212,11 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .skill-indicator {
-  display: flex;
   gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
 }
 
 .skill-btn {
-  transition: all 0.2s;
+  transition: background $duration-fast $ease;
 }
 
 .skill-btn:hover:not(:disabled) {
@@ -1150,8 +1225,8 @@ const getDocDisplayName = (name: string): string => {
 
 .input-container {
   display: flex;
-  gap: 12px;
-  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
   background: $bg;
   padding: 12px 16px;
   border: $border;
@@ -1166,7 +1241,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .input-box {
-  flex: 1;
+  width: 100%;
   min-height: 44px;
   max-height: 200px;
 }
@@ -1197,13 +1272,51 @@ const getDocDisplayName = (name: string): string => {
 
 .input-actions {
   display: flex;
+  width: 100%;
+  justify-content: space-between;
   align-items: center;
-  gap: 8px;
-  padding-bottom: 2px;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: $border-faint;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.capability-group {
+  flex: 1;
+  justify-content: center;
+  padding: 0 12px;
+  border-left: $border-faint;
+  border-right: $border-faint;
+}
+
+.input-actions :deep(.n-button) {
+  border: 1px solid transparent;
+  color: $ink;
+  transition:
+    background $duration-fast $ease,
+    color $duration-fast $ease,
+    border-color $duration-fast $ease;
+}
+
+.input-actions :deep(.n-button.is-active) {
+  background: $ink;
+  border-color: $ink;
+  color: $bg;
+}
+
+.input-actions :deep(.n-button:not(.n-button--disabled):hover) {
+  background: $ink;
+  border-color: $ink;
+  color: $bg;
 }
 
 .rag-btn {
-  transition: all 0.2s;
+  transition: background $duration-fast $ease;
 }
 
 .rag-btn:hover {
@@ -1298,12 +1411,14 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .attached-files {
-  margin-top: 12px;
-  padding: 8px 4px;
+  margin-top: 10px;
+  padding: 0;
 }
 
 .files-label {
-  font-size: 12px;
+  font-size: $label-size;
+  font-weight: 700;
+  letter-spacing: $label-tracking;
   color: $ink-faint;
   margin-bottom: 6px;
 }
@@ -1323,11 +1438,56 @@ const getDocDisplayName = (name: string): string => {
   max-width: 200px;
 }
 
+.attached-files :deep(.file-tag) {
+  min-height: 30px;
+  padding: 5px 8px;
+  border: $border;
+  border-radius: 0;
+  background: $surface;
+  color: $ink;
+  font-size: 12px;
+}
+
+.attached-files :deep(.file-tag .n-tag__close) {
+  color: $ink;
+}
+
 .file-btn {
-  transition: all 0.2s;
+  transition: background $duration-fast $ease;
 }
 
 .file-btn:hover {
   background: rgba(0, 0, 0, 0.05);
+}
+
+:global(.input-tooltip.n-popover) {
+  padding: 7px 9px;
+  border: $border;
+  border-radius: 0;
+  background: $ink;
+  box-shadow: none;
+  color: $bg;
+  font-family: $font-sans;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+:global(.input-tooltip .n-popover__content) {
+  color: inherit;
+}
+
+@media (max-width: 640px) {
+  .chat-input-wrapper {
+    padding: 12px 16px 20px;
+  }
+
+  .capability-group {
+    flex: 0;
+    padding: 0 4px;
+  }
+
+  .input-actions {
+    gap: 6px;
+  }
 }
 </style>

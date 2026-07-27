@@ -140,6 +140,7 @@ export interface RerankerApiConfig {
 
 /** 报错弹窗始终显示；此设置只决定哪些报错需要声音提醒。 */
 export type ErrorSoundLevel = "off" | "critical" | "all";
+export type StartupWindowMode = "window" | "fullscreen";
 
 // 存储版本号 - 当数据结构变更时需要递增
 const STORAGE_VERSION = "6";
@@ -202,6 +203,9 @@ export const useSettingsStore = defineStore(
     // 默认只让后台 Agent 中断、本地保存失败等严重错误发出声音。
     const errorSoundLevel = ref<ErrorSoundLevel>("critical");
 
+    // 侧边栏内部的 Logo、导航和底部装饰是否显示框线
+    const sidebarInternalBordersEnabled = ref(false);
+
     // 设置关闭按钮行为，并同步给 Rust 后端（窗口关闭事件在后端拦截，需要后端知道当前设置）
     const setCloseToTray = async (enabled: boolean) => {
       closeToTray.value = enabled;
@@ -251,6 +255,14 @@ export const useSettingsStore = defineStore(
 
     const setFullscreenHotkey = (accelerator: string) => {
       fullscreenHotkey.value = accelerator;
+    };
+
+    // 首次启动（或用户重新选择启动方式）时使用的窗口模式；原生端会保存上一次实际窗口状态。
+    const startupWindowMode = ref<StartupWindowMode>("window");
+
+    const setStartupWindowMode = async (mode: StartupWindowMode) => {
+      await invoke("set_startup_window_mode", { mode });
+      startupWindowMode.value = mode;
     };
 
     // 全局默认 System Prompt，发送每次对话请求时会自动附加到系统消息中
@@ -621,6 +633,7 @@ export const useSettingsStore = defineStore(
       syncErrorNotices,
       closeToTray,
       errorSoundLevel,
+      sidebarInternalBordersEnabled,
       setCloseToTray,
       syncCloseToTray,
       showHotkey,
@@ -630,6 +643,8 @@ export const useSettingsStore = defineStore(
       setNewSessionHotkey,
       fullscreenHotkey,
       setFullscreenHotkey,
+      startupWindowMode,
+      setStartupWindowMode,
       systemPrompt,
       retryCount,
       retryIntervalSecs,
@@ -669,7 +684,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "errorSoundLevel", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext
