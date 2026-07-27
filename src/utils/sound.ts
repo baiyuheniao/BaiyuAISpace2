@@ -44,3 +44,34 @@ export const playErrorSound = (): void => {
   playTone(880, 0, 0.12);
   playTone(587, 0.13, 0.18);
 };
+
+/**
+ * Agent Team 出现必须由用户处理的事项时的提示音。
+ * 和错误音区分开：使用上行双音，表达“需要关注”而不是“发生故障”。
+ */
+export const playAttentionSound = (): void => {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  if (ctx.state === "suspended") {
+    void ctx.resume().catch(() => {
+      // 还没有用户交互授权时保持静音，不影响页面中的待处理卡片和通知。
+    });
+  }
+
+  const now = ctx.currentTime;
+  const playTone = (freq: number, start: number, duration: number) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq, now + start);
+    gain.gain.setValueAtTime(0, now + start);
+    gain.gain.linearRampToValueAtTime(0.14, now + start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + start + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now + start);
+    osc.stop(now + start + duration);
+  };
+  playTone(659, 0, 0.12);
+  playTone(880, 0.13, 0.18);
+};

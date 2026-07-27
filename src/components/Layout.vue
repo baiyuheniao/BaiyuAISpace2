@@ -27,6 +27,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 导入通知 API（左下角统一弹窗；声音按用户设置和错误等级决定）
 import { useNotification } from "@/composables/useNotify";
+import { playAttentionSound } from "@/utils/sound";
 
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
@@ -160,13 +161,18 @@ watch(
 // 待处理事项新增、且用户没停在协作团队页面时，左下角弹一条提醒（在页面上
 // 时卡片本身就是提醒，不重复弹）。
 watch(workspacePendingCount, (count, prev) => {
-  if (count > prev && route.name !== "AgentTeam") {
-    notification.info({
-      title: "协作团队有新的待处理事项",
-      content: `当前共有 ${count} 件事项等待你处理（Agent 提议 / 休眠申请 / 提问 / 工具审批）。`,
-      duration: 8000,
-    });
-  }
+  if (count <= prev) return;
+
+  // 待处理卡片在 Agent Team 页面内已经可见，离开该页时再补左下角通知；
+  // 但两种场景都要响一次，避免后台 Agent 卡在等待用户操作时毫无感知。
+  if (settings.errorSoundLevel !== "off") playAttentionSound();
+  if (route.name === "AgentTeam") return;
+
+  notification.info({
+    title: "协作团队有新的待处理事项",
+    content: `当前共有 ${count} 件事项等待你处理（Agent 提议 / 休眠申请 / 提问 / 工具审批）。`,
+    duration: 8000,
+  });
 });
 
 // 后台 Agent 在用户浏览任意模块时都可能出错或失去运行循环。监听放在全局布局
