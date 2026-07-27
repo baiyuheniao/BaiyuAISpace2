@@ -3,7 +3,7 @@
 ## 官方文档地址
 
 - **开发者平台**: https://www.01.ai/
-- **API 文档**: https://help.aliyun.com/zh/model-studio/developer-reference/yi-large-llm/
+- **API 文档**: https://platform.01.ai/docs
 
 ## API 端点
 

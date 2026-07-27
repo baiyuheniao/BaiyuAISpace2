@@ -3,7 +3,7 @@
 ## 官方文档地址
 
 - **主文档**: https://docs.mistral.ai/
-- **API 参考**: https://docs.mistral.ai/api/
+- **API 参考**: https://docs.mistral.ai/api
 - **模型列表**: https://docs.mistral.ai/models/
 
 ## API 端点

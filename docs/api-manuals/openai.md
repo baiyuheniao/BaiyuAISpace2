@@ -2,9 +2,9 @@
 
 ## 官方文档地址
 
-- **主文档**: https://platform.openai.com/docs
-- **API 参考**: https://platform.openai.com/docs/api-reference
-- **模型列表**: https://platform.openai.com/docs/models
+- **主文档**: https://developers.openai.com/api/docs
+- **API 参考**: https://developers.openai.com/api/reference/overview
+- **模型列表**: https://developers.openai.com/api/docs/models
 
 ## API 端点
 

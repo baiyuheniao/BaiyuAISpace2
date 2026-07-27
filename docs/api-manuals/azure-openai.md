@@ -2,9 +2,9 @@
 
 ## 官方文档地址
 
-- **主文档**: https://learn.microsoft.com/en-us/azure/ai-services/openai/
-- **Chat API**: https://learn.microsoft.com/en-us/azure/ai-services/openai/reference#chat-completions
-- **模型列表**: https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models
+- **主文档**: https://learn.microsoft.com/en-us/azure/foundry/openai/
+- **Chat API**: https://learn.microsoft.com/en-us/azure/foundry/openai/reference#chat-completions
+- **模型列表**: https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/models
 
 ## API 端点
 

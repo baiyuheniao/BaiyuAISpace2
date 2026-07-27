@@ -2,9 +2,9 @@
 
 ## 官方文档地址
 
-- **主文档**: https://docs.anthropic.com/en/docs
-- **Messages API**: https://docs.anthropic.com/en/api/messages
-- **模型列表**: https://docs.anthropic.com/en/docs/models
+- **主文档**: https://platform.claude.com/docs/en/home
+- **Messages API**: https://platform.claude.com/docs/en/api/messages
+- **模型列表**: https://platform.claude.com/docs/en/about-claude/models
 
 ## API 端点
 

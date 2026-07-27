@@ -20,6 +20,9 @@
 | [硅基流动](./siliconflow.md) | |
 | [MiniMax](./minimax.md) | |
 | [零一万物 (Yi)](./yi.md) | |
+| [OpenClaw 本地网关](./openclaw.md) | |
+
+本次 Context7 检索来源登记见 [context7-sources.md](./context7-sources.md)。
 
 ## 使用说明
 

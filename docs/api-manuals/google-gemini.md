@@ -3,8 +3,8 @@
 ## 官方文档地址
 
 - **主文档**: https://ai.google.dev/gemini-api/docs
-- **快速开始**: https://ai.google.dev/docs
-- **API 参考**: https://ai.google.dev/docs/api_rest
+- **快速开始**: https://ai.google.dev/gemini-api/docs/quickstart
+- **API 参考**: https://ai.google.dev/api
 - **模型列表**: https://ai.google.dev/models/gemini
 
 ## API 端点

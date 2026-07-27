@@ -2,8 +2,8 @@
 
 ## 官方文档地址
 
-- **主文档**: https://www-doubao.com/apidoc/
-- **开发者平台**: https://developer.open-douyin.com/docs/resource/zh-CN/ai-avatar
+- **主文档**: https://www.volcengine.com/docs/82379
+- **API 参考**: https://docs.volcengine.com/docs/82379/1399008
 
 ## API 端点 (火山引擎)
 

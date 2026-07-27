@@ -5,7 +5,7 @@
 - **主文档**: https://cloud.baidu.com/doc/WENXINWORKSHOP/
 - **快速开始**: https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Um2wxbaps
 - **API 列表**: https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Clntwmv7t
-- **OpenAI 兼容**: https://help.aliyun.com/zh/model-studio/developer-reference/yi-large-llm/
+- **OpenAI 兼容**: https://cloud.baidu.com/doc/WENXINWORKSHOP/s/hlrk4ak5t
 
 ## API 端点 (v2 OpenAI 兼容模式)
 
