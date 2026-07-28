@@ -69,6 +69,8 @@ export interface ToolCallInfo {
  * 表示一个完整的聊天会话
  */
 export interface ChatSession {
+  workingDirectory: string | null;
+  fileAccessMode: "none" | "read" | "write";
   id: string;                    // 会话唯一标识符
   title: string;                 // 会话标题
   messages: Message[];            // 消息列表
@@ -133,6 +135,8 @@ interface DbSession {
   title: string;
   provider: string;
   model: string;
+  working_directory?: string | null;
+  file_access_mode?: "none" | "read" | "write";
   api_config_id: string;           // API 配置 ID (数据库字段)
   created_at: number;
   updated_at: number;
@@ -218,6 +222,8 @@ export const useChatStore = defineStore("chat", () => {
         title: s.title,
         provider: s.provider,
         model: s.model,
+        workingDirectory: s.working_directory || null,
+        fileAccessMode: s.file_access_mode || "none",
         // 如果 api_config_id 为空，使用会话 ID 作为后备 (兼容旧数据)
         apiConfigId: s.api_config_id || s.id,
         createdAt: s.created_at,
@@ -398,6 +404,8 @@ export const useChatStore = defineStore("chat", () => {
         provider: currentSession.value.provider,
         model: currentSession.value.model,
         api_config_id: currentSession.value.apiConfigId,  // 保存 API 配置关联
+        working_directory: currentSession.value.workingDirectory,
+        file_access_mode: currentSession.value.fileAccessMode,
         created_at: currentSession.value.createdAt,
         updated_at: Date.now(),
         messages: [],
@@ -443,6 +451,15 @@ export const useChatStore = defineStore("chat", () => {
    * @param apiConfigId - API 配置 ID
    * @returns 新创建的会话对象，失败返回 null
    */
+  const setWorkingDirectory = async (directory: string | null, mode: "none" | "read" | "write" = "none") => {
+    if (!currentSession.value) return;
+    currentSession.value.workingDirectory = directory;
+    currentSession.value.fileAccessMode = directory ? mode : "none";
+    await saveSessionToDb();
+    const index = sessions.value.findIndex((session) => session.id === currentSession.value?.id);
+    if (index >= 0) sessions.value[index] = { ...currentSession.value };
+  };
+
   const createSession = async (apiConfigId: string): Promise<ChatSession | null> => {
     // 查找对应的 API 配置
     const config = settings.apiConfigs.find(c => c.id === apiConfigId);
@@ -468,6 +485,8 @@ export const useChatStore = defineStore("chat", () => {
       apiConfigId,
       provider: config.provider,
       model: config.model,
+      workingDirectory: null,
+      fileAccessMode: "none",
     };
     
     // 设置为当前会话
@@ -515,6 +534,8 @@ export const useChatStore = defineStore("chat", () => {
           apiConfigId: freshSession.api_config_id || freshSession.id,
           createdAt: freshSession.created_at,
           updatedAt: freshSession.updated_at,
+          workingDirectory: freshSession.working_directory || null,
+          fileAccessMode: freshSession.file_access_mode || "none",
           messages: freshSession.messages.map(m => ({
             id: m.id,
             role: m.role as "user" | "assistant" | "system",
@@ -662,6 +683,8 @@ export const useChatStore = defineStore("chat", () => {
         retryCount: settings.retryCount,
         retryIntervalSecs: settings.retryIntervalSecs,
         maxToolRounds: settings.maxToolRounds,
+        workingDirectory: currentSession.value.workingDirectory,
+        fileAccessMode: currentSession.value.fileAccessMode,
       };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
@@ -712,6 +735,8 @@ export const useChatStore = defineStore("chat", () => {
             title: newTitle,
             provider: currentSession.value.provider,
             model: currentSession.value.model,
+            workingDirectory: currentSession.value.workingDirectory,
+            fileAccessMode: currentSession.value.fileAccessMode,
             apiConfigId: currentSession.value.apiConfigId,
             createdAt: currentSession.value.createdAt,
             updatedAt: Date.now(),
@@ -1043,6 +1068,7 @@ export const useChatStore = defineStore("chat", () => {
 
   // ============ 返回公共接口 ============
   return {
+    setWorkingDirectory,
     // 状态
     currentSession,
     sessions,

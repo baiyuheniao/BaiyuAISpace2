@@ -276,6 +276,9 @@ export const useSettingsStore = defineStore(
 
     // 普通 Chat 的工具调用轮数。Agent Team 使用自己的运行配置，不能共用这里的值。
     const maxToolRounds = ref(20);
+    const fileReadLimitMb = ref(1);
+    const fileListLimit = ref(800);
+    const fileSearchLimit = ref(100);
 
     // ============ API 配置状态 ============
     
@@ -649,6 +652,9 @@ export const useSettingsStore = defineStore(
       retryCount,
       retryIntervalSecs,
       maxToolRounds,
+      fileReadLimitMb,
+      fileListLimit,
+      fileSearchLimit,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -684,7 +690,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

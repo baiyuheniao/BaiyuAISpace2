@@ -17,6 +17,7 @@ use crate::commands::constants::{
     LLM_REQUEST_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
 };
 use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
+use crate::commands::file_tools::{self, FileAccessRule};
 use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
 use keyring::Entry as KeyringEntry;
@@ -110,6 +111,10 @@ pub struct ChatSession {
     pub model: String,
     /// API 配置 ID
     pub api_config_id: String,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default)]
+    pub file_access_mode: String,
 }
 
 /// 发送消息请求结构
@@ -157,6 +162,11 @@ pub struct SendMessageRequest {
     /// 普通 Chat 每次回答允许连续调用工具的最大轮数。前端设置缺失或异常时后端仍兜底。
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
+    /// 当前会话的文件授权由会话配置持久化；请求携带副本用于本轮工具调用。
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default)]
+    pub file_access_mode: String,
 }
 
 /// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
@@ -1169,6 +1179,9 @@ pub async fn stream_message(
             }
         }
     }
+    // 内置文件工具独立于 MCP 总开关，只由当前 Chat 的持久化授权决定。
+    let file_rules = file_tools::rules_for_directory(request.working_directory.as_deref(), &request.file_access_mode);
+    mcp_tools.extend(file_tools::tool_defs(&file_rules));
 
     // 把手动激活的 skill 的 instructions（加上可读资源文件的内容）作为一段
     // system prompt 注入进去，是和已有的 system 消息合并，而不是替换掉它。
@@ -1334,6 +1347,7 @@ pub async fn stream_message(
                                             &all_skills,
                                             std::mem::take(&mut tool_call_acc),
                                             request.max_tokens,
+                                            &file_rules,
                                         )
                                         .await;
                                     }
@@ -1359,6 +1373,7 @@ pub async fn stream_message(
                             &all_skills,
                             std::mem::take(&mut tool_call_acc),
                             request.max_tokens,
+                            &file_rules,
                         )
                         .await;
                     }
@@ -1493,6 +1508,7 @@ async fn execute_tool_calls(
     tool_calls: &[ToolCall],
     mcp_tools: &[MCPTool],
     all_skills: &[Skill],
+    file_rules: &[FileAccessRule],
 ) -> Vec<serde_json::Value> {
     let mut tool_results = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
@@ -1517,6 +1533,8 @@ async fn execute_tool_calls(
                 log::warn!("Skill not found for autonomous call: {}", skill_id);
                 serde_json::json!({ "error": format!("skill '{}' not found", skill_id) })
             }
+        } else if tool_call.function.name.starts_with("baiyu_file_") {
+            file_tools::execute(file_rules, &tool_call.function.name, &serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null))
         } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
             log::info!("Executing MCP tool: {}", tool.name);
             match call_mcp_tool(
@@ -1577,6 +1595,7 @@ async fn finalize_turn(
     all_skills: &[Skill],
     tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall>,
     max_tokens: Option<u32>,
+    file_rules: &[FileAccessRule],
 ) -> Result<(), LLMError> {
     let tool_calls: Vec<ToolCall> = tool_call_acc
         .into_values()
@@ -1603,7 +1622,7 @@ async fn finalize_turn(
         let mut current_calls = tool_calls;
 
         for round in 0..max_tool_rounds {
-            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills).await;
+            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills, file_rules).await;
             rounds.push((current_calls, tool_results));
             enforce_round_tool_budget(&mut rounds);
 

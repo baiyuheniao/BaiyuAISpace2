@@ -1276,6 +1276,17 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               @update:value="handleStartupWindowModeChange"
             />
           </div>
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">内置文件工具限制</span>
+              <n-text depth="3" style="font-size: 12px;">控制单次读取、目录列表和搜索的返回量；超出上限时工具会明确提示。</n-text>
+            </div>
+            <n-space>
+              <n-input-number v-model:value="settings.fileReadLimitMb" placeholder="读取上限" :min="1" :max="16" style="width: 120px"><template #suffix>MB</template></n-input-number>
+              <n-input-number v-model:value="settings.fileListLimit" placeholder="列表条数" :min="10" :max="5000" style="width: 120px"><template #suffix>条</template></n-input-number>
+              <n-input-number v-model:value="settings.fileSearchLimit" placeholder="搜索条数" :min="10" :max="1000" style="width: 120px"><template #suffix>条</template></n-input-number>
+            </n-space>
+          </div>
 
           <div class="general-setting-item">
             <div class="general-setting-text">

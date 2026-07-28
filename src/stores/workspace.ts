@@ -40,6 +40,7 @@ export interface Workspace {
   name: string;
   description: string;
   maxAgents: number;
+  workingDirectory: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -58,6 +59,9 @@ export interface WorkspaceAgent {
   knowledgeBaseIds: string[];
   activeSkillIds: string[];
   status: AgentStatus;
+  fileAccessMode: "none" | "read" | "write";
+  privateWorkingDirectory: string | null;
+  isolationMode: "shared" | "worktree";
   ragTopK: number;
   ragRetrievalMode: string;
   ragRerankerConfigId: string | null;
@@ -108,6 +112,8 @@ export interface UpdateAgentRequest {
   historyLimit: number;
   maxTokens: number | null;
   toolWhitelist: string[];
+  fileAccessMode?: "none" | "read" | "write";
+  isolationMode?: "shared" | "worktree";
 }
 
 export interface WorkspaceAgentTask {
@@ -163,6 +169,8 @@ export interface CreateAgentRequest {
   historyLimit?: number;
   maxTokens?: number | null;
   toolWhitelist?: string[];
+  fileAccessMode?: "none" | "read" | "write";
+  isolationMode?: "shared" | "worktree";
 }
 
 export interface AgentProposalEvent {
@@ -367,12 +375,27 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     workspaces.value = await invoke<Workspace[]>("workspace_list");
   };
 
-  const createWorkspace = async (name: string, description: string, maxAgents: number): Promise<Workspace> => {
+  const worktreeStatus = (agentId: string) =>
+    invoke<{ path: string; changes: string[]; clean: boolean }>("workspace_worktree_status", { agentId });
+
+  const applyAgentWorktree = (agentId: string) =>
+    invoke<void>("workspace_apply_agent_worktree", { agentId });
+
+  const discardAgentWorktreeChanges = (agentId: string) =>
+    invoke<void>("workspace_discard_agent_worktree_changes", { agentId });
+
+  const createWorkspace = async (name: string, description: string, maxAgents: number, workingDirectory: string | null): Promise<Workspace> => {
     console.log(`[Workspace] 创建工作组: name=${name} maxAgents=${maxAgents}`);
-    const ws = await invoke<Workspace>("workspace_create", { request: { name, description, maxAgents } });
+    const ws = await invoke<Workspace>("workspace_create", { request: { name, description, maxAgents, workingDirectory } });
     console.log(`[Workspace] 工作组已创建: id=${ws.id}`);
     workspaces.value.unshift(ws);
     return ws;
+  };
+
+  const updateWorkspaceDirectory = async (workspaceId: string, workingDirectory: string | null) => {
+    await invoke("workspace_update_directory", { workspaceId, workingDirectory });
+    const item = workspaces.value.find((w) => w.id === workspaceId);
+    if (item) item.workingDirectory = workingDirectory;
   };
 
   const deleteWorkspace = async (workspaceId: string) => {
@@ -600,7 +623,11 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     initListeners,
     disposeListeners,
     listWorkspaces,
+    worktreeStatus,
+    applyAgentWorktree,
+    discardAgentWorktreeChanges,
     createWorkspace,
+    updateWorkspaceDirectory,
     deleteWorkspace,
     selectWorkspace,
     loadAgents,

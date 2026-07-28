@@ -414,6 +414,10 @@ fn main() {
             // Agent Team Mode (Workspace) 相关命令
             workspace::commands::workspace_create,
             workspace::commands::workspace_list,
+            workspace::commands::workspace_update_directory,
+            workspace::commands::workspace_worktree_status,
+            workspace::commands::workspace_apply_agent_worktree,
+            workspace::commands::workspace_discard_agent_worktree_changes,
             workspace::commands::workspace_delete,
             workspace::commands::workspace_create_agent_manual,
             workspace::commands::workspace_list_agents,

@@ -25,6 +25,7 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             name TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
             max_agents INTEGER NOT NULL DEFAULT 5,
+            working_directory TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )
@@ -48,6 +49,9 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             knowledge_base_ids TEXT NOT NULL DEFAULT '[]',
             active_skill_ids TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL DEFAULT 'idle',
+            file_access_mode TEXT NOT NULL DEFAULT 'read',
+            private_working_directory TEXT,
+            isolation_mode TEXT NOT NULL DEFAULT 'shared',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )
@@ -144,6 +148,11 @@ pub fn init_workspace_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         .query_map([], |row| row.get(1))?
         .filter_map(|r| r.ok())
         .collect();
+    let workspace_columns: Vec<String> = conn.prepare("PRAGMA table_info(workspaces)")?.query_map([], |row| row.get(1))?.filter_map(|r| r.ok()).collect();
+    if !workspace_columns.contains(&"working_directory".to_string()) { conn.execute("ALTER TABLE workspaces ADD COLUMN working_directory TEXT", [])?; }
+    if !agent_columns.contains(&"file_access_mode".to_string()) { conn.execute("ALTER TABLE workspace_agents ADD COLUMN file_access_mode TEXT NOT NULL DEFAULT 'read'", [])?; }
+    if !agent_columns.contains(&"private_working_directory".to_string()) { conn.execute("ALTER TABLE workspace_agents ADD COLUMN private_working_directory TEXT", [])?; }
+    if !agent_columns.contains(&"isolation_mode".to_string()) { conn.execute("ALTER TABLE workspace_agents ADD COLUMN isolation_mode TEXT NOT NULL DEFAULT 'shared'", [])?; }
     if !agent_columns.contains(&"deleted_at".to_string()) {
         conn.execute("ALTER TABLE workspace_agents ADD COLUMN deleted_at INTEGER", [])?;
     }
@@ -212,23 +221,24 @@ fn row_to_workspace(row: &rusqlite::Row) -> rusqlite::Result<Workspace> {
         name: row.get(1)?,
         description: row.get(2)?,
         max_agents: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        working_directory: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
 pub fn insert_workspace(conn: &Connection, ws: &Workspace) -> Result<(), WorkspaceError> {
     conn.execute(
-        "INSERT INTO workspaces (id, name, description, max_agents, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![ws.id, ws.name, ws.description, ws.max_agents, ws.created_at, ws.updated_at],
+        "INSERT INTO workspaces (id, name, description, max_agents, working_directory, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![ws.id, ws.name, ws.description, ws.max_agents, ws.working_directory, ws.created_at, ws.updated_at],
     )?;
     Ok(())
 }
 
 pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>, WorkspaceError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, max_agents, created_at, updated_at
+        "SELECT id, name, description, max_agents, working_directory, created_at, updated_at
          FROM workspaces ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], row_to_workspace)?;
@@ -237,7 +247,7 @@ pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>, WorkspaceErr
 
 pub fn get_workspace(conn: &Connection, id: &str) -> Result<Option<Workspace>, WorkspaceError> {
     let result = conn.query_row(
-        "SELECT id, name, description, max_agents, created_at, updated_at
+        "SELECT id, name, description, max_agents, working_directory, created_at, updated_at
          FROM workspaces WHERE id = ?1",
         [id],
         row_to_workspace,
@@ -247,6 +257,12 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Option<Workspace>, W
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub fn update_workspace_directory(conn: &Connection, id: &str, directory: Option<String>) -> Result<(), WorkspaceError> {
+    let rows = conn.execute("UPDATE workspaces SET working_directory = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![directory, chrono::Utc::now().timestamp_millis(), id])?;
+    if rows == 0 { return Err(WorkspaceError::NotFound(id.to_string())); }
+    Ok(())
 }
 
 /// 删除一个工作组及其下所有内容。手动做级联删除、先删子表再删主表，而不是
@@ -298,6 +314,9 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
         knowledge_base_ids: serde_json::from_str(&knowledge_base_ids).unwrap_or_default(),
         active_skill_ids: serde_json::from_str(&active_skill_ids).unwrap_or_default(),
         status: AgentStatus::from_str(&status),
+        file_access_mode: row.get(29)?,
+        private_working_directory: row.get(30)?,
+        isolation_mode: row.get(31)?,
         rag_top_k: row.get(15)?,
         rag_retrieval_mode: row.get(16)?,
         scratchpad: row.get(17)?,
@@ -321,7 +340,7 @@ const AGENT_SELECT_COLUMNS: &str = "id, workspace_id, name, role, provider, mode
      mcp_server_ids, knowledge_base_ids, active_skill_ids, status, system_prompt, created_at, updated_at, \
      rag_top_k, rag_retrieval_mode, scratchpad, deleted_at, \
      rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval, \
-     enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist";
+     enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist, file_access_mode, private_working_directory, isolation_mode";
 
 pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), WorkspaceError> {
     conn.execute(
@@ -330,8 +349,8 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
           system_prompt, mcp_server_ids, knowledge_base_ids, active_skill_ids, status, created_at, updated_at,
           rag_top_k, rag_retrieval_mode, scratchpad, deleted_at,
           rag_reranker_config_id, rag_reranker_base_url, rag_reranker_model, rag_rerank_top_n, require_tool_approval,
-          enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+          enable_thinking, max_tool_rounds, history_limit, max_tokens, tool_whitelist, file_access_mode, private_working_directory, isolation_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
         rusqlite::params![
             agent.id,
             agent.workspace_id,
@@ -362,6 +381,9 @@ pub fn insert_agent(conn: &Connection, agent: &WorkspaceAgent) -> Result<(), Wor
             agent.history_limit,
             agent.max_tokens,
             serde_json::to_string(&agent.tool_whitelist).unwrap_or_else(|_| "[]".to_string()),
+            agent.file_access_mode,
+            agent.private_working_directory,
+            agent.isolation_mode,
         ],
     )?;
     Ok(())
@@ -423,8 +445,9 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
          rag_top_k = ?10, rag_retrieval_mode = ?11, \
          rag_reranker_config_id = ?12, rag_reranker_base_url = ?13, rag_reranker_model = ?14, rag_rerank_top_n = ?15, \
          require_tool_approval = ?16, enable_thinking = ?17, max_tool_rounds = ?18, history_limit = ?19, \
-         max_tokens = ?20, tool_whitelist = ?21, updated_at = ?22 \
-         WHERE id = ?23 AND deleted_at IS NULL",
+         max_tokens = ?20, tool_whitelist = ?21, file_access_mode = COALESCE(?22, file_access_mode), \
+         isolation_mode = COALESCE(?23, isolation_mode), updated_at = ?24 \
+         WHERE id = ?25 AND deleted_at IS NULL",
         rusqlite::params![
             req.name,
             req.provider,
@@ -447,6 +470,8 @@ pub fn update_agent(conn: &Connection, req: &UpdateAgentRequest) -> Result<(), W
             req.history_limit.max(1),
             req.max_tokens,
             serde_json::to_string(&req.tool_whitelist).unwrap_or_else(|_| "[]".to_string()),
+            req.file_access_mode,
+            req.isolation_mode,
             chrono::Utc::now().timestamp_millis(),
             req.id,
         ],
@@ -750,6 +775,9 @@ mod tests {
             knowledge_base_ids: vec![],
             active_skill_ids: vec![],
             status: AgentStatus::Idle,
+            file_access_mode: "read".to_string(),
+            private_working_directory: None,
+            isolation_mode: "shared".to_string(),
             rag_top_k: 5,
             rag_retrieval_mode: "hybrid".to_string(),
             rag_reranker_config_id: None,
@@ -778,6 +806,7 @@ mod tests {
             name: "Test WS".to_string(),
             description: "desc".to_string(),
             max_agents: 3,
+            working_directory: None,
             created_at: 100,
             updated_at: 100,
         };
@@ -798,7 +827,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
 
@@ -817,7 +846,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 2, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 2, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
 
@@ -832,7 +861,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");
@@ -848,7 +877,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let msgs = [
@@ -883,7 +912,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Main, "A");
@@ -912,7 +941,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");
@@ -934,7 +963,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");
@@ -966,6 +995,8 @@ mod tests {
                 history_limit: 60,
                 max_tokens: Some(9000),
                 tool_whitelist: vec!["exec_cmd".to_string()],
+                file_access_mode: None,
+                isolation_mode: None,
             },
         )
         .unwrap();
@@ -1013,6 +1044,8 @@ mod tests {
                     history_limit: 40,
                     max_tokens: None,
                     tool_whitelist: vec![],
+                    file_access_mode: None,
+                    isolation_mode: None,
                 },
             ),
             Err(WorkspaceError::AgentNotFound(_))
@@ -1024,7 +1057,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");
@@ -1040,7 +1073,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
 
@@ -1069,7 +1102,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");
@@ -1098,7 +1131,7 @@ mod tests {
         let conn = setup();
         insert_workspace(
             &conn,
-            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, created_at: 0, updated_at: 0 },
+            &Workspace { id: "ws-1".into(), name: "WS".into(), description: "".into(), max_agents: 5, working_directory: None, created_at: 0, updated_at: 0 },
         )
         .unwrap();
         let agent = sample_agent("ws-1", AgentRole::Sub, "A");

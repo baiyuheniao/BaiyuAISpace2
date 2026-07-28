@@ -93,7 +93,7 @@ const MCP_PRESETS: MCPPreset[] = [
   {
     id: "filesystem",
     name: "文件系统访问",
-    description: "读写指定目录下的本地文件",
+    description: "高级兼容方式：读写指定目录下的本地文件。普通文件操作请直接在 Chat 或 Agent Team 中选择工作目录。",
     serverType: "stdio",
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"],

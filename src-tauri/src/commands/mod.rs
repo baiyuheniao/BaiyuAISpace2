@@ -17,6 +17,7 @@
 pub mod app_update;
 pub mod constants;
 pub mod docker;
+pub mod file_tools;
 pub mod importer;
 pub mod llm;
 pub mod lmstudio;

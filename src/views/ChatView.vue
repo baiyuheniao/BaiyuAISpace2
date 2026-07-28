@@ -19,7 +19,8 @@
 
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted, computed } from "vue";
-import { NText } from "naive-ui";
+import { NButton, NModal, NRadio, NRadioGroup, NText } from "naive-ui";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useChatStore } from "@/stores/chat";
 import { useSettingsStore } from "@/stores/settings";
 import ChatMessage from "@/components/ChatMessage.vue";
@@ -30,6 +31,9 @@ import TokenCount from "@/components/TokenCount.vue";
 
 // 聊天 Store - 管理会话和消息状态
 const chat = useChatStore();
+const pendingWorkingDirectory = ref<string | null>(null);
+const pendingFileAccessMode = ref<"read" | "write">("write");
+const showFileAccessModeModal = ref(false);
 
 // 设置 Store - 管理 API 配置
 const settings = useSettingsStore();
@@ -54,6 +58,29 @@ const sessionTokenCount = computed(() =>
     0,
   )
 );
+
+const chooseWorkingDirectory = async () => {
+  const directory = await open({ directory: true, multiple: false, title: "选择当前聊天的工作目录" });
+  if (typeof directory === "string") {
+    pendingWorkingDirectory.value = directory;
+    pendingFileAccessMode.value = "write";
+    showFileAccessModeModal.value = true;
+  }
+};
+
+const confirmWorkingDirectory = async () => {
+  if (!pendingWorkingDirectory.value) return;
+  await chat.setWorkingDirectory(pendingWorkingDirectory.value, pendingFileAccessMode.value);
+  showFileAccessModeModal.value = false;
+  pendingWorkingDirectory.value = null;
+};
+
+const cycleFileAccess = async () => {
+  const session = chat.currentSession;
+  if (!session?.workingDirectory) return;
+  const mode = session.fileAccessMode === "write" ? "read" : session.fileAccessMode === "read" ? "none" : "write";
+  await chat.setWorkingDirectory(session.workingDirectory, mode);
+};
 
 // ============ 方法函数 ============
 
@@ -111,6 +138,24 @@ onMounted(async () => {
 <template>
   <!-- 聊天主布局容器 -->
   <div class="chat-view">
+    <div v-if="chat.currentSession" class="working-directory-bar">
+      <span>工作目录：{{ chat.currentSession.workingDirectory || "尚未选择" }}</span>
+      <span v-if="chat.currentSession.workingDirectory">· {{ chat.currentSession.fileAccessMode === "write" ? "可编辑" : chat.currentSession.fileAccessMode === "read" ? "只读" : "无文件权限" }}</span>
+      <button type="button" @click="chooseWorkingDirectory">{{ chat.currentSession.workingDirectory ? "更换目录" : "选择目录" }}</button>
+      <button v-if="chat.currentSession.workingDirectory" type="button" @click="cycleFileAccess">切换权限</button>
+      <button v-if="chat.currentSession.workingDirectory" type="button" @click="chat.setWorkingDirectory(null)">移除</button>
+    </div>
+    <n-modal v-model:show="showFileAccessModeModal" preset="card" title="设置文件权限" style="width: 440px">
+      <n-text depth="3">{{ pendingWorkingDirectory }}</n-text>
+      <n-radio-group v-model:value="pendingFileAccessMode" style="display: flex; margin-top: 18px; gap: 18px">
+        <n-radio value="read">只读</n-radio>
+        <n-radio value="write">可编辑</n-radio>
+      </n-radio-group>
+      <template #footer>
+        <n-button @click="showFileAccessModeModal = false">取消</n-button>
+        <n-button type="primary" @click="confirmWorkingDirectory">确认</n-button>
+      </template>
+    </n-modal>
     <div
       v-if="chat.currentSession"
       class="session-token-bar"
@@ -255,6 +300,28 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 16px;
   background: $bg;
+}
+
+.working-directory-bar {
+  min-height: 36px;
+  padding: 0 32px;
+  border-bottom: $border-faint;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: $font-mono;
+  font-size: 12px;
+
+  button {
+    border: $border;
+    border-radius: 0;
+    background: $bg;
+    color: $ink;
+    padding: 3px 8px;
+    font: inherit;
+    cursor: pointer;
+    &:hover { background: $ink; color: $bg; }
+  }
 }
 
 .session-token-eyebrow {

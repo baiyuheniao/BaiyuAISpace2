@@ -10,6 +10,7 @@ use crate::commands::llm::{
     ChatMessage, ImageAttachment, PendingToolCall, TurnOutcome,
 };
 use crate::commands::mcp::{call_mcp_tool, get_all_mcp_tools, MCPTool};
+use crate::commands::file_tools::{self, FileAccessRule};
 use crate::db::DbState;
 use crate::knowledge_base::commands::{search_knowledge_base, KbState};
 use crate::knowledge_base::retrieval::build_context as build_rag_context;
@@ -19,6 +20,9 @@ use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::PathBuf;
+use std::fs;
+use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -139,6 +143,7 @@ pub async fn workspace_create(
         name: request.name,
         description: request.description,
         max_agents: request.max_agents.unwrap_or(DEFAULT_MAX_AGENTS).max(1),
+        working_directory: request.working_directory.filter(|path| !path.trim().is_empty()),
         created_at: now,
         updated_at: now,
     };
@@ -946,6 +951,10 @@ async fn spawn_agent_internal(
         .await?
         .ok_or_else(|| WorkspaceError::NotFound(request.workspace_id.clone()))?;
 
+    let agent_id = Uuid::new_v4().to_string();
+    let isolation_mode = request.isolation_mode.clone().unwrap_or_else(|| "shared".to_string());
+    let private_directory = prepare_agent_private_directory(&workspace, &agent_id, &isolation_mode)?;
+
     let db_state = app_handle.state::<DbState>();
     let now = Utc::now().timestamp_millis();
     let agent = {
@@ -961,7 +970,7 @@ async fn spawn_agent_internal(
         }
 
         let agent = WorkspaceAgent {
-            id: Uuid::new_v4().to_string(),
+            id: agent_id,
             workspace_id: workspace.id.clone(),
             name: request.name.clone(),
             role: request.role,
@@ -974,6 +983,9 @@ async fn spawn_agent_internal(
             knowledge_base_ids: request.knowledge_base_ids.clone(),
             active_skill_ids: request.active_skill_ids.clone(),
             status: AgentStatus::Idle,
+            file_access_mode: request.file_access_mode.clone().unwrap_or_else(|| if request.role == AgentRole::Main { "write".to_string() } else { "read".to_string() }),
+            private_working_directory: private_directory,
+            isolation_mode,
             rag_top_k: request.rag_top_k,
             rag_retrieval_mode: request.rag_retrieval_mode.clone(),
             rag_reranker_config_id: request.rag_reranker_config_id.clone(),
@@ -1021,6 +1033,113 @@ async fn spawn_agent_internal(
 /// 提议被批准时，`run_agent_loop` 会经由 `process_agent_wake` ->
 /// `dispatch_tool_call` -> `propose_agent_creation` -> `spawn_agent_internal`
 /// 这条链路又绕回这里，如果这里也是 `async fn`，这条链就会自己引用自己。
+fn prepare_agent_private_directory(workspace: &Workspace, agent_id: &str, isolation_mode: &str) -> Result<Option<String>, WorkspaceError> {
+    let Some(root) = workspace.working_directory.as_ref() else { return Ok(None); };
+    let root = PathBuf::from(root);
+    if !root.is_dir() { return Err(WorkspaceError::InvalidConfig("团队项目目录不存在或不是文件夹".to_string())); }
+    let private = root.join(".baiyu-agent-workspaces").join(agent_id);
+    if private.exists() && fs::read_dir(&private).map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?.next().is_some() {
+        let backup = root.join(".baiyu-agent-workspace-backups").join(format!("{}-{}", agent_id, Utc::now().timestamp_millis()));
+        fs::create_dir_all(backup.parent().unwrap()).map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+        fs::rename(&private, &backup).map_err(|e| WorkspaceError::InvalidConfig(format!("无法备份遗留 Agent 工作目录：{}", e)))?;
+    }
+    fs::create_dir_all(&private).map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    let gitignore = root.join(".gitignore");
+    let ignore_line = ".baiyu-agent-workspaces/";
+    let current = fs::read_to_string(&gitignore).unwrap_or_default();
+    if !current.lines().any(|line| line.trim() == ignore_line) {
+        let mut updated = current;
+        if !updated.is_empty() && !updated.ends_with('\n') { updated.push('\n'); }
+        updated.push_str(ignore_line); updated.push('\n');
+        fs::write(&gitignore, updated).map_err(|e| WorkspaceError::InvalidConfig(format!("无法更新 .gitignore：{}", e)))?;
+    }
+    if isolation_mode == "worktree" {
+        let git_check = Command::new("git").args(["-C", root.to_string_lossy().as_ref(), "rev-parse", "--is-inside-work-tree"]).output()
+            .map_err(|e| WorkspaceError::InvalidConfig(format!("无法调用 Git：{}", e)))?;
+        if !git_check.status.success() { return Err(WorkspaceError::InvalidConfig("团队项目不是 Git 仓库，不能使用 worktree 模式".to_string())); }
+        fs::remove_dir(&private).map_err(|e| WorkspaceError::InvalidConfig(format!("无法准备 worktree 目录：{}", e)))?;
+        let branch = format!("baiyu-agent-{}", &agent_id[..8]);
+        let output = Command::new("git").args(["-C", root.to_string_lossy().as_ref(), "worktree", "add", "-b", &branch, private.to_string_lossy().as_ref(), "HEAD"]).output()
+            .map_err(|e| WorkspaceError::InvalidConfig(format!("创建 Git worktree 失败：{}", e)))?;
+        if !output.status.success() { return Err(WorkspaceError::InvalidConfig(format!("创建 Git worktree 失败：{}", String::from_utf8_lossy(&output.stderr)))); }
+    }
+    Ok(Some(private.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn workspace_update_directory(workspace_id: String, working_directory: Option<String>, db_state: State<'_, DbState>) -> Result<(), WorkspaceError> {
+    let db = db_state.0.lock().await;
+    let conn = db::open_conn(&db.path)?;
+    db::update_workspace_directory(&conn, &workspace_id, working_directory.filter(|p| !p.trim().is_empty()))
+}
+
+#[tauri::command]
+pub async fn workspace_worktree_status(agent_id: String, app_handle: AppHandle) -> Result<serde_json::Value, WorkspaceError> {
+    let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
+    if agent.isolation_mode != "worktree" { return Err(WorkspaceError::InvalidConfig("该 Agent 未使用独立 Git worktree".to_string())); }
+    let path = agent.private_working_directory.ok_or_else(|| WorkspaceError::InvalidConfig("worktree 路径缺失".to_string()))?;
+    let output = Command::new("git").args(["-C", &path, "status", "--porcelain"]).output().map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    if !output.status.success() { return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&output.stderr).to_string())); }
+    Ok(serde_json::json!({"path":path,"changes":String::from_utf8_lossy(&output.stdout).lines().collect::<Vec<_>>(),"clean":output.stdout.is_empty()}))
+}
+
+#[tauri::command]
+pub async fn workspace_apply_agent_worktree(agent_id: String, app_handle: AppHandle) -> Result<(), WorkspaceError> {
+    let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
+    let workspace = load_workspace(&app_handle, &agent.workspace_id).await?.ok_or_else(|| WorkspaceError::NotFound(agent.workspace_id.clone()))?;
+    if agent.isolation_mode != "worktree" { return Err(WorkspaceError::InvalidConfig("该 Agent 未使用独立 Git worktree".to_string())); }
+    let wt = agent.private_working_directory.ok_or_else(|| WorkspaceError::InvalidConfig("worktree 路径缺失".to_string()))?;
+    let root = workspace.working_directory.ok_or_else(|| WorkspaceError::InvalidConfig("团队项目目录缺失".to_string()))?;
+    let mut patch = Command::new("git").args(["-C", &wt, "diff", "--binary", "HEAD"]).output().map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    if !patch.status.success() { return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&patch.stderr).to_string())); }
+    // `git diff` does not include new, untracked files.  Include a binary patch
+    // for each one so applying a worktree also carries agent-created output.
+    let untracked = Command::new("git").args(["-C", &wt, "ls-files", "--others", "--exclude-standard", "-z"]).output()
+        .map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    if !untracked.status.success() { return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&untracked.stderr).to_string())); }
+    for relative in untracked.stdout.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
+        let relative = std::str::from_utf8(relative).map_err(|_| WorkspaceError::InvalidConfig("worktree 中存在无法解析的文件名".to_string()))?;
+        let addition = Command::new("git").args(["-C", &wt, "diff", "--no-index", "--binary", "--", "/dev/null", relative]).output()
+            .map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+        // git diff --no-index returns 1 when it successfully found a difference.
+        if !addition.status.success() && addition.status.code() != Some(1) {
+            return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&addition.stderr).to_string()));
+        }
+        patch.stdout.extend_from_slice(&addition.stdout);
+    }
+    if patch.stdout.is_empty() { return Ok(()); }
+    let mut apply = Command::new("git").args(["-C", &root, "apply", "--whitespace=nowarn", "-"]).stdin(std::process::Stdio::piped()).spawn().map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    use std::io::Write;
+    apply.stdin.take().ok_or_else(|| WorkspaceError::InvalidConfig("无法写入 Git patch".to_string()))?.write_all(&patch.stdout).map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    let status = apply.wait().map_err(|e| WorkspaceError::InvalidConfig(e.to_string()))?;
+    if !status.success() { return Err(WorkspaceError::InvalidConfig("应用 worktree 修改失败，项目目录未被自动合并".to_string())); }
+    insert_workspace_log(&app_handle, &workspace.id, Some(agent.id), "worktree_applied", "已将 Agent worktree 的未提交修改应用到团队项目目录".to_string()).await;
+    Ok(())
+}
+
+/// Explicitly abandon changes in an Agent worktree.  The worktree itself stays
+/// in place so deleting an Agent never silently removes its private directory.
+#[tauri::command]
+pub async fn workspace_discard_agent_worktree_changes(agent_id: String, app_handle: AppHandle) -> Result<(), WorkspaceError> {
+    let agent = load_agent(&app_handle, &agent_id).await?.ok_or_else(|| WorkspaceError::AgentNotFound(agent_id.clone()))?;
+    if agent.isolation_mode != "worktree" {
+        return Err(WorkspaceError::InvalidConfig("该 Agent 未使用独立 Git worktree".to_string()));
+    }
+    let path = agent.private_working_directory.ok_or_else(|| WorkspaceError::InvalidConfig("worktree 路径缺失".to_string()))?;
+    let reset = Command::new("git").args(["-C", &path, "reset", "--hard", "HEAD"]).output()
+        .map_err(|e| WorkspaceError::InvalidConfig(format!("无法重置 worktree：{}", e)))?;
+    if !reset.status.success() {
+        return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&reset.stderr).to_string()));
+    }
+    let clean = Command::new("git").args(["-C", &path, "clean", "-fd"]).output()
+        .map_err(|e| WorkspaceError::InvalidConfig(format!("无法清理 worktree：{}", e)))?;
+    if !clean.status.success() {
+        return Err(WorkspaceError::InvalidConfig(String::from_utf8_lossy(&clean.stderr).to_string()));
+    }
+    insert_workspace_log(&app_handle, &agent.workspace_id, Some(agent.id), "worktree_discarded", "用户已放弃 Agent worktree 的未提交修改；私有目录仍保留".to_string()).await;
+    Ok(())
+}
+
 pub(crate) fn start_agent_loop(app_handle: AppHandle, agent_handles: Arc<Mutex<HashMap<String, AgentHandle>>>, agent: WorkspaceAgent) {
     let notify = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
@@ -1238,7 +1357,7 @@ async fn process_agent_wake(
     // 的服务器），但设计意图是它像聊天页一样「开箱即用、不需要额外配置」——
     // 之前这里被 mcp_server_ids 是否为空整个短路掉，导致没勾选任何外部 MCP
     // 服务器的 Agent（包括没配置过 MCP 的主 Agent）永远拿不到这两个内置工具。
-    let mut tools = workspace_tool_defs(&agent);
+    let mut tools = workspace_tool_defs(&workspace, &agent);
     {
         let db_state = app_handle.state::<DbState>();
         match get_all_mcp_tools(db_state).await {
@@ -1747,7 +1866,7 @@ async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgen
 /// `workspace_sleep` 只有子 Agent 能用（主 Agent 是负责监督全局的那个，让
 /// 它去休眠没有意义）；`workspace_message`/`workspace_agent_list`/
 /// `workspace_asks` 所有人都能用。
-fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
+fn workspace_tool_defs(workspace: &Workspace, agent: &WorkspaceAgent) -> Vec<MCPTool> {
     let mut tools = vec![
         MCPTool {
             server_id: "workspace".to_string(),
@@ -1954,6 +2073,16 @@ fn workspace_tool_defs(agent: &WorkspaceAgent) -> Vec<MCPTool> {
         });
     }
 
+    let mut rules = Vec::new();
+    if agent.file_access_mode != "none" {
+        if let Some(root) = &workspace.working_directory {
+            rules.push(FileAccessRule { root: PathBuf::from(root), write: agent.role == AgentRole::Main && agent.file_access_mode == "write" });
+        }
+        if let Some(private) = &agent.private_working_directory {
+            rules.push(FileAccessRule { root: PathBuf::from(private), write: true });
+        }
+    }
+    tools.extend(file_tools::tool_defs(&rules));
     tools
 }
 
@@ -1967,6 +2096,34 @@ async fn dispatch_tool_call(
     call: &PendingToolCall,
     cancel: &CancellationToken,
 ) -> serde_json::Value {
+    if call.name.starts_with("baiyu_file_") {
+        let mut rules = Vec::new();
+        if agent.file_access_mode != "none" {
+            if let Some(root) = &workspace.working_directory {
+                rules.push(FileAccessRule { root: PathBuf::from(root), write: agent.role == AgentRole::Main && agent.file_access_mode == "write" });
+            }
+            if let Some(private) = &agent.private_working_directory { rules.push(FileAccessRule { root: PathBuf::from(private), write: true }); }
+        }
+        let result = file_tools::execute(&rules, &call.name, &call.arguments);
+        let content = if result.get("error").is_some() {
+            format!("{} 文件操作失败：{}", agent.name, result.get("error").and_then(|v| v.as_str()).unwrap_or("未知错误"))
+        } else {
+            let target = result.get("path").or_else(|| result.get("to")).or_else(|| result.get("original"))
+                .and_then(|v| v.as_str()).unwrap_or("授权目录中的文件");
+            let action = match call.name.as_str() {
+                "baiyu_file_read" => "读取了",
+                "baiyu_file_write" | "baiyu_file_edit" => "修改了",
+                "baiyu_file_move" => "移动了",
+                "baiyu_file_delete" => "移入回收目录：",
+                "baiyu_file_create_directory" => "创建了目录：",
+                "baiyu_file_search" => "搜索了",
+                _ => "查看了",
+            };
+            format!("{} {} {}", agent.name, action, target)
+        };
+        insert_workspace_log(app_handle, &workspace.id, Some(agent.id.clone()), "file_operation", content).await;
+        return result;
+    }
     match call.name.as_str() {
         "workspace_message" => {
             let raw_to = call.arguments.get("to_agent_id").and_then(|v| v.as_str()).unwrap_or("all").to_string();
@@ -2071,6 +2228,8 @@ async fn dispatch_tool_call(
                 history_limit: default_history_limit(),
                 max_tokens: None,
                 tool_whitelist: vec![],
+                file_access_mode: None,
+                isolation_mode: None,
             };
 
             let pending = app_handle.state::<PendingProposals>();

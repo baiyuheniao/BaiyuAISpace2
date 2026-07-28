@@ -14,8 +14,10 @@
 -->
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import { ref, reactive, computed, nextTick, onActivated, onBeforeUnmount, onMounted, watch } from "vue";
 import { useRouter } from "vue-router";
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import {
   NButton, NIcon, NSpace, NSelect, NEmpty, NModal, NForm, NFormItem, NInput, NInputNumber,
   NRadioGroup, NRadio, NCheckboxGroup, NCheckbox, NCard, NGrid, NGi, NList, NListItem, NThing,
@@ -52,7 +54,23 @@ const message = useMessage();
 // ============ 工作组 ============
 
 const showCreateWorkspaceModal = ref(false);
-const wsForm = ref({ name: "", description: "", maxAgents: 5 });
+const wsForm = ref({ name: "", description: "", maxAgents: 5, workingDirectory: null as string | null });
+
+const chooseWorkspaceDirectory = async () => {
+  const directory = await open({ directory: true, multiple: false, title: "选择团队项目目录" });
+  if (typeof directory === "string") wsForm.value.workingDirectory = directory;
+};
+
+const changeCurrentWorkspaceDirectory = async () => {
+  const current = workspace.currentWorkspace;
+  if (!current) return;
+  const directory = await open({ directory: true, multiple: false, title: "选择团队项目目录" });
+  if (typeof directory !== "string") return;
+  try {
+    await workspace.updateWorkspaceDirectory(current.id, directory);
+    message.success("已更换团队项目目录");
+  } catch (e) { message.error(`更换项目目录失败: ${e}`); }
+};
 
 const workspaceOptions = computed(() =>
   workspace.workspaces.map((w) => ({ label: w.name, value: w.id }))
@@ -73,9 +91,9 @@ const handleCreateWorkspace = async () => {
     return;
   }
   try {
-    const ws = await workspace.createWorkspace(wsForm.value.name.trim(), wsForm.value.description.trim(), wsForm.value.maxAgents);
+    const ws = await workspace.createWorkspace(wsForm.value.name.trim(), wsForm.value.description.trim(), wsForm.value.maxAgents, wsForm.value.workingDirectory);
     showCreateWorkspaceModal.value = false;
-    wsForm.value = { name: "", description: "", maxAgents: 5 };
+    wsForm.value = { name: "", description: "", maxAgents: 5, workingDirectory: null };
     await handleSelectWorkspace(ws.id);
   } catch (e) {
     message.error(`创建失败: ${e}`);
@@ -128,6 +146,8 @@ const emptyAgentForm = (): CreateAgentRequest => ({
   historyLimit: 40,
   maxTokens: null,
   toolWhitelist: [],
+  fileAccessMode: "read",
+  isolationMode: "shared",
 });
 const agentForm = ref<CreateAgentRequest>(emptyAgentForm());
 
@@ -182,6 +202,7 @@ const handleCreateAgent = async () => {
   try {
     await workspace.createAgent({
       ...agentForm.value,
+      fileAccessMode: agentForm.value.role === "main" ? "write" : agentForm.value.fileAccessMode,
       workspaceId: workspace.currentWorkspaceId ?? "",
       provider: config.provider,
       model: config.model,
@@ -225,6 +246,8 @@ const openEditAgentModal = (agent: WorkspaceAgent) => {
     historyLimit: agent.historyLimit ?? 40,
     maxTokens: agent.maxTokens ?? null,
     toolWhitelist: [...(agent.toolWhitelist ?? [])],
+    fileAccessMode: agent.fileAccessMode ?? "read",
+    isolationMode: agent.isolationMode ?? "shared",
   };
   showEditAgentModal.value = true;
 };
@@ -284,6 +307,29 @@ const handleDeleteAgent = async (agentId: string) => {
     if (selectedAgentId.value === agentId) selectedAgentId.value = null;
   } catch (e) {
     message.error(`删除失败: ${e}`);
+  }
+};
+
+const handleApplyWorktree = async (agent: WorkspaceAgent) => {
+  try {
+    const status = await workspace.worktreeStatus(agent.id);
+    if (status.clean) {
+      message.info("该 Agent worktree 没有未提交修改");
+      return;
+    }
+    await workspace.applyAgentWorktree(agent.id);
+    message.success("已将 worktree 修改应用到团队项目目录");
+  } catch (e) {
+    message.error(`应用 worktree 修改失败: ${e}`);
+  }
+};
+
+const handleDiscardWorktree = async (agent: WorkspaceAgent) => {
+  try {
+    await workspace.discardAgentWorktreeChanges(agent.id);
+    message.success("已放弃 worktree 的未提交修改，私有目录仍保留");
+  } catch (e) {
+    message.error(`放弃修改失败: ${e}`);
   }
 };
 
@@ -726,11 +772,20 @@ const handleAnswerKeydown = (questionId: string, e: KeyboardEvent) => {
 
 // ============ 初始化 ============
 
-onMounted(async () => {
+const restoreWorkspaceList = async () => {
   // 事件监听正常情况下已由 Layout 在应用启动时全局注册（这样 Agent 在别的
   // 页面提问/申请审批时也有徽标和左下角提醒）；这里再调用一次只是幂等兜底。
-  await workspace.initListeners();
-  await workspace.listWorkspaces();
+  // 事件监听失败或延迟不应阻塞工作组列表，目录选择和恢复必须先可用。
+  // 这里直接拉取并写回 store：避免事件监听初始化的异步状态影响首屏的工作组选择器。
+  // listWorkspaces 仍保留给其他调用方使用。
+  try {
+    const initialWorkspaces = await invoke<typeof workspace.workspaces>("workspace_list");
+    workspace.workspaces = initialWorkspaces;
+  } catch (e) {
+    message.error(`加载工作组列表失败: ${e}`);
+    return;
+  }
+  void workspace.initListeners();
 
   // 恢复上次选中的工作组（currentWorkspaceId 已持久化），把它的数据拉回来；
   // 工作组可能已在别处被删除，找不到就清空选择。
@@ -748,7 +803,11 @@ onMounted(async () => {
   }, 15000);
 
   await Promise.all([mcp.loadServers(), kb.loadKnowledgeBases(), skills.loadSkills()]);
-});
+};
+
+onMounted(() => { void restoreWorkspaceList(); });
+// 路由使用 keep-alive：回到本页也重新拉取，避免后台创建的工作组不显示。
+onActivated(() => { void restoreWorkspaceList(); });
 
 onBeforeUnmount(() => {
   if (nowTimer !== undefined) window.clearInterval(nowTimer);
@@ -763,6 +822,10 @@ onBeforeUnmount(() => {
         <h1 class="page-title">
           协作团队
         </h1>
+      </div>
+      <div v-if="workspace.currentWorkspace" class="workspace-directory-summary">
+        团队项目：{{ workspace.currentWorkspace.workingDirectory || "尚未选择" }}
+        <n-button size="tiny" quaternary @click="changeCurrentWorkspaceDirectory">更换</n-button>
       </div>
       <n-space align="center">
         <TokenCount
@@ -1143,6 +1206,26 @@ onBeforeUnmount(() => {
                     </n-tag>
                     <n-space size="small">
                       <n-button
+                        v-if="agent.isolationMode === 'worktree'"
+                        quaternary
+                        size="tiny"
+                        title="将已跟踪文件的修改应用到团队项目"
+                        @click.stop="handleApplyWorktree(agent)"
+                      >
+                        应用修改
+                      </n-button>
+                      <n-popconfirm
+                        v-if="agent.isolationMode === 'worktree'"
+                        positive-text="放弃修改"
+                        negative-text="取消"
+                        @positive-click="handleDiscardWorktree(agent)"
+                      >
+                        <template #trigger>
+                          <n-button quaternary size="tiny" @click.stop>放弃修改</n-button>
+                        </template>
+                        放弃此 worktree 的未提交修改？私有目录会保留。
+                      </n-popconfirm>
+                      <n-button
                         v-if="agent.status === 'paused'"
                         quaternary
                         circle
@@ -1441,6 +1524,12 @@ onBeforeUnmount(() => {
             :max="20"
           />
         </n-form-item>
+        <n-form-item label="项目目录">
+          <n-space vertical style="width: 100%">
+            <n-input :value="wsForm.workingDirectory ?? ''" readonly placeholder="请选择团队项目目录" />
+            <n-button @click="chooseWorkspaceDirectory">选择文件夹</n-button>
+          </n-space>
+        </n-form-item>
       </n-form>
       <template #footer>
         <n-space justify="end">
@@ -1488,10 +1577,20 @@ onBeforeUnmount(() => {
             </n-radio>
           </n-radio-group>
         </n-form-item>
-        <n-form-item
-          label="API 配置"
-          required
-        >
+        <n-form-item label="文件权限">
+          <n-radio-group v-model:value="agentForm.fileAccessMode">
+            <n-radio value="none">无文件访问</n-radio>
+            <n-radio value="read">只读项目；私有目录可编辑</n-radio>
+            <n-radio value="write" :disabled="agentForm.role !== 'main'">可编辑整个项目</n-radio>
+          </n-radio-group>
+        </n-form-item>
+        <n-form-item v-if="workspace.currentWorkspace?.workingDirectory && agentForm.role === 'sub'" label="隔离方式">
+          <n-radio-group v-model:value="agentForm.isolationMode">
+            <n-radio value="shared">私有目录</n-radio>
+            <n-radio value="worktree">独立 Git worktree</n-radio>
+          </n-radio-group>
+        </n-form-item>
+        <n-form-item label="API 配置" required>
           <n-select
             v-model:value="agentForm.apiConfigId"
             :options="settings.apiConfigOptions"
@@ -1710,6 +1809,13 @@ onBeforeUnmount(() => {
             v-model:value="editAgentForm.name"
             placeholder="给这个 Agent 起个名字"
           />
+        </n-form-item>
+        <n-form-item label="文件权限">
+          <n-radio-group v-model:value="editAgentForm.fileAccessMode">
+            <n-radio value="none">无文件访问</n-radio>
+            <n-radio value="read">只读项目；私有目录可编辑</n-radio>
+            <n-radio value="write" :disabled="selectedAgent?.role !== 'main'">可编辑整个项目</n-radio>
+          </n-radio-group>
         </n-form-item>
         <n-form-item
           label="API 配置"

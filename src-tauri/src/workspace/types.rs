@@ -120,6 +120,8 @@ pub struct Workspace {
     /// 同一工作组里同时能存在的 Agent 数量上限（安全阀），防止主 Agent 无节制
     /// 地创建子 Agent。按工作组各自配置，创建时默认给一个保守值。
     pub max_agents: i32,
+    #[serde(default)]
+    pub working_directory: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -148,6 +150,12 @@ pub struct WorkspaceAgent {
     pub knowledge_base_ids: Vec<String>,
     pub active_skill_ids: Vec<String>,
     pub status: AgentStatus,
+    #[serde(default)]
+    pub file_access_mode: String,
+    #[serde(default)]
+    pub private_working_directory: Option<String>,
+    #[serde(default)]
+    pub isolation_mode: String,
     /// RAG 检索的 top_k，之前在 build_agent_system_prompt 里硬编码为 5。
     pub rag_top_k: i32,
     /// RAG 检索模式，之前硬编码为 "hybrid"；取值 "vector"/"keyword"/"hybrid"。
@@ -265,6 +273,8 @@ pub struct CreateWorkspaceRequest {
     pub name: String,
     pub description: String,
     pub max_agents: Option<i32>,
+    #[serde(default)]
+    pub working_directory: Option<String>,
 }
 
 /// 两条创建路径共用这个结构：手动创建的 Tauri command，以及主 Agent 的
@@ -312,6 +322,10 @@ pub struct CreateAgentRequest {
     pub max_tokens: Option<i32>,
     #[serde(default)]
     pub tool_whitelist: Vec<String>,
+    #[serde(default)]
+    pub file_access_mode: Option<String>,
+    #[serde(default)]
+    pub isolation_mode: Option<String>,
 }
 
 pub fn default_rag_top_k() -> i32 {
@@ -368,6 +382,10 @@ pub struct UpdateAgentRequest {
     pub max_tokens: Option<i32>,
     #[serde(default)]
     pub tool_whitelist: Vec<String>,
+    #[serde(default)]
+    pub file_access_mode: Option<String>,
+    #[serde(default)]
+    pub isolation_mode: Option<String>,
 }
 
 /// 一个正在等待人工决策的 `workspace_create_agent` 提议 / `workspace_sleep`

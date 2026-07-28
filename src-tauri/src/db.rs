@@ -74,6 +74,8 @@ impl Database {
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
                 api_config_id TEXT NOT NULL DEFAULT '',
+                working_directory TEXT,
+                file_access_mode TEXT NOT NULL DEFAULT 'none',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -94,6 +96,10 @@ impl Database {
             )?;
             log::info!("Database migration: added api_config_id column");
         }
+        let has_working_directory = self.conn.query_row("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'working_directory'", [], |_| Ok(true)).unwrap_or(false);
+        if !has_working_directory { self.conn.execute("ALTER TABLE sessions ADD COLUMN working_directory TEXT", [])?; }
+        let has_file_access_mode = self.conn.query_row("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'file_access_mode'", [], |_| Ok(true)).unwrap_or(false);
+        if !has_file_access_mode { self.conn.execute("ALTER TABLE sessions ADD COLUMN file_access_mode TEXT NOT NULL DEFAULT 'none'", [])?; }
 
         self.conn.execute(
             r#"
@@ -191,23 +197,27 @@ impl Database {
     pub fn save_session(&self, session: &ChatSession) -> Result<(), Box<dyn std::error::Error>> {
         self.conn.execute(
             r#"
-            INSERT INTO sessions (id, title, provider, model, api_config_id, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO sessions (id, title, provider, model, api_config_id, working_directory, file_access_mode, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider = excluded.provider,
                 model = excluded.model,
                 api_config_id = excluded.api_config_id,
+                working_directory = excluded.working_directory,
+                file_access_mode = excluded.file_access_mode,
                 updated_at = excluded.updated_at
             "#,
-            [
+            rusqlite::params![
                 &session.id,
                 &session.title,
                 &session.provider,
                 &session.model,
                 &session.api_config_id,
-                &session.created_at.to_string(),
-                &session.updated_at.to_string(),
+                &session.working_directory,
+                &session.file_access_mode,
+                session.created_at,
+                session.updated_at,
             ],
         )?;
 
@@ -239,7 +249,7 @@ impl Database {
     pub fn get_sessions(&self) -> Result<Vec<ChatSession>, Box<dyn std::error::Error>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, title, provider, model, api_config_id, created_at, updated_at 
+            SELECT id, title, provider, model, api_config_id, working_directory, file_access_mode, created_at, updated_at
             FROM sessions 
             ORDER BY updated_at DESC
             "#,
@@ -252,14 +262,16 @@ impl Database {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, title, provider, model, api_config_id, created_at, updated_at) = row?;
+            let (id, title, provider, model, api_config_id, working_directory, file_access_mode, created_at, updated_at) = row?;
             let messages = self.get_messages(&id)?;
             
             sessions.push(ChatSession {
@@ -268,6 +280,8 @@ impl Database {
                 provider,
                 model,
                 api_config_id,
+                working_directory,
+                file_access_mode,
                 created_at,
                 updated_at,
                 messages,
