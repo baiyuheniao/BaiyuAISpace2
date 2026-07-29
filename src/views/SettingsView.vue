@@ -60,7 +60,8 @@ import {
   type EmbeddingApiConfig,
   type RerankerApiConfig,
   type ErrorSoundLevel,
-  type StartupWindowMode
+  type StartupWindowMode,
+  type FontSize
 } from "@/stores/settings";
 import {
   KeyOutline,
@@ -96,6 +97,18 @@ const errorSoundLevelOptions: Array<{
 const handleErrorSoundLevelChange = (value: string) => {
   if (value === "off" || value === "critical" || value === "all") {
     settings.errorSoundLevel = value;
+  }
+};
+
+const fontSizeOptions: Array<{ label: string; value: FontSize }> = [
+  { label: "小", value: "small" },
+  { label: "标准", value: "medium" },
+  { label: "大", value: "large" },
+];
+
+const handleFontSizeChange = (value: string) => {
+  if (value === "small" || value === "medium" || value === "large") {
+    settings.setFontSize(value);
   }
 };
 
@@ -1276,6 +1289,23 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               @update:value="handleStartupWindowModeChange"
             />
           </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">字体大小</span>
+              <n-text depth="3" style="font-size: 12px;">
+                调整软件的基础字号；修改后会立即应用，并在下次启动时保留。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.fontSize"
+              :options="fontSizeOptions"
+              placeholder="请选择字体大小"
+              style="width: 180px;"
+              @update:value="handleFontSizeChange"
+            />
+          </div>
+
           <div class="general-setting-item">
             <div class="general-setting-text">
               <span class="general-setting-label">内置文件工具限制</span>

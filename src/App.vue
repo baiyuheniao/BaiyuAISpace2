@@ -195,6 +195,8 @@ const settings = useSettingsStore();
 
 // 组件挂载时的初始化
 onMounted(async () => {
+  // 持久化插件完成状态还原后，先应用用户选择的基础字号。
+  settings.applyFontSize();
   // 从安全存储加载所有 API 密钥
   await settings.loadAllApiKeys();
   // 加载后重新写入 localStorage：若 secure storage 里的值和已持久化的旧值恰好
