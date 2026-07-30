@@ -203,7 +203,7 @@ onMounted(async () => {
               cy="300"
               r="220"
               fill="none"
-              stroke="#000"
+              stroke="var(--color-ink)"
               stroke-width="1"
             />
             <circle
@@ -211,7 +211,7 @@ onMounted(async () => {
               cy="300"
               r="140"
               fill="none"
-              stroke="#000"
+              stroke="var(--color-ink)"
               stroke-width="1"
             />
             <rect
@@ -220,7 +220,7 @@ onMounted(async () => {
               width="440"
               height="360"
               fill="none"
-              stroke="#000"
+              stroke="var(--color-ink)"
               stroke-width="1"
             />
             <line
@@ -228,7 +228,7 @@ onMounted(async () => {
               y1="300"
               x2="800"
               y2="300"
-              stroke="#000"
+              stroke="var(--color-ink)"
               stroke-width="1"
             />
             <line
@@ -236,7 +236,7 @@ onMounted(async () => {
               y1="0"
               x2="400"
               y2="600"
-              stroke="#000"
+              stroke="var(--color-ink)"
               stroke-width="1"
             />
           </svg>
@@ -391,7 +391,7 @@ onMounted(async () => {
   width: 48px;
   height: 48px;
   margin-top: 1.5rem;
-  border: 1px solid rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--color-line-faint);
   border-radius: 50%;
 
   &::after {

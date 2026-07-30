@@ -8,16 +8,18 @@
 // ============================================================
 
 // ---------- 配色（纯黑白，无任何彩色） ----------
-$bg: #ffffff;            // 背景
-$ink: #000000;           // 主文本
-$ink-soft: #444444;      // 辅助文本（柔和）
-$ink-faint: #888888;     // 辅助文本（微弱）
-$surface: #f5f5f5;       // 表面层
-$line: #000000;          // 边框线
+// 颜色值由 global.scss 的 CSS 自定义属性提供，因而能在运行时切换浅色/深色
+// 黑白编辑主题；Sass 变量仅保留给现有组件样式使用。
+$bg: var(--color-bg);            // 背景
+$ink: var(--color-ink);          // 主文本
+$ink-soft: var(--color-ink-soft); // 辅助文本（柔和）
+$ink-faint: var(--color-ink-faint); // 辅助文本（微弱）
+$surface: var(--color-surface);  // 表面层
+$line: var(--color-line);        // 边框线
 
 $border: 1px solid $line;
-$border-soft: 1px solid rgba(0, 0, 0, 0.6);
-$border-faint: 1px solid rgba(0, 0, 0, 0.4);
+$border-soft: 1px solid var(--color-line-soft);
+$border-faint: 1px solid var(--color-line-faint);
 
 // ---------- 字体 ----------
 // 中文标题：Noto Serif SC（衬线，人文优雅）
@@ -34,7 +36,7 @@ $duration-fast: 0.3s;
 $duration-slow: 0.9s;
 
 // 悬浮反馈阴影（纯黑低透明度）
-$shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.08);
+$shadow-hover: var(--shadow-hover);
 
 // ---------- 排版 ----------
 $section-pad: 8rem;          // 区块留白起步
@@ -61,7 +63,7 @@ $primary-color-pressed: $ink;
 
 $dark-bg: $bg;
 $dark-card: $surface;
-$dark-border: rgba(0, 0, 0, 0.4);
+$dark-border: var(--color-line-faint);
 
 $light-bg: $bg;
 $light-card: $bg;

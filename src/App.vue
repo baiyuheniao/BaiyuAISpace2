@@ -6,22 +6,21 @@
   App.vue - 应用根组件
 
   功能说明:
-  - 应用全局配置 (NaiveUI 黑白主题覆盖)
+  - 应用全局配置（NaiveUI 浅色/深色黑白主题覆盖）
   - 布局组件加载
   - 初始化设置 (API 密钥加载)
 
   设计说明:
-  - 全应用采用黑白编辑设计系统: 白底 #FFFFFF / 黑字 #000000 / 直角 / 1px 黑边框
-  - 不再提供深色主题 (纯黑白系统只有一种形态)
-  - NaiveUI 组件通过 themeOverrides 统一映射到黑白色板
+  - 全应用采用黑白编辑设计系统：浅色/深色均保持灰阶、直角和细线边框
+  - NaiveUI 组件通过 themeOverrides 统一映射到对应色板
 -->
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 
 // 导入 NaiveUI 组件和类型
-import { type GlobalThemeOverrides, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider, zhCN, dateZhCN } from "naive-ui";
+import { darkTheme, type GlobalThemeOverrides, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider, zhCN, dateZhCN } from "naive-ui";
 
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
@@ -33,8 +32,11 @@ import Layout from "@/components/Layout.vue";
 
 const fontSans = '"Inter Variable", "Inter", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
-// 黑白编辑设计系统: 所有语义色一律折叠进黑-灰阶
-const themeOverrides: GlobalThemeOverrides = {
+// 设置 Store
+const settings = useSettingsStore();
+
+// 浅色黑白编辑设计系统：所有语义色一律折叠进黑-灰阶。
+const lightThemeOverrides: GlobalThemeOverrides = {
   common: {
     fontFamily: fontSans,
     fontWeight: "400",
@@ -186,15 +188,117 @@ const themeOverrides: GlobalThemeOverrides = {
   },
 };
 
-// ============ 响应式数据 ============
+// 深色版本沿用相同的灰阶、直角和交互反色，只替换阅读底色与线框明度。
+const darkThemeOverrides: GlobalThemeOverrides = {
+  common: {
+    fontFamily: fontSans,
+    fontWeight: "400",
+    fontWeightStrong: "600",
+    cubicBezierEaseInOut: "cubic-bezier(0.22, 1, 0.36, 1)",
+    cubicBezierEaseOut: "cubic-bezier(0.22, 1, 0.36, 1)",
+    cubicBezierEaseIn: "cubic-bezier(0.22, 1, 0.36, 1)",
+    borderRadius: "0",
+    borderRadiusSmall: "0",
+    primaryColor: "#f5f5f5",
+    primaryColorHover: "#c7c7c7",
+    primaryColorPressed: "#f5f5f5",
+    primaryColorSuppl: "#c7c7c7",
+    infoColor: "#c7c7c7",
+    infoColorHover: "#f5f5f5",
+    infoColorPressed: "#f5f5f5",
+    infoColorSuppl: "#969696",
+    successColor: "#f5f5f5",
+    successColorHover: "#c7c7c7",
+    successColorPressed: "#f5f5f5",
+    successColorSuppl: "#c7c7c7",
+    warningColor: "#c7c7c7",
+    warningColorHover: "#f5f5f5",
+    warningColorPressed: "#f5f5f5",
+    warningColorSuppl: "#969696",
+    errorColor: "#f5f5f5",
+    errorColorHover: "#c7c7c7",
+    errorColorPressed: "#f5f5f5",
+    errorColorSuppl: "#c7c7c7",
+    textColorBase: "#f5f5f5",
+    textColor1: "#f5f5f5",
+    textColor2: "#c7c7c7",
+    textColor3: "#969696",
+    textColorDisabled: "#969696",
+    placeholderColor: "#969696",
+    placeholderColorDisabled: "#696969",
+    iconColor: "#c7c7c7",
+    iconColorHover: "#f5f5f5",
+    iconColorPressed: "#f5f5f5",
+    baseColor: "#111111",
+    bodyColor: "#111111",
+    cardColor: "#111111",
+    modalColor: "#111111",
+    popoverColor: "#111111",
+    tableColor: "#111111",
+    tableHeaderColor: "#1d1d1d",
+    inputColor: "#111111",
+    actionColor: "#1d1d1d",
+    hoverColor: "#252525",
+    pressedColor: "#303030",
+    tableColorHover: "#1d1d1d",
+    tableColorStriped: "#1d1d1d",
+    buttonColor2: "#1d1d1d",
+    buttonColor2Hover: "#303030",
+    buttonColor2Pressed: "#3a3a3a",
+    tagColor: "#1d1d1d",
+    avatarColor: "#1d1d1d",
+    codeColor: "#1d1d1d",
+    borderColor: "#f5f5f5",
+    dividerColor: "rgba(245, 245, 245, 0.4)",
+    boxShadow1: "0 4px 16px rgba(0, 0, 0, 0.2)",
+    boxShadow2: "0 20px 60px rgba(0, 0, 0, 0.32)",
+    boxShadow3: "0 24px 72px rgba(0, 0, 0, 0.42)",
+  },
+  Button: {
+    colorPrimary: "#f5f5f5",
+    textColorPrimary: "#111111",
+    colorHoverPrimary: "#111111",
+    textColorHoverPrimary: "#f5f5f5",
+    borderHoverPrimary: "1px solid #f5f5f5",
+    colorPressedPrimary: "#f5f5f5",
+    textColorPressedPrimary: "#111111",
+    borderPressedPrimary: "1px solid #f5f5f5",
+    colorFocusPrimary: "#f5f5f5",
+    textColorFocusPrimary: "#111111",
+    borderFocusPrimary: "1px solid #f5f5f5",
+    color: "#111111",
+    textColor: "#f5f5f5",
+    border: "1px solid #f5f5f5",
+    colorHover: "#f5f5f5",
+    textColorHover: "#111111",
+    borderHover: "1px solid #f5f5f5",
+    colorPressed: "#f5f5f5",
+    textColorPressed: "#111111",
+    borderPressed: "1px solid #f5f5f5",
+    textColorFocus: "#f5f5f5",
+    borderFocus: "1px solid #f5f5f5",
+  },
+  Card: { borderColor: "rgba(245, 245, 245, 0.8)", borderRadius: "0" },
+  Input: { borderHover: "1px solid #f5f5f5", borderFocus: "1px solid #f5f5f5", boxShadowFocus: "0 0 0 1px #f5f5f5" },
+  Menu: {
+    itemTextColor: "#c7c7c7", itemTextColorHover: "#f5f5f5", itemTextColorActive: "#f5f5f5", itemTextColorActiveHover: "#f5f5f5",
+    itemIconColor: "#c7c7c7", itemIconColorHover: "#f5f5f5", itemIconColorActive: "#f5f5f5", itemIconColorActiveHover: "#f5f5f5",
+    itemColorActive: "#1d1d1d", itemColorActiveHover: "#1d1d1d", borderRadius: "0",
+  },
+  Tag: { borderRadius: "0", border: "1px solid rgba(245, 245, 245, 0.6)" },
+  Switch: { railColorActive: "#f5f5f5", boxShadowFocus: "0 0 0 1px rgba(245, 245, 245, 0.3)" },
+  Tabs: { tabTextColorLine: "#969696", tabTextColorActiveLine: "#f5f5f5", tabTextColorHoverLine: "#f5f5f5", barColor: "#f5f5f5" },
+  Dialog: { borderRadius: "0" },
+  Modal: { borderRadius: "0" },
+};
 
-// 设置 Store
-const settings = useSettingsStore();
+const themeOverrides = computed(() => settings.isDark ? darkThemeOverrides : lightThemeOverrides);
 
 // ============ 生命周期钩子 ============
 
 // 组件挂载时的初始化
 onMounted(async () => {
+  settings.initTheme();
   // 持久化插件完成状态还原后，先应用用户选择的基础字号。
   settings.applyFontSize();
   // 从安全存储加载所有 API 密钥
@@ -213,6 +317,7 @@ onMounted(async () => {
 
 <template>
   <n-config-provider
+    :theme="settings.isDark ? darkTheme : undefined"
     :theme-overrides="themeOverrides"
     :locale="zhCN"
     :date-locale="dateZhCN"
