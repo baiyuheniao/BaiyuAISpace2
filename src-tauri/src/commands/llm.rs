@@ -135,8 +135,9 @@ pub struct SendMessageRequest {
     /// "missing field `apiKey`" 拒收整个请求，本地模型重启后就全用不了。
     /// 空串对本地 provider 本来就是合法值（不鉴权），对其他 provider 则会
     /// 走 get_api_key 的 keyring 兜底查找。
+    /// 仅传递配置 ID；明文密钥只由 Rust 从系统 keyring 读取。
     #[serde(default)]
-    pub api_key: String,
+    pub api_config_id: String,
     /// API 基础 URL
     pub base_url: String,
     /// 是否启用 MCP
@@ -1348,6 +1349,7 @@ pub async fn stream_message(
                                             std::mem::take(&mut tool_call_acc),
                                             request.max_tokens,
                                             &file_rules,
+                                            &api_key,
                                         )
                                         .await;
                                     }
@@ -1374,6 +1376,7 @@ pub async fn stream_message(
                             std::mem::take(&mut tool_call_acc),
                             request.max_tokens,
                             &file_rules,
+                            &api_key,
                         )
                         .await;
                     }
@@ -1596,6 +1599,7 @@ async fn finalize_turn(
     tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall>,
     max_tokens: Option<u32>,
     file_rules: &[FileAccessRule],
+    api_key: &str,
 ) -> Result<(), LLMError> {
     let tool_calls: Vec<ToolCall> = tool_call_acc
         .into_values()
@@ -1629,7 +1633,7 @@ async fn finalize_turn(
             match continue_after_tool_calls(
                 &request.provider,
                 &request.model,
-                &request.api_key,
+                api_key,
                 &request.base_url,
                 effective_messages,
                 &rounds,
@@ -1665,7 +1669,7 @@ async fn finalize_turn(
                     if round == max_tool_rounds - 1 {
                         log::warn!("Tool-call round limit ({}) reached; requesting a final answer without tools", max_tool_rounds);
                         match continue_after_tool_calls(
-                            &request.provider, &request.model, &request.api_key, &request.base_url,
+                            &request.provider, &request.model, api_key, &request.base_url,
                             effective_messages, &rounds, mcp_tools, all_skills, max_tokens,
                             request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
                             request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS), true,
@@ -2568,19 +2572,16 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
     if request.provider == "local" {
         return Ok(String::new());
     }
-    if !request.api_key.is_empty() {
-        return Ok(request.api_key.clone());
-    }
     // 没有传 api_key —— 退回到以 provider 为键的系统 keyring 查找。
     // 前端调用 save_api_key(provider, key) 时，keyring 里的标签就是
     // "api_keys_{provider}"。这样一来，只要密钥已经存在 keyring 里，
     // 调用方就可以逐步不再在 IPC 请求里嵌入明文密钥。
-    if !request.provider.is_empty() {
-        let label = format!("api_keys_{}", request.provider);
+    if !request.api_config_id.is_empty() {
+        let label = format!("api_keys_{}", request.api_config_id);
         if let Ok(entry) = KeyringEntry::new("BaiyuAISpace", &label) {
             if let Ok(key) = entry.get_password() {
                 if !key.is_empty() {
-                    log::info!("[LLM] api_key resolved from keyring ({})", label);
+                    log::info!("[LLM] API key resolved from keyring for configured provider");
                     return Ok(key);
                 }
             }

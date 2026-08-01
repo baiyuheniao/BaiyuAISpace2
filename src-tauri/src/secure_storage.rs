@@ -72,7 +72,6 @@ pub fn save_api_key(provider: String, api_key: String) -> Result<(), SecureStora
 /// 
 /// # 返回
 /// 找到则返回 `Some(api_key)`，未找到则返回 `None`
-#[tauri::command]
 pub fn get_api_key(provider: String) -> Result<Option<String>, SecureStorageError> {
     let entry = Entry::new(APP_NAME, &format!("{}_{}", SERVICE_NAME, provider))
         .map_err(|e| SecureStorageError::KeyringError(e.to_string()))?;

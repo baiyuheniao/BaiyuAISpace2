@@ -297,6 +297,7 @@ export const useSettingsStore = defineStore(
     const fileReadLimitMb = ref(1);
     const fileListLimit = ref(800);
     const fileSearchLimit = ref(100);
+    const allowLocalNetworkFetch = ref(false);
 
     // ============ API 配置状态 ============
     
@@ -386,7 +387,7 @@ export const useSettingsStore = defineStore(
         provider,
         baseUrl: customBaseUrl || preset?.baseUrl || "",
         model,
-        apiKey,
+        apiKey: "",
         maxTokens,
         createdAt: Date.now(),
       };
@@ -416,7 +417,7 @@ export const useSettingsStore = defineStore(
         if (apiKey !== config.apiKey) {
           saveApiKeyToSecureStorage(configId, apiKey);
         }
-        apiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+        apiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey: "" };
       } else {
         apiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
@@ -455,7 +456,7 @@ export const useSettingsStore = defineStore(
         provider,
         baseUrl: customBaseUrl || preset?.baseUrl || "",
         model,
-        apiKey,
+        apiKey: "",
         createdAt: Date.now(),
       };
       embeddingApiConfigs.value.push(config);
@@ -483,7 +484,7 @@ export const useSettingsStore = defineStore(
         if (apiKey !== config.apiKey) {
           saveApiKeyToSecureStorage(`emb_${configId}`, apiKey);
         }
-        embeddingApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+        embeddingApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey: "" };
       } else {
         embeddingApiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
@@ -522,7 +523,7 @@ export const useSettingsStore = defineStore(
         provider,
         baseUrl: customBaseUrl || preset?.baseUrl || "",
         model,
-        apiKey,
+        apiKey: "",
         createdAt: Date.now(),
       };
       rerankerApiConfigs.value.push(config);
@@ -542,7 +543,7 @@ export const useSettingsStore = defineStore(
         if (apiKey !== config.apiKey) {
           saveApiKeyToSecureStorage(`reranker_${configId}`, apiKey);
         }
-        rerankerApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey };
+        rerankerApiConfigs.value[idx] = { ...config, ...safeUpdates, apiKey: "" };
       } else {
         rerankerApiConfigs.value[idx] = { ...config, ...safeUpdates };
       }
@@ -616,7 +617,7 @@ export const useSettingsStore = defineStore(
     };
 
     // 加载所有 API 密钥
-    const loadAllApiKeys = async () => {
+    const _loadAllApiKeys = async () => {
       await Promise.all([
         Promise.all(apiConfigs.value.map((config) => loadApiKeyForConfig(config.id))),
         loadAllEmbeddingApiKeys(),
@@ -647,6 +648,9 @@ export const useSettingsStore = defineStore(
       return PRESET_PROVIDERS[provider]?.baseUrl || "";
     };
 
+    // 旧版本的迁移辅助函数不再对外暴露；保留在本地直到下个存储结构迁移周期。
+    void _loadAllApiKeys;
+
     return {
       darkMode,
       toggleTheme,
@@ -676,6 +680,7 @@ export const useSettingsStore = defineStore(
       fileReadLimitMb,
       fileListLimit,
       fileSearchLimit,
+      allowLocalNetworkFetch,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -685,7 +690,6 @@ export const useSettingsStore = defineStore(
       updateApiConfig,
       deleteApiConfig,
       setActiveConfig,
-      loadAllApiKeys,
       getDefaultBaseUrl,
       // Embedding API configs
       embeddingApiConfigs,
@@ -696,22 +700,18 @@ export const useSettingsStore = defineStore(
       updateEmbeddingApiConfig,
       deleteEmbeddingApiConfig,
       setActiveEmbeddingApiConfig,
-      loadEmbeddingApiKeyForConfig,
-      loadAllEmbeddingApiKeys,
       // Reranker API configs
       rerankerApiConfigs,
       rerankerApiConfigOptions,
       createRerankerApiConfig,
       updateRerankerApiConfig,
       deleteRerankerApiConfig,
-      loadRerankerApiKeyForConfig,
-      loadAllRerankerApiKeys,
     };
   },
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

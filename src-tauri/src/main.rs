@@ -34,7 +34,7 @@ mod workspace_smoke_test;
 // 引入类型和函数
 use commands::llm::{ChatMessage, ChatSession};
 use db::{Database, DbState};
-use secure_storage::{delete_api_key, get_api_key, save_api_key};
+use secure_storage::{delete_api_key, save_api_key};
 use knowledge_base::commands::{KbState, init_knowledge_base};
 use workspace::commands::{
     WorkspaceState, PendingProposals, PendingSleepRequests, PendingRoundsRequests, PendingQuestions, PendingToolApprovals,
@@ -347,7 +347,6 @@ fn main() {
             clear_database_cmd,
             // 安全存储相关命令
             save_api_key,
-            get_api_key,
             delete_api_key,
             // 知识库相关命令
             knowledge_base::commands::create_knowledge_base,
@@ -365,6 +364,7 @@ fn main() {
             commands::mcp::get_mcp_tools,
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
+            commands::mcp::set_builtin_fetch_allow_local_network,
             commands::mcp::test_mcp_connection,
             // Agent 配置迁移中心：只解析用户明确选择的文件，导入的 MCP 默认禁用
             commands::importer::preview_agent_import,

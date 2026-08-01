@@ -583,14 +583,6 @@ export const useChatStore = defineStore("chat", () => {
       currentSession.value.model = config.model;
     }
 
-    // 检查 API 密钥是否已加载
-    // Local models don't require API keys
-    if (config.provider !== "local" && !config.apiKey) {
-      console.error("API key not loaded for config:", config.id);
-      alert("API 密钥未加载，请重启应用或重新设置");
-      return null;
-    }
-
     return config;
   };
 
@@ -670,10 +662,8 @@ export const useChatStore = defineStore("chat", () => {
         messages: apiMessages,
         provider: config.provider,
         model: config.model,
-        // 持久化会剥掉 apiKey，重启后 keyring 里没有条目的配置（本地模型）读到
-        // 的是 undefined——必须兜底成空串，否则 invoke 参数反序列化直接报
-        // "missing field apiKey"。空串对后端是合法值（本地免鉴权/keyring 兜底）。
-        apiKey: config.apiKey ?? "",
+        // 密钥不离开前端进程：后端按配置 ID 从系统 keyring 取用。
+        apiConfigId: config.id,
         baseUrl: config.baseUrl,
         enableMcp: mcpEnabled.value,
         activeSkillIds: activeSkillIds.value,
@@ -688,10 +678,6 @@ export const useChatStore = defineStore("chat", () => {
       };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
-      const maskedApiKey = requestPayload.apiKey
-        ? String(requestPayload.apiKey).replace(/.(?=.{4})/g, '*')
-        : null;
-
       if (import.meta.env.DEV) {
         console.debug('STREAM_REQUEST (masked):', {
         sessionId: requestPayload.sessionId,
@@ -699,7 +685,7 @@ export const useChatStore = defineStore("chat", () => {
         model: requestPayload.model,
         baseUrl: requestPayload.baseUrl,
         enableMcp: requestPayload.enableMcp,
-        apiKey: maskedApiKey,
+        apiConfigId: requestPayload.apiConfigId,
         messagesCount: requestPayload.messages?.length ?? 0,
         });
       }

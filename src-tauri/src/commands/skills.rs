@@ -18,7 +18,7 @@
 //!   (`skill__<id>`)，模型根据 name/description 自行判断要不要调用
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use uuid::Uuid;
@@ -65,11 +65,36 @@ pub struct Skill {
 
 /// Skill 资源文件存放目录: app_data/skills/<skill_id>/resources/
 pub fn skill_resources_dir(app_handle: &AppHandle, skill_id: &str) -> Result<PathBuf, SkillError> {
+    validate_skill_id(skill_id)?;
     let app_data_dir = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| { log::error!("获取应用数据目录失败（详情：{}）", e); SkillError::FileError("获取应用数据目录失败，请重启应用后重试".to_string()) })?;
     Ok(app_data_dir.join("skills").join(skill_id).join("resources"))
+}
+
+/// Skill ID 只允许由本应用生成的 UUID，防止它被当作路径组件使用。
+fn validate_skill_id(skill_id: &str) -> Result<(), SkillError> {
+    Uuid::parse_str(skill_id)
+        .map(|_| ())
+        .map_err(|_| SkillError::InvalidConfig("Skill 标识无效".to_string()))
+}
+
+/// 资源名只能是一个普通文件名，不能借助绝对路径、`..` 或分隔符逃出资源目录。
+fn validate_resource_filename(filename: &str) -> Result<(), SkillError> {
+    let path = Path::new(filename);
+    let is_single_normal_component = path.components().count() == 1
+        && path.file_name().and_then(|name| name.to_str()) == Some(filename);
+    if filename.is_empty()
+        || !is_single_normal_component
+        || path.is_absolute()
+        || filename.contains(['/', '\\'])
+        || filename == "."
+        || filename == ".."
+    {
+        return Err(SkillError::InvalidConfig("资源文件名无效".to_string()));
+    }
+    Ok(())
 }
 
 /// 读取某个 Skill 资源文件的文本内容
@@ -129,6 +154,17 @@ pub async fn delete_skill(
     skill_id: String,
     app_handle: AppHandle,
 ) -> Result<(), SkillError> {
+    validate_skill_id(&skill_id)?;
+    {
+        let db = state.0.lock().await;
+        if !db.get_skills()
+            .map_err(|e| SkillError::DatabaseError(e.to_string()))?
+            .iter()
+            .any(|skill| skill.id == skill_id)
+        {
+            return Err(SkillError::NotFound(skill_id));
+        }
+    }
     let db = state.0.lock().await;
     db.delete_skill(&skill_id)
         .map_err(|e| { log::error!("删除 Skill 失败（详情：{}）", e); SkillError::DatabaseError("删除 Skill 失败，请重试".to_string()) })?;
@@ -164,6 +200,7 @@ pub async fn add_skill_resource_file(
         .and_then(|n| n.to_str())
         .ok_or_else(|| SkillError::FileError("文件路径无效，请重新选择文件".to_string()))?
         .to_string();
+    validate_resource_filename(&filename)?;
 
     let dest = dir.join(&filename);
     tokio::fs::copy(&source, &dest)
@@ -198,6 +235,7 @@ pub async fn remove_skill_resource_file(
     filename: String,
     app_handle: AppHandle,
 ) -> Result<Skill, SkillError> {
+    validate_resource_filename(&filename)?;
     let dir = skill_resources_dir(&app_handle, &skill_id)?;
     let path = dir.join(&filename);
     let _ = tokio::fs::remove_file(&path).await;
@@ -227,6 +265,7 @@ pub async fn read_skill_resource_file(
     filename: String,
     app_handle: AppHandle,
 ) -> Result<String, SkillError> {
+    validate_resource_filename(&filename)?;
     read_skill_resource_text(&app_handle, &skill_id, &filename)
         .await
         .ok_or_else(|| SkillError::FileError(format!("无法读取文件（可能不是文本文件）: {}", filename)))

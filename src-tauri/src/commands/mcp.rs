@@ -21,8 +21,10 @@ use crate::commands::constants::{MCP_HTTP_TIMEOUT, MCP_STDIO_TIMEOUT, MCP_TOOL_C
 use crate::db::DbState;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -43,6 +45,42 @@ use uuid::Uuid;
 static MCP_TOOLS_CACHE: Lazy<Mutex<HashMap<String, (Vec<MCPTool>, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 const MCP_TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
+static BUILTIN_FETCH_ALLOW_LOCAL_NETWORK: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn set_builtin_fetch_allow_local_network(enabled: bool) {
+    BUILTIN_FETCH_ALLOW_LOCAL_NETWORK.store(enabled, Ordering::Relaxed);
+}
+
+fn is_local_or_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
+}
+
+async fn is_local_or_private_fetch_target(url: &str) -> Result<bool, MCPError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| MCPError::InvalidConfig("网页地址无效".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(MCPError::InvalidConfig("网页抓取仅支持 HTTP 或 HTTPS 地址".to_string()));
+    }
+    let host = parsed.host_str().ok_or_else(|| MCPError::InvalidConfig("网页地址缺少主机名".to_string()))?.to_string();
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Ok(true);
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(is_local_or_private_ip(ip));
+    }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| MCPError::CommunicationError("无法解析网页地址的主机名".to_string()))?;
+    let resolves_to_private_address = resolved
+        .into_iter()
+        .any(|address| is_local_or_private_ip(address.ip()));
+    Ok(resolves_to_private_address)
+}
 
 /// MCP 错误类型
 #[derive(Error, Debug)]
@@ -912,7 +950,17 @@ async fn builtin_fetch_url(input: serde_json::Value) -> Result<serde_json::Value
         .and_then(|v| v.as_str())
         .ok_or_else(|| MCPError::InvalidConfig("fetch_url requires a 'url' string".to_string()))?;
 
-    let client = reqwest::Client::new();
+    if !BUILTIN_FETCH_ALLOW_LOCAL_NETWORK.load(Ordering::Relaxed)
+        && is_local_or_private_fetch_target(url).await?
+    {
+        return Err(MCPError::CommunicationError("已阻止本机或内网网页抓取。若这是你信任的开发服务，请在设置中开启“允许抓取本机与内网地址”后重试。".to_string()));
+    }
+
+    // 禁止自动跳转，避免公网 URL 在 30x 后落入本机或内网地址。
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| MCPError::CommunicationError(format!("创建网页抓取客户端失败: {}", e)))?;
     let response = tokio::time::timeout(
         MCP_HTTP_TIMEOUT,
         client.get(url).header("User-Agent", BUILTIN_USER_AGENT).send(),

@@ -198,7 +198,6 @@ onMounted(async () => {
   // 持久化插件完成状态还原后，先应用用户选择的基础字号。
   settings.applyFontSize();
   // 从安全存储加载所有 API 密钥
-  await settings.loadAllApiKeys();
   // 加载后重新写入 localStorage：若 secure storage 里的值和已持久化的旧值恰好
   // 相同（例如老版本遗留的明文 apiKey），Vue 不会判定为变更、也就不会触发
   // persist 中间件重新序列化 —— 显式调用一次 $persist() 强制用新版

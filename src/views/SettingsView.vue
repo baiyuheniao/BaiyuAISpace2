@@ -1320,6 +1320,16 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
           <div class="general-setting-item">
             <div class="general-setting-text">
+              <span class="general-setting-label">允许抓取本机与内网地址</span>
+              <n-text depth="3" style="font-size: 12px;">
+                默认关闭，用于防止网页抓取被诱导访问本机或局域网服务。仅在你需要调试自己信任的开发服务时开启。
+              </n-text>
+            </div>
+            <n-switch v-model:value="settings.allowLocalNetworkFetch" />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
               <span class="general-setting-label">显示侧边栏内部框线</span>
               <n-text
                 depth="3"

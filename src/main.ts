@@ -13,7 +13,9 @@
  * - 挂载应用到 DOM
  */
 
-import { createApp, type Directive } from "vue";
+import { createApp, type Directive, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { useSettingsStore } from "./stores/settings";
 import { createPinia } from "pinia";
 import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
@@ -106,6 +108,12 @@ const app = createApp(App);
 
 // 注册 Pinia 状态管理
 app.use(pinia);
+const settings = useSettingsStore();
+watch(
+  () => settings.allowLocalNetworkFetch,
+  (enabled) => void invoke("set_builtin_fetch_allow_local_network", { enabled }),
+  { immediate: true },
+);
 
 // 注册路由
 app.use(router);
