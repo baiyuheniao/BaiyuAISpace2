@@ -6,6 +6,8 @@ import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 
+export type ThemeMode = "light" | "dark" | "system";
+
 /**
  * 设置 Store - 管理应用全局设置
  * 
@@ -166,29 +168,27 @@ export const useSettingsStore = defineStore(
   "settings",
   () => {
     // ============ 主题相关状态 ============
-    
-    // 深色模式开关
-    const darkMode = ref(true);
-    
-    // 切换深色/浅色主题
-    const toggleTheme = () => {
-      darkMode.value = !darkMode.value;
+    const themeMode = ref<ThemeMode>("system");
+    const isDark = ref(false);
+    let systemThemeQuery: MediaQueryList | undefined;
+
+    const applyTheme = () => {
+      const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      isDark.value = themeMode.value === "dark" || (themeMode.value === "system" && systemPrefersDark);
+      document.documentElement.classList.toggle("dark", isDark.value);
+    };
+
+    const setThemeMode = (mode: ThemeMode) => {
+      themeMode.value = mode;
       applyTheme();
     };
 
-    // 初始化主题设置
     const initTheme = () => {
       applyTheme();
-    };
-
-    // 应用主题到 HTML 元素
-    const applyTheme = () => {
-      const html = document.documentElement;
-      if (darkMode.value) {
-        html.classList.add("dark");
-      } else {
-        html.classList.remove("dark");
-      }
+      systemThemeQuery ??= window.matchMedia("(prefers-color-scheme: dark)");
+      systemThemeQuery.addEventListener("change", () => {
+        if (themeMode.value === "system") applyTheme();
+      });
     };
 
     // ============ 系统托盘相关状态 ============
@@ -652,8 +652,9 @@ export const useSettingsStore = defineStore(
     void _loadAllApiKeys;
 
     return {
-      darkMode,
-      toggleTheme,
+      themeMode,
+      isDark,
+      setThemeMode,
       initTheme,
       syncErrorNotices,
       closeToTray,
@@ -711,7 +712,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["darkMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["themeMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

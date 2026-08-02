@@ -570,7 +570,7 @@ onBeforeUnmount(() => {
   width: 28px;
   height: 28px;
   flex-shrink: 0;
-  border: 1px solid rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--color-line-faint);
   border-radius: 50%;
 
   &::after {

@@ -696,7 +696,7 @@ const getDocDisplayName = (name: string): string => {
                 <n-badge
                   v-if="chat.mcpEnabled && availableMcpToolsCount > 0"
                   :value="availableMcpToolsCount"
-                  color="#000000"
+                  color="var(--color-ink)"
                 >
                   <n-icon><Cube /></n-icon>
                 </n-badge>
@@ -730,7 +730,7 @@ const getDocDisplayName = (name: string): string => {
                 <n-badge
                   v-if="chat.ragEnabled"
                   dot
-                  color="#000000"
+                  color="var(--color-ink)"
                 >
                   <n-icon><Library /></n-icon>
                 </n-badge>
@@ -761,7 +761,7 @@ const getDocDisplayName = (name: string): string => {
                 <n-badge
                   v-if="activeSkillNames.length > 0"
                   :value="activeSkillNames.length"
-                  color="#000000"
+                  color="var(--color-ink)"
                 >
                   <n-icon><ExtensionPuzzleOutline /></n-icon>
                 </n-badge>
@@ -1071,7 +1071,7 @@ const getDocDisplayName = (name: string): string => {
           >
             <n-icon
               :size="14"
-              color="#000000"
+              color="var(--color-ink)"
             >
               <Library />
             </n-icon>
@@ -1208,7 +1208,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .mcp-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-surface);
 }
 
 .skill-indicator {
@@ -1220,7 +1220,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .skill-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-surface);
 }
 
 .input-container {
@@ -1320,7 +1320,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .rag-btn:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-surface);
 }
 
 .send-btn {
@@ -1457,7 +1457,7 @@ const getDocDisplayName = (name: string): string => {
 }
 
 .file-btn:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--color-surface);
 }
 
 :global(.input-tooltip.n-popover) {

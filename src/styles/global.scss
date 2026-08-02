@@ -6,6 +6,33 @@
 // 全局样式 · 黑白编辑设计系统
 // ============================================================
 
+// 浅色与深色均维持黑白编辑体系：无彩色、直角、以细线而非投影区分层次。
+:root {
+  color-scheme: light;
+  --color-bg: #ffffff;
+  --color-ink: #000000;
+  --color-ink-soft: #444444;
+  --color-ink-faint: #888888;
+  --color-surface: #f5f5f5;
+  --color-line: #000000;
+  --color-line-soft: rgba(0, 0, 0, 0.6);
+  --color-line-faint: rgba(0, 0, 0, 0.4);
+  --shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.08);
+}
+
+html.dark {
+  color-scheme: dark;
+  --color-bg: #111111;
+  --color-ink: #f5f5f5;
+  --color-ink-soft: #c7c7c7;
+  --color-ink-faint: #969696;
+  --color-surface: #1d1d1d;
+  --color-line: #f5f5f5;
+  --color-line-soft: rgba(245, 245, 245, 0.6);
+  --color-line-faint: rgba(245, 245, 245, 0.4);
+  --shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.32);
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -60,7 +87,7 @@ h6 {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--color-line-faint);
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -121,16 +148,16 @@ h6 {
 
 // 嵌套方框：多层边框由外向内渐淡
 .nested-frame {
-  border: 1px solid rgba(0, 0, 0, 0.8);
+  border: 1px solid var(--color-line-soft);
   padding: 0.5rem;
 
   > .nested-frame-inner {
-    border: 1px solid rgba(0, 0, 0, 0.5);
+    border: 1px solid var(--color-line-faint);
     padding: 0.5rem;
     height: 100%;
 
     > .nested-frame-core {
-      border: 1px solid rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--color-line-faint);
       height: 100%;
     }
   }
@@ -178,7 +205,7 @@ h6 {
     content: "";
     position: absolute;
     inset: -14px;
-    border: 1px solid rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--color-line-faint);
     animation: spin-slow 60s linear infinite;
   }
 }
@@ -284,7 +311,7 @@ h6 {
 pre {
   margin: 12px 0;
   overflow-x: auto;
-  border: 1px solid rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--color-line-faint);
 }
 
 code {
@@ -337,7 +364,7 @@ code {
 
     th,
     td {
-      border: 1px solid rgba(0, 0, 0, 0.6);
+      border: 1px solid var(--color-line-soft);
       padding: 8px 12px;
       text-align: left;
     }

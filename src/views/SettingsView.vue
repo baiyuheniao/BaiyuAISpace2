@@ -61,7 +61,8 @@ import {
   type RerankerApiConfig,
   type ErrorSoundLevel,
   type StartupWindowMode,
-  type FontSize
+  type FontSize,
+  type ThemeMode
 } from "@/stores/settings";
 import {
   KeyOutline,
@@ -105,6 +106,18 @@ const fontSizeOptions: Array<{ label: string; value: FontSize }> = [
   { label: "标准", value: "medium" },
   { label: "大", value: "large" },
 ];
+
+const themeModeOptions: Array<{ label: string; value: ThemeMode }> = [
+  { label: "跟随系统", value: "system" },
+  { label: "浅色", value: "light" },
+  { label: "深色", value: "dark" },
+];
+
+const handleThemeModeChange = (value: string) => {
+  if (value === "light" || value === "dark" || value === "system") {
+    settings.setThemeMode(value);
+  }
+};
 
 const handleFontSizeChange = (value: string) => {
   if (value === "small" || value === "medium" || value === "large") {
@@ -1257,6 +1270,22 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
           <div class="general-setting-item">
             <div class="general-setting-text">
+              <span class="general-setting-label">显示模式</span>
+              <n-text depth="3" style="font-size: 12px;">
+                深色模式沿用黑白编辑风格；选择“跟随系统”会在系统外观变化时自动切换。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.themeMode"
+              :options="themeModeOptions"
+              placeholder="请选择显示模式"
+              style="width: 180px;"
+              @update:value="handleThemeModeChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
               <span class="general-setting-label">关闭窗口时最小化到系统托盘</span>
               <n-text
                 depth="3"
@@ -1807,7 +1836,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             <n-text
               v-if="formData.provider === 'baidu'"
               depth="2"
-              style="font-size: 12px; color: #444444;"
+              style="font-size: 12px; color: var(--color-ink-soft);"
             >
               百度千帆需要 access_token，而非 API Key。请在
               <n-a
@@ -2275,7 +2304,7 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 .general-setting-item + .general-setting-item {
   margin-top: 20px;
   padding-top: 20px;
-  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  border-top: 1px solid var(--color-line-faint);
 }
 
 .general-setting-item--stack {

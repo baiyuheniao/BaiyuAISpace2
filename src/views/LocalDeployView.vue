@@ -661,7 +661,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="localModel.isOnline ? '#000000' : '#888888'"
+                    :color="localModel.isOnline ? 'var(--color-ink)' : 'var(--color-ink-faint)'"
                   >
                     <HardwareChipOutline />
                   </n-icon>
@@ -1136,7 +1136,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="lmStudio.isOnline ? '#000000' : '#888888'"
+                    :color="lmStudio.isOnline ? 'var(--color-ink)' : 'var(--color-ink-faint)'"
                   >
                     <HardwareChipOutline />
                   </n-icon>
@@ -1434,7 +1434,7 @@ onMounted(async () => {
                 <n-space align="center">
                   <n-icon
                     size="20"
-                    :color="docker.isAvailable ? '#000000' : docker.dockerStatus.installed ? '#444444' : '#888888'"
+                    :color="docker.isAvailable ? 'var(--color-ink)' : docker.dockerStatus.installed ? 'var(--color-ink-soft)' : 'var(--color-ink-faint)'"
                   >
                     <CubeOutline />
                   </n-icon>
@@ -1568,7 +1568,7 @@ onMounted(async () => {
                 <div>
                   正在拉取镜像: {{ docker.pullingImage }}
                   <div
-                    style="margin-top: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 11px; background: #f5f5f5; border: 1px solid rgba(0,0,0,0.2); padding: 6px;"
+                    style="margin-top: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 11px; background: var(--color-surface); border: 1px solid var(--color-line-faint); padding: 6px;"
                   >
                     <div
                       v-for="(line, idx) in docker.pullLogs.slice(-20)"
@@ -1795,7 +1795,7 @@ onMounted(async () => {
   .section-title {
     margin-bottom: 8px;
     padding-bottom: 4px;
-    border-bottom: 1px dashed rgba(0, 0, 0, 0.4);
+    border-bottom: 1px dashed var(--color-line-faint);
   }
 }
 

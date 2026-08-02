@@ -598,7 +598,7 @@ const handleRegenerate = async () => {
   .html-preview-toggle {
     font-size: 12px;
     padding: 3px 10px;
-    border: 1px solid rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--color-line-soft);
     background: transparent;
     color: $ink-soft;
     cursor: pointer;
@@ -631,7 +631,7 @@ const handleRegenerate = async () => {
     width: 100%;
     min-height: 120px;
     border: none;
-    background: #fff;
+    background: var(--color-bg);
   }
 
   /* 切换到预览模式 */
@@ -660,7 +660,7 @@ const handleRegenerate = async () => {
   .mermaid-toggle {
     font-size: 12px;
     padding: 3px 10px;
-    border: 1px solid rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--color-line-soft);
     background: transparent;
     color: $ink-soft;
     cursor: pointer;
@@ -742,7 +742,7 @@ const handleRegenerate = async () => {
 .markdown-content :deep(:not(pre) > code) {
   background: $surface;
   padding: 3px 6px;
-  border: 1px solid rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--color-line-faint);
   color: $ink;
 }
 
@@ -773,7 +773,7 @@ const handleRegenerate = async () => {
 
 .markdown-content :deep(th),
 .markdown-content :deep(td) {
-  border: 1px solid rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--color-line-soft);
   padding: 10px 14px;
   text-align: left;
 }
@@ -851,7 +851,7 @@ const handleRegenerate = async () => {
   min-height: 60px;
   padding: 10px 12px;
   background: $bg;
-  border: 1px solid rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--color-line-soft);
   color: $ink;
   font-family: inherit;
   font-size: 0.95rem;
@@ -877,7 +877,7 @@ const handleRegenerate = async () => {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border: 1px solid rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--color-line-soft);
   background: $bg;
   color: $ink-soft;
   font-size: 0.8rem;
@@ -915,7 +915,7 @@ const handleRegenerate = async () => {
   gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px dashed rgba(0, 0, 0, 0.4);
+  border-top: 1px dashed var(--color-line-faint);
   color: $ink-faint;
   font-size: 13px;
 }
@@ -926,7 +926,7 @@ const handleRegenerate = async () => {
   gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px dashed rgba(0, 0, 0, 0.4);
+  border-top: 1px dashed var(--color-line-faint);
 }
 
 .tool-call-item {
@@ -986,7 +986,7 @@ const handleRegenerate = async () => {
   margin: 0 12px 10px 12px;
   padding: 8px 10px;
   background: $bg;
-  border: 1px solid rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--color-line-faint);
   font-family: $font-mono;
   font-size: 12px;
   color: $ink-soft;
@@ -1032,7 +1032,7 @@ const handleRegenerate = async () => {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--color-line-faint);
   background: $bg;
   color: $ink-soft;
   cursor: pointer;
