@@ -7,7 +7,7 @@
  * 负责管理聊天会话、消息发送、LLM API 调用、流式响应处理等功能
  */
 
-import { ref } from "vue";
+import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -17,8 +17,8 @@ import { classifyError } from "@/utils/errorMessage";
 
 /** 图片附件（base64 编码，不含 data URL 前缀） */
 export interface ImageAttachment {
-  data: string;       // 原始 base64 字符串
-  mediaType: string;  // MIME 类型，如 "image/jpeg"
+  data: string; // 原始 base64 字符串
+  mediaType: string; // MIME 类型，如 "image/jpeg"
 }
 
 /** 视频附件（base64 编码，不含 data URL 前缀，仅 Gemini provider 有效） */
@@ -32,21 +32,22 @@ export interface VideoAttachment {
  * 用于在 UI 层表示聊天消息
  */
 export interface Message {
-  id: string;                    // 消息唯一标识符 (UUID)
-  role: "user" | "assistant" | "system";  // 消息角色: 用户/助手/系统
-  content: string;               // 消息内容
-  timestamp: number;              // 时间戳 (毫秒)
-  streaming?: boolean;            // 是否正在流式输出
-  thinking?: string;              // 思考过程（思考型模型的 reasoning 增量累积，仅内存态、不入库）
-  error?: string;                 // 错误信息 (如果有)
-  files?: Array<{                // 附件文件列表
-    name: string;                 // 文件名
-    size: number;                 // 文件大小 (字节)
+  id: string; // 消息唯一标识符 (UUID)
+  role: "user" | "assistant" | "system"; // 消息角色: 用户/助手/系统
+  content: string; // 消息内容
+  timestamp: number; // 时间戳 (毫秒)
+  streaming?: boolean; // 是否正在流式输出
+  thinking?: string; // 思考过程（思考型模型的 reasoning 增量累积，仅内存态、不入库）
+  error?: string; // 错误信息 (如果有)
+  files?: Array<{
+    // 附件文件列表
+    name: string; // 文件名
+    size: number; // 文件大小 (字节)
   }>;
-  images?: ImageAttachment[];     // 图片附件（已转 base64）
-  videos?: VideoAttachment[];     // 视频附件（已转 base64，仅 Gemini）
-  toolCalls?: ToolCallInfo[];     // 本轮回复中触发的工具调用（按发生顺序）
-  tokenUsage?: TokenUsage;        // 服务端返回的本次交互真实 Token 用量
+  images?: ImageAttachment[]; // 图片附件（已转 base64）
+  videos?: VideoAttachment[]; // 视频附件（已转 base64，仅 Gemini）
+  toolCalls?: ToolCallInfo[]; // 本轮回复中触发的工具调用（按发生顺序）
+  tokenUsage?: TokenUsage; // 服务端返回的本次交互真实 Token 用量
 }
 
 export interface TokenUsage {
@@ -57,11 +58,11 @@ export interface TokenUsage {
 
 /** 单次工具调用的状态信息，用于在消息里展示"正在调用/已完成/失败" */
 export interface ToolCallInfo {
-  callId: string;                  // 工具调用 ID
-  toolName: string;                // 工具名称
-  arguments: string;               // 调用参数（JSON 字符串）
-  status: "calling" | "done" | "error";  // 当前状态
-  result?: string;                 // 调用结果（JSON 字符串，仅 done/error 时有）
+  callId: string; // 工具调用 ID
+  toolName: string; // 工具名称
+  arguments: string; // 调用参数（JSON 字符串）
+  status: "calling" | "done" | "error"; // 当前状态
+  result?: string; // 调用结果（JSON 字符串，仅 done/error 时有）
 }
 
 /**
@@ -71,14 +72,14 @@ export interface ToolCallInfo {
 export interface ChatSession {
   workingDirectory: string | null;
   fileAccessMode: "none" | "read" | "write";
-  id: string;                    // 会话唯一标识符
-  title: string;                 // 会话标题
-  messages: Message[];            // 消息列表
-  createdAt: number;              // 创建时间 (毫秒)
-  updatedAt: number;              // 最后更新时间 (毫秒)
-  apiConfigId: string;           // 关联的 API 配置 ID
-  provider: string;               // LLM 提供商 (如 openai, anthropic)
-  model: string;                  // 模型名称 (如 gpt-4, claude-3)
+  id: string; // 会话唯一标识符
+  title: string; // 会话标题
+  messages: Message[]; // 消息列表
+  createdAt: number; // 创建时间 (毫秒)
+  updatedAt: number; // 最后更新时间 (毫秒)
+  apiConfigId: string; // 关联的 API 配置 ID
+  provider: string; // LLM 提供商 (如 openai, anthropic)
+  model: string; // 模型名称 (如 gpt-4, claude-3)
 }
 
 /**
@@ -86,11 +87,11 @@ export interface ChatSession {
  * 从后端接收的 SSE 事件数据结构
  */
 interface StreamChunk {
-  session_id: string;             // 所属会话 ID
-  message_id: string;             // 消息 ID
-  content: string;                // 增量内容
-  is_thinking?: boolean;          // 是否思考过程增量（归到 thinking 字段而非正文）
-  done: boolean;                  // 是否完成
+  session_id: string; // 所属会话 ID
+  message_id: string; // 消息 ID
+  content: string; // 增量内容
+  is_thinking?: boolean; // 是否思考过程增量（归到 thinking 字段而非正文）
+  done: boolean; // 是否完成
 }
 
 interface TokenUsageEvent {
@@ -104,13 +105,24 @@ interface TokenUsageEvent {
  * 从后端接收的 tool-call-status 事件数据结构
  */
 interface ToolCallEvent {
-  session_id: string;             // 所属会话 ID
-  message_id: string;             // 消息 ID
-  call_id: string;                // 工具调用 ID
-  tool_name: string;               // 工具名称
-  arguments: string;               // 调用参数 (JSON 字符串)
-  status: "calling" | "done" | "error";  // 当前状态
-  result?: string;                 // 调用结果 (JSON 字符串)
+  session_id: string; // 所属会话 ID
+  message_id: string; // 消息 ID
+  call_id: string; // 工具调用 ID
+  tool_name: string; // 工具名称
+  arguments: string; // 调用参数 (JSON 字符串)
+  status: "calling" | "done" | "error"; // 当前状态
+  result?: string; // 调用结果 (JSON 字符串)
+}
+
+/**
+ * 一轮尚未落库的助手回复。后端 message_id 与前端占位消息 ID 不同，
+ * 因此在收到首个事件时把二者绑定；之后无论用户切到哪个页面或会话，
+ * 都只按 session_id/message_id 更新这一条回复。
+ */
+interface InFlightReply {
+  sessionId: string;
+  message: Message;
+  backendMessageId?: string;
 }
 
 /**
@@ -137,7 +149,7 @@ interface DbSession {
   model: string;
   working_directory?: string | null;
   file_access_mode?: "none" | "read" | "write";
-  api_config_id: string;           // API 配置 ID (数据库字段)
+  api_config_id: string; // API 配置 ID (数据库字段)
   created_at: number;
   updated_at: number;
   messages: DbMessage[];
@@ -149,11 +161,11 @@ interface DbSession {
  */
 export const useChatStore = defineStore("chat", () => {
   // 引用其他 Store
-  const settings = useSettingsStore();      // 设置 Store (API 配置)
-  const kbStore = useKnowledgeBaseStore();  // 知识库 Store
+  const settings = useSettingsStore(); // 设置 Store (API 配置)
+  const kbStore = useKnowledgeBaseStore(); // 知识库 Store
 
   // ============ 响应式状态 ============
-  
+
   /** 当前活动的会话 */
   const currentSession = ref<ChatSession | null>(null);
 
@@ -164,16 +176,21 @@ export const useChatStore = defineStore("chat", () => {
   /** 普通 Chat 的终止性错误统一由全局 Layout 弹出，避免依赖当前页面。 */
   const errorNotices = ref<string[]>([]);
   const warningNotices = ref<string[]>([]);
-  
-  /** 是否正在加载/生成回复 */
-  const isLoading = ref(false);
-  
+
+  /** 所有仍在生成的回复，按会话隔离，支持切换会话后后台完成。 */
+  const inFlightReplies = reactive(new Map<string, InFlightReply>());
+
+  /** 当前正在查看的会话是否仍在生成。 */
+  const isLoading = computed(
+    () => !!currentSession.value && inFlightReplies.has(String(currentSession.value.id))
+  );
+
   /** 当前流式输出的完整内容 */
   const currentStreamContent = ref("");
-  
+
   /** 会话列表 (侧边栏显示) */
   const sessions = ref<ChatSession[]>([]);
-  
+
   /** SSE 事件监听器取消函数 */
   let unlistenFn: UnlistenFn | null = null;
 
@@ -183,13 +200,13 @@ export const useChatStore = defineStore("chat", () => {
 
   /** RAG (检索增强生成) 是否启用 */
   const ragEnabled = ref(false);
-  
+
   /** 当前选中的知识库 ID */
   const selectedKnowledgeBaseId = ref<string | null>(null);
-  
+
   /** 上一次检索结果 */
   const lastRetrievalResult = ref<RetrievalResult | null>(null);
-  
+
   /** MCP (Model Context Protocol) 是否启用 */
   const mcpEnabled = ref(false);
 
@@ -202,12 +219,71 @@ export const useChatStore = defineStore("chat", () => {
   /** 是否启用思考模式 (Extended Thinking) */
   const thinkingEnabled = ref(false);
 
+  const toChatSession = (session: DbSession): ChatSession => ({
+    id: session.id,
+    title: session.title,
+    provider: session.provider,
+    model: session.model,
+    workingDirectory: session.working_directory || null,
+    fileAccessMode: session.file_access_mode || "none",
+    apiConfigId: session.api_config_id || session.id,
+    createdAt: session.created_at,
+    updatedAt: session.updated_at,
+    messages: mergeInFlightReply(
+      session.id,
+      session.messages.map((message) => ({
+        id: message.id,
+        role: message.role as "user" | "assistant" | "system",
+        content: message.content,
+        timestamp: message.timestamp,
+        error: message.error,
+        tokenUsage: message.token_usage,
+      }))
+    ),
+  });
+
+  /** 把尚未保存的占位回复并回数据库快照，避免刷新覆盖。 */
+  function mergeInFlightReply(sessionId: string, messages: Message[]): Message[] {
+    const reply = inFlightReplies.get(String(sessionId));
+    if (!reply || messages.some((message) => message.id === reply.message.id)) return messages;
+    return [...messages, reply.message];
+  }
+
+  function findInFlightReply(
+    sessionId: string,
+    backendMessageId: string
+  ): InFlightReply | undefined {
+    const reply = inFlightReplies.get(String(sessionId));
+    if (!reply) return undefined;
+    if (reply.backendMessageId && reply.backendMessageId !== backendMessageId) return undefined;
+    reply.backendMessageId ??= backendMessageId;
+    return reply;
+  }
+
+  /** 让当前会话和历史列表均持有同一个进行中消息对象。 */
+  function syncInFlightReply(sessionId: string) {
+    const reply = inFlightReplies.get(String(sessionId));
+    if (!reply) return;
+    const merge = (session: ChatSession) => {
+      if (!session.messages.some((message) => message.id === reply.message.id)) {
+        session.messages.push(reply.message);
+      }
+    };
+    const listedSession = sessions.value.find(
+      (session) => String(session.id) === String(sessionId)
+    );
+    if (listedSession) merge(listedSession);
+    if (currentSession.value && String(currentSession.value.id) === String(sessionId)) {
+      merge(currentSession.value);
+    }
+  }
+
   // ============ 会话管理函数 ============
 
   /**
    * 从数据库加载所有会话
    * 调用后端 get_sessions_cmd 获取会话列表
-   * 
+   *
    * @returns void
    */
   const loadSessionsFromDb = async () => {
@@ -215,37 +291,25 @@ export const useChatStore = defineStore("chat", () => {
       // 从后端获取会话列表
       const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
       console.log("[Chat] get_sessions_cmd returned:", dbSessions.length, "sessions");
-      
+
       // 转换为前端格式 (snake_case -> camelCase)
-      sessions.value = dbSessions.map(s => ({
-        id: s.id,
-        title: s.title,
-        provider: s.provider,
-        model: s.model,
-        workingDirectory: s.working_directory || null,
-        fileAccessMode: s.file_access_mode || "none",
-        // 如果 api_config_id 为空，使用会话 ID 作为后备 (兼容旧数据)
-        apiConfigId: s.api_config_id || s.id,
-        createdAt: s.created_at,
-        updatedAt: s.updated_at,
-        messages: s.messages.map(m => ({
-          id: m.id,
-          role: m.role as "user" | "assistant" | "system",
-          content: m.content,
-          timestamp: m.timestamp,
-          error: m.error,
-          tokenUsage: m.token_usage,
-        })),
-      }));
-      console.log("[Chat] sessions.value updated, first session messages:", sessions.value[0]?.messages?.length);
-      
-      // 如果有当前会话，同步更新当前会话的数据
+      sessions.value = dbSessions.map(toChatSession);
+      console.log(
+        "[Chat] sessions.value updated, first session messages:",
+        sessions.value[0]?.messages?.length
+      );
+
+      // 如果有当前会话，同步更新当前会话的数据。toChatSession 会保留尚未
+      // 落库的回复，避免设置页/历史页刷新用旧快照把流式消息覆盖掉。
       if (currentSession.value) {
         const currentId = String(currentSession.value.id);
-        const freshCurrent = sessions.value.find(s => String(s.id) === currentId);
+        const freshCurrent = sessions.value.find((s) => String(s.id) === currentId);
         if (freshCurrent) {
           currentSession.value = { ...freshCurrent };
-          console.log("[Chat] Updated currentSession with fresh data, messages:", freshCurrent.messages.length);
+          console.log(
+            "[Chat] Updated currentSession with fresh data, messages:",
+            freshCurrent.messages.length
+          );
         }
       }
     } catch (error) {
@@ -256,7 +320,7 @@ export const useChatStore = defineStore("chat", () => {
   /**
    * 设置流式响应监听器
    * 监听后端发送的 stream-chunk 事件
-   * 
+   *
    * @returns void
    */
   const setupStreamListener = async () => {
@@ -264,66 +328,53 @@ export const useChatStore = defineStore("chat", () => {
     if (unlistenFn) {
       unlistenFn();
     }
-    
+
     // 监听 SSE 流式事件
     unlistenFn = await listen<StreamChunk>("stream-chunk", async (event) => {
       const chunk = event.payload;
-      console.log("[Stream] Received chunk, session_id:", chunk.session_id, "currentSession:", currentSession.value?.id, "done:", chunk.done);
-      
-      // 如果没有当前会话，忽略
-      if (!currentSession.value) {
-        console.log("[Stream] No current session, ignored");
+      console.log(
+        "[Stream] Received chunk, session_id:",
+        chunk.session_id,
+        "currentSession:",
+        currentSession.value?.id,
+        "done:",
+        chunk.done
+      );
+
+      const reply = findInFlightReply(chunk.session_id, chunk.message_id);
+      if (!reply) {
+        console.log("[Stream] No matching in-flight reply, ignored");
         return;
       }
-
-      const currentId = String(currentSession.value.id);
-      const chunkId = String(chunk.session_id);
 
       // 处理流结束信号
       if (chunk.done) {
-        console.log("[Stream] Stream done for session:", chunkId);
-        
-        // 无论消息是否存在，都要重置加载状态
-        isLoading.value = false;
+        console.log("[Stream] Stream done for session:", chunk.session_id);
         currentStreamContent.value = "";
-        
-        const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-        if (lastMessage && lastMessage.role === "assistant") {
-          lastMessage.streaming = false;
-          console.log("[Stream] Saving message to DB:", lastMessage.id, "content length:", lastMessage.content.length);
-          await saveMessageToDb(lastMessage);
-          await saveSessionToDb();
-        }
-        return;
-      }
-
-      // 处理流内容 - 必须匹配当前会话
-      if (chunkId !== currentId) {
-        console.log("[Stream] Session mismatch, ignored. chunk:", chunkId, "current:", currentId);
-        return;
-      }
-
-      // 如果不是当前会话在生成，忽略
-      if (!isLoading.value) {
-        console.log("[Stream] Not loading, ignored");
-        return;
-      }
-
-      // 获取最后一条消息
-      const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-      if (!lastMessage || lastMessage.role !== "assistant") {
-        console.log("[Stream] No assistant message found");
+        reply.message.streaming = false;
+        syncInFlightReply(reply.sessionId);
+        console.log(
+          "[Stream] Saving message to DB:",
+          reply.message.id,
+          "content length:",
+          reply.message.content.length
+        );
+        inFlightReplies.delete(reply.sessionId);
+        await saveMessageToDb(reply.sessionId, reply.message);
         return;
       }
 
       // 累加内容 (打字机效果)。思考型模型的思考增量单独归到 thinking 字段，
       // 由 ChatMessage.vue 的"思考过程"折叠区展示，不混入正文、也不入库
       if (chunk.is_thinking) {
-        lastMessage.thinking = (lastMessage.thinking ?? "") + chunk.content;
+        reply.message.thinking = (reply.message.thinking ?? "") + chunk.content;
       } else {
-        lastMessage.content += chunk.content;
-        currentStreamContent.value = lastMessage.content;
+        reply.message.content += chunk.content;
+        if (String(currentSession.value?.id) === String(reply.sessionId)) {
+          currentStreamContent.value = reply.message.content;
+        }
       }
+      syncInFlightReply(reply.sessionId);
     });
   };
 
@@ -341,22 +392,14 @@ export const useChatStore = defineStore("chat", () => {
 
     unlistenToolCallFn = await listen<ToolCallEvent>("tool-call-status", (event) => {
       const evt = event.payload;
-      if (!currentSession.value) return;
-      if (String(evt.session_id) !== String(currentSession.value.id)) return;
-
-      // 后端在 stream_message 里自行生成 message_id，与前端占位 assistant
-      // 消息的 id 并不相同（文本流的 stream-chunk 监听器同样只按 session
-      // 匹配，所以文本不受影响）。按 id 找不到时回退到最后一条 assistant
-      // 消息——否则工具调用状态永远挂不上任何消息，工具明明执行了，界面
-      // 上却看不到"调用中/已完成"。
-      const message = currentSession.value.messages.find(m => m.id === evt.message_id)
-        ?? [...currentSession.value.messages].reverse().find(m => m.role === "assistant");
-      if (!message) return;
+      const reply = findInFlightReply(evt.session_id, evt.message_id);
+      if (!reply) return;
+      const message = reply.message;
 
       if (!message.toolCalls) {
         message.toolCalls = [];
       }
-      const existing = message.toolCalls.find(tc => tc.callId === evt.call_id);
+      const existing = message.toolCalls.find((tc) => tc.callId === evt.call_id);
       if (existing) {
         existing.status = evt.status;
         existing.result = evt.result;
@@ -373,6 +416,7 @@ export const useChatStore = defineStore("chat", () => {
         const notice = `工具「${evt.tool_name}」执行失败；模型会尝试基于已有结果继续。`;
         if (!warningNotices.value.includes(notice)) warningNotices.value.push(notice);
       }
+      syncInFlightReply(reply.sessionId);
     });
   };
 
@@ -381,32 +425,32 @@ export const useChatStore = defineStore("chat", () => {
     if (unlistenTokenUsageFn) unlistenTokenUsageFn();
     unlistenTokenUsageFn = await listen<TokenUsageEvent>("token-usage", (event) => {
       const usageEvent = event.payload;
-      if (!currentSession.value || String(usageEvent.sessionId) !== String(currentSession.value.id)) return;
-      const message = currentSession.value.messages.find(m => m.id === usageEvent.messageId)
-        ?? [...currentSession.value.messages].reverse().find(m => m.role === "assistant");
-      if (message) message.tokenUsage = usageEvent.usage;
+      const reply = findInFlightReply(usageEvent.sessionId, usageEvent.messageId);
+      if (!reply) return;
+      reply.message.tokenUsage = usageEvent.usage;
+      syncInFlightReply(reply.sessionId);
     });
   };
 
   /**
    * 保存当前会话到数据库
    * 包含会话基本信息，不包含消息内容
-   * 
+   *
    * @returns void
    */
-  const saveSessionToDb = async () => {
-    if (!currentSession.value) return;
-    
+  const saveSessionToDb = async (session = currentSession.value) => {
+    if (!session) return;
+
     try {
       const dbSession: DbSession = {
-        id: currentSession.value.id,
-        title: currentSession.value.title,
-        provider: currentSession.value.provider,
-        model: currentSession.value.model,
-        api_config_id: currentSession.value.apiConfigId,  // 保存 API 配置关联
-        working_directory: currentSession.value.workingDirectory,
-        file_access_mode: currentSession.value.fileAccessMode,
-        created_at: currentSession.value.createdAt,
+        id: session.id,
+        title: session.title,
+        provider: session.provider,
+        model: session.model,
+        api_config_id: session.apiConfigId, // 保存 API 配置关联
+        working_directory: session.workingDirectory,
+        file_access_mode: session.fileAccessMode,
+        created_at: session.createdAt,
         updated_at: Date.now(),
         messages: [],
       };
@@ -419,13 +463,12 @@ export const useChatStore = defineStore("chat", () => {
 
   /**
    * 保存单条消息到数据库
-   * 
+   *
+   * @param sessionId - 所属会话，不能从 currentSession 推断（用户可能已切换页面）
    * @param message - 要保存的消息对象
    * @returns void
    */
-  const saveMessageToDb = async (message: Message) => {
-    if (!currentSession.value) return;
-    
+  const saveMessageToDb = async (sessionId: string, message: Message) => {
     try {
       const dbMessage: DbMessage = {
         id: message.id,
@@ -436,8 +479,8 @@ export const useChatStore = defineStore("chat", () => {
         token_usage: message.tokenUsage,
       };
       await invoke("save_message_cmd", {
-        sessionId: currentSession.value.id,
-        message: dbMessage
+        sessionId,
+        message: dbMessage,
       });
     } catch (error) {
       console.error("Failed to save message:", error);
@@ -447,11 +490,14 @@ export const useChatStore = defineStore("chat", () => {
 
   /**
    * 创建新会话
-   * 
+   *
    * @param apiConfigId - API 配置 ID
    * @returns 新创建的会话对象，失败返回 null
    */
-  const setWorkingDirectory = async (directory: string | null, mode: "none" | "read" | "write" = "none") => {
+  const setWorkingDirectory = async (
+    directory: string | null,
+    mode: "none" | "read" | "write" = "none"
+  ) => {
     if (!currentSession.value) return;
     currentSession.value.workingDirectory = directory;
     currentSession.value.fileAccessMode = directory ? mode : "none";
@@ -462,19 +508,12 @@ export const useChatStore = defineStore("chat", () => {
 
   const createSession = async (apiConfigId: string): Promise<ChatSession | null> => {
     // 查找对应的 API 配置
-    const config = settings.apiConfigs.find(c => c.id === apiConfigId);
+    const config = settings.apiConfigs.find((c) => c.id === apiConfigId);
     if (!config) {
       console.error("API config not found:", apiConfigId);
       return null;
     }
 
-    // 如果有正在进行的流，先停止它
-    if (isLoading.value) {
-      console.log("[Chat] Stopping existing stream before creating new session");
-      isLoading.value = false;
-      currentStreamContent.value = "";
-    }
-    
     // 构建新会话对象
     const session: ChatSession = {
       id: crypto.randomUUID(),
@@ -488,11 +527,11 @@ export const useChatStore = defineStore("chat", () => {
       workingDirectory: null,
       fileAccessMode: "none",
     };
-    
+
     // 设置为当前会话
     currentSession.value = session;
     lastRetrievalResult.value = null;
-    
+
     // 设置流式监听
     // 注意：这里不写库。空会话在发出第一条消息前只存在于内存里，
     // sendMessage() 里已经会在追加第一条用户消息后调用 saveSessionToDb()，
@@ -506,50 +545,45 @@ export const useChatStore = defineStore("chat", () => {
 
   /**
    * 加载已有会话
-   * 
+   *
    * @param session - 要加载的会话对象
    * @returns void
    */
   const loadSession = async (session: ChatSession) => {
-    console.log("[Chat] loadSession called:", session.id, "messages count:", session.messages?.length);
-    
-    // 清理之前的状态
-    isLoading.value = false;
+    console.log(
+      "[Chat] loadSession called:",
+      session.id,
+      "messages count:",
+      session.messages?.length
+    );
+
+    // 清理当前视图的临时展示状态；其他会话的流式回复继续后台完成。
     currentStreamContent.value = "";
-    
+
     // 尝试从数据库重新加载会话数据（确保消息最新）
     let sessionWithMessages = session;
     try {
       const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
       console.log("[Chat] Loaded sessions from DB:", dbSessions.length);
-      const freshSession = dbSessions.find(s => String(s.id) === String(session.id));
-      console.log("[Chat] Found fresh session:", freshSession?.id, "messages:", freshSession?.messages?.length);
+      const freshSession = dbSessions.find((s) => String(s.id) === String(session.id));
+      console.log(
+        "[Chat] Found fresh session:",
+        freshSession?.id,
+        "messages:",
+        freshSession?.messages?.length
+      );
       if (freshSession) {
         // 创建新对象确保响应式更新，使用数据库中的最新数据
-        sessionWithMessages = {
-          id: freshSession.id,
-          title: freshSession.title,
-          provider: freshSession.provider,
-          model: freshSession.model,
-          apiConfigId: freshSession.api_config_id || freshSession.id,
-          createdAt: freshSession.created_at,
-          updatedAt: freshSession.updated_at,
-          workingDirectory: freshSession.working_directory || null,
-          fileAccessMode: freshSession.file_access_mode || "none",
-          messages: freshSession.messages.map(m => ({
-            id: m.id,
-            role: m.role as "user" | "assistant" | "system",
-            content: m.content,
-            timestamp: m.timestamp,
-            error: m.error,
-          }))
-        };
-        console.log("[Chat] Created new session object with messages:", sessionWithMessages.messages.length);
+        sessionWithMessages = toChatSession(freshSession);
+        console.log(
+          "[Chat] Created new session object with messages:",
+          sessionWithMessages.messages.length
+        );
       }
     } catch (error) {
       console.warn("Failed to reload session from DB, using cached data:", error);
     }
-    
+
     // 设置当前会话并设置流式监听器
     currentSession.value = sessionWithMessages;
     lastRetrievalResult.value = null;
@@ -570,7 +604,7 @@ export const useChatStore = defineStore("chat", () => {
 
     // 优先使用当前激活的 API 配置（允许在不新建会话的情况下切换 API）
     const effectiveConfigId = settings.activeConfigId ?? currentSession.value.apiConfigId;
-    const config = settings.apiConfigs.find(c => c.id === effectiveConfigId);
+    const config = settings.apiConfigs.find((c) => c.id === effectiveConfigId);
     if (!config) {
       console.error("API config not found for session");
       alert("未找到 API 配置，请检查设置");
@@ -601,10 +635,13 @@ export const useChatStore = defineStore("chat", () => {
   const generateReply = async (contentOverride?: { messageId: string; content: string }) => {
     if (!currentSession.value) return;
 
+    const session = currentSession.value;
+    const sessionId = String(session.id);
+    if (inFlightReplies.has(sessionId)) return;
+
     const config = resolveActiveConfig();
     if (!config) return;
 
-    isLoading.value = true;
     currentStreamContent.value = "";
 
     try {
@@ -616,16 +653,22 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: Date.now(),
         streaming: true,
       };
-      currentSession.value.messages.push(assistantMessage);
+      session.messages.push(assistantMessage);
+      const reply: InFlightReply = { sessionId, message: assistantMessage };
+      inFlightReplies.set(sessionId, reply);
+      syncInFlightReply(sessionId);
 
       // ============ 构建 API 消息列表 ============
-      const apiMessages = currentSession.value.messages
+      const apiMessages = session.messages
         // 过滤掉流式中和有错误的消息
-        .filter(m => !m.streaming && !m.error)
+        .filter((m) => !m.streaming && !m.error)
         .map((m) => ({
           id: m.id,
           role: m.role,
-          content: (contentOverride && m.id === contentOverride.messageId) ? contentOverride.content : m.content,
+          content:
+            contentOverride && m.id === contentOverride.messageId
+              ? contentOverride.content
+              : m.content,
           timestamp: m.timestamp,
           error: m.error,
           images: m.images ?? [],
@@ -658,7 +701,7 @@ export const useChatStore = defineStore("chat", () => {
       // 通过各 provider 的原生 tools 字段声明工具并执行多轮调用循环，前端
       // 再注入一份 JSON 文本只会让每轮请求重复付一份 token。
       const requestPayload = {
-        sessionId: currentSession.value.id,
+        sessionId,
         messages: apiMessages,
         provider: config.provider,
         model: config.model,
@@ -673,58 +716,66 @@ export const useChatStore = defineStore("chat", () => {
         retryCount: settings.retryCount,
         retryIntervalSecs: settings.retryIntervalSecs,
         maxToolRounds: settings.maxToolRounds,
-        workingDirectory: currentSession.value.workingDirectory,
-        fileAccessMode: currentSession.value.fileAccessMode,
+        workingDirectory: session.workingDirectory,
+        fileAccessMode: session.fileAccessMode,
+        terminalShell: localStorage.getItem("baiyu.mcp.terminal-shell") || "powershell",
       };
 
       // 开发模式下打印调试日志 (隐藏 API 密钥)
       if (import.meta.env.DEV) {
-        console.debug('STREAM_REQUEST (masked):', {
-        sessionId: requestPayload.sessionId,
-        provider: requestPayload.provider,
-        model: requestPayload.model,
-        baseUrl: requestPayload.baseUrl,
-        enableMcp: requestPayload.enableMcp,
-        apiConfigId: requestPayload.apiConfigId,
-        messagesCount: requestPayload.messages?.length ?? 0,
+        console.debug("STREAM_REQUEST (masked):", {
+          sessionId: requestPayload.sessionId,
+          provider: requestPayload.provider,
+          model: requestPayload.model,
+          baseUrl: requestPayload.baseUrl,
+          enableMcp: requestPayload.enableMcp,
+          apiConfigId: requestPayload.apiConfigId,
+          messagesCount: requestPayload.messages?.length ?? 0,
         });
       }
 
       // ============ 调用后端流式消息 API ============
       try {
-        console.log("[generateReply] Calling stream_message, sessionId:", requestPayload.sessionId, "messageCount:", requestPayload.messages.length);
-        await invoke('stream_message', { request: requestPayload });
+        console.log(
+          "[generateReply] Calling stream_message, sessionId:",
+          requestPayload.sessionId,
+          "messageCount:",
+          requestPayload.messages.length
+        );
+        await invoke("stream_message", { request: requestPayload });
         console.log("[generateReply] stream_message completed");
       } catch (e) {
-        console.error('[generateReply] stream_message error:', e);
-        if (import.meta.env.DEV) console.error('stream_message error', e);
+        console.error("[generateReply] stream_message error:", e);
+        if (import.meta.env.DEV) console.error("stream_message error", e);
         throw e;
       }
 
       // ============ 更新会话标题 ============
       // 如果是第一条对话 (用户消息 + 助手回复)，更新标题
-      if (currentSession.value.messages.length === 2) {
-        const firstUserMessage = currentSession.value.messages[0];
-        currentSession.value.title = firstUserMessage.content.slice(0, 30) + (firstUserMessage.content.length > 30 ? "..." : "");
-        await saveSessionToDb();
+      if (session.messages.length === 2) {
+        const firstUserMessage = session.messages[0];
+        session.title =
+          firstUserMessage.content.slice(0, 30) +
+          (firstUserMessage.content.length > 30 ? "..." : "");
+        await saveSessionToDb(session);
         // 只局部更新 sessions 列表的标题，不调用 loadSessionsFromDb()
-        // 原因：loadSessionsFromDb 会用 DB 旧数据覆盖内存中正在 streaming 的 assistantMessage，导致消息消失
-        const sid = currentSession.value.id;
-        const newTitle = currentSession.value.title;
-        const existingIdx = sessions.value.findIndex(s => s.id === sid);
+        // 流式回复已由 inFlightReplies 与数据库快照合并，这里无需整表刷新。
+        const sid = session.id;
+        const newTitle = session.title;
+        const existingIdx = sessions.value.findIndex((s) => s.id === sid);
         if (existingIdx !== -1) {
           sessions.value[existingIdx] = { ...sessions.value[existingIdx], title: newTitle };
         } else {
           // 新会话还不在列表里（首次发消息），插到最前面
           sessions.value.unshift({
-            id: currentSession.value.id,
+            id: session.id,
             title: newTitle,
-            provider: currentSession.value.provider,
-            model: currentSession.value.model,
-            workingDirectory: currentSession.value.workingDirectory,
-            fileAccessMode: currentSession.value.fileAccessMode,
-            apiConfigId: currentSession.value.apiConfigId,
-            createdAt: currentSession.value.createdAt,
+            provider: session.provider,
+            model: session.model,
+            workingDirectory: session.workingDirectory,
+            fileAccessMode: session.fileAccessMode,
+            apiConfigId: session.apiConfigId,
+            createdAt: session.createdAt,
             updatedAt: Date.now(),
             messages: [],
           });
@@ -733,34 +784,33 @@ export const useChatStore = defineStore("chat", () => {
     } catch (error) {
       // ============ 错误处理 ============
       const errorInfo = classifyError(error);
-      const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
+      const reply = inFlightReplies.get(sessionId);
 
-      // 将错误信息保存到消息中
-      if (lastMessage.role === "assistant") {
-        lastMessage.error = errorInfo.message;
-        lastMessage.streaming = false;
-        await saveMessageToDb(lastMessage);
+      // 将错误信息保存到本轮绑定的助手消息中，不受当前浏览会话影响。
+      if (reply) {
+        reply.message.error = errorInfo.message;
+        reply.message.streaming = false;
+        syncInFlightReply(sessionId);
+        inFlightReplies.delete(sessionId);
+        await saveMessageToDb(sessionId, reply.message);
       }
 
       console.error(`[${errorInfo.type}] ${error}`);
       const notice = errorInfo.message;
       if (!errorNotices.value.includes(notice)) errorNotices.value.push(notice);
-      isLoading.value = false;
       currentStreamContent.value = "";
     }
   };
 
   const buildEnhancedContent = async (
     content: string,
-    documentContents?: Array<{ name: string; content: string }>,
+    documentContents?: Array<{ name: string; content: string }>
   ): Promise<string> => {
     const contextParts: string[] = [];
     lastRetrievalResult.value = null;
 
     if (ragEnabled.value && selectedKnowledgeBaseId.value) {
-      const kbExists = kbStore.knowledgeBases.some(
-        kb => kb.id === selectedKnowledgeBaseId.value,
-      );
+      const kbExists = kbStore.knowledgeBases.some((kb) => kb.id === selectedKnowledgeBaseId.value);
       if (!kbExists) {
         kbStore.retrievalNotices.push({
           type: "error",
@@ -768,10 +818,7 @@ export const useChatStore = defineStore("chat", () => {
           message: "所选知识库不存在或已被删除，本次将不使用知识库内容。",
         });
       } else {
-        const result = await kbStore.searchKnowledgeBase(
-          selectedKnowledgeBaseId.value,
-          content,
-        );
+        const result = await kbStore.searchKnowledgeBase(selectedKnowledgeBaseId.value, content);
         if (result) {
           // 空结果也要覆盖上一次状态，让界面明确显示“检索到 0 个片段”，
           // 而不是继续展示上一轮的旧数量。
@@ -783,13 +830,11 @@ export const useChatStore = defineStore("chat", () => {
     }
 
     if (documentContents && documentContents.length > 0) {
-      const docParts = documentContents.map(d => `[文档: ${d.name}]\n${d.content}`);
-      contextParts.push(`[用户附加文档]\n${docParts.join('\n---\n')}`);
+      const docParts = documentContents.map((d) => `[文档: ${d.name}]\n${d.content}`);
+      contextParts.push(`[用户附加文档]\n${docParts.join("\n---\n")}`);
     }
 
-    return contextParts.length > 0
-      ? `${contextParts.join('\n\n')}\n\n问题：${content}`
-      : content;
+    return contextParts.length > 0 ? `${contextParts.join("\n\n")}\n\n问题：${content}` : content;
   };
 
   /**
@@ -833,10 +878,12 @@ export const useChatStore = defineStore("chat", () => {
 
     // 保存到数据库（先保存 session，再保存 message，满足外键约束）
     await saveSessionToDb();
-    await saveMessageToDb(userMessage);
+    await saveMessageToDb(currentSession.value.id, userMessage);
 
     await generateReply(
-      enhancedContent !== content ? { messageId: userMessage.id, content: enhancedContent } : undefined
+      enhancedContent !== content
+        ? { messageId: userMessage.id, content: enhancedContent }
+        : undefined
     );
   };
 
@@ -873,7 +920,7 @@ export const useChatStore = defineStore("chat", () => {
     if (!currentSession.value) return;
     if (isLoading.value) return;
 
-    const idx = currentSession.value.messages.findIndex(m => m.id === messageId);
+    const idx = currentSession.value.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return;
     const target = currentSession.value.messages[idx];
     if (target.role !== "user") return;
@@ -890,14 +937,12 @@ export const useChatStore = defineStore("chat", () => {
 
     // 先删库里的旧消息，再保存编辑后的内容
     await deleteMessagesFromDb(removed);
-    await saveMessageToDb(target);
+    await saveMessageToDb(currentSession.value.id, target);
     await saveSessionToDb();
 
     const enhancedContent = await buildEnhancedContent(trimmed);
     await generateReply(
-      enhancedContent !== trimmed
-        ? { messageId: target.id, content: enhancedContent }
-        : undefined,
+      enhancedContent !== trimmed ? { messageId: target.id, content: enhancedContent } : undefined
     );
   };
 
@@ -912,7 +957,7 @@ export const useChatStore = defineStore("chat", () => {
     if (!currentSession.value) return;
     if (isLoading.value) return;
 
-    const idx = currentSession.value.messages.findIndex(m => m.id === messageId);
+    const idx = currentSession.value.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return;
     const target = currentSession.value.messages[idx];
     if (target.role !== "assistant") return;
@@ -922,40 +967,42 @@ export const useChatStore = defineStore("chat", () => {
 
     const lastUserMessage = [...currentSession.value.messages]
       .reverse()
-      .find(message => message.role === "user");
+      .find((message) => message.role === "user");
     if (!lastUserMessage) return;
 
     const enhancedContent = await buildEnhancedContent(lastUserMessage.content);
     await generateReply(
       enhancedContent !== lastUserMessage.content
         ? { messageId: lastUserMessage.id, content: enhancedContent }
-        : undefined,
+        : undefined
     );
   };
 
   /**
    * 构建 RAG 上下文
    * 将检索到的文档片段格式化为提示上下文
-   * 
+   *
    * @param result - 检索结果
    * @returns 格式化的上下文字符串
    */
   const buildRagContext = (result: RetrievalResult): string => {
     if (result.chunks.length === 0) return "";
-    
+
     const contextParts = ["基于以下参考文档回答问题："];
-    
+
     result.chunks.forEach((chunk, index) => {
-      contextParts.push(`\n[文档 ${index + 1}: ${chunk.document_filename}]\n${chunk.chunk.content}`);
+      contextParts.push(
+        `\n[文档 ${index + 1}: ${chunk.document_filename}]\n${chunk.chunk.content}`
+      );
     });
-    
+
     contextParts.push("\n---");
     return contextParts.join("\n");
   };
 
   /**
    * 切换 RAG 开关状态
-   * 
+   *
    * @param enabled - 是否启用 RAG
    * @returns void
    */
@@ -970,7 +1017,7 @@ export const useChatStore = defineStore("chat", () => {
 
   /**
    * 选择知识库用于 RAG
-   * 
+   *
    * @param kbId - 知识库 ID，null 表示取消选择
    * @returns void
    */
@@ -992,7 +1039,7 @@ export const useChatStore = defineStore("chat", () => {
 
   /**
    * 删除会话
-   * 
+   *
    * @param sessionId - 要删除的会话 ID
    * @returns void
    */
@@ -1013,7 +1060,7 @@ export const useChatStore = defineStore("chat", () => {
   /**
    * 清除当前会话
    * 取消事件监听器，清空当前会话状态
-   * 
+   *
    * @returns void
    */
   const clearSession = () => {
@@ -1028,9 +1075,9 @@ export const useChatStore = defineStore("chat", () => {
   // ============ 流式中断功能 ============
   const stopStream = async () => {
     if (!isLoading.value || !currentSession.value) return;
-    
-    const sessionId = currentSession.value.id;
-    
+
+    const sessionId = String(currentSession.value.id);
+
     // Call backend to cancel the stream
     try {
       await invoke("cancel_stream", { sessionId });
@@ -1039,14 +1086,14 @@ export const useChatStore = defineStore("chat", () => {
       // Log warning but continue with frontend cleanup
       console.warn("[Stream] Failed to cancel stream on backend:", error);
     }
-    
-    // Update frontend state
-    isLoading.value = false;
-    const lastMessage = currentSession.value.messages[currentSession.value.messages.length - 1];
-    if (lastMessage && lastMessage.role === "assistant") {
-      lastMessage.streaming = false;
-      // Save the partial message to database
-      await saveMessageToDb(lastMessage);
+
+    // 保存本会话的部分结果；随后到达的 done 事件因已无 in-flight 记录会被忽略。
+    const reply = inFlightReplies.get(sessionId);
+    if (reply) {
+      reply.message.streaming = false;
+      syncInFlightReply(sessionId);
+      inFlightReplies.delete(sessionId);
+      await saveMessageToDb(sessionId, reply.message);
     }
     currentStreamContent.value = "";
     console.log("[Stream] Stopped by user");
@@ -1072,18 +1119,18 @@ export const useChatStore = defineStore("chat", () => {
     thinkingEnabled,
 
     // 方法
-    createSession,           // 创建新会话
-    loadSession,             // 加载会话
-    sendMessage,             // 发送消息
-    editUserMessage,         // 编辑用户消息并重新生成
-    regenerateMessage,       // 重新生成 AI 回复
-    deleteSession,           // 删除会话
-    clearSession,            // 清除当前会话
-    toggleSkillActive,       // 切换 Skill 手动激活状态
-    loadSessionsFromDb,      // 加载会话列表
-    toggleRag,               // 切换 RAG
-    selectKnowledgeBaseForRag,  // 选择知识库
-    classifyError,           // 错误分类
-    stopStream,              // 停止流式输出
+    createSession, // 创建新会话
+    loadSession, // 加载会话
+    sendMessage, // 发送消息
+    editUserMessage, // 编辑用户消息并重新生成
+    regenerateMessage, // 重新生成 AI 回复
+    deleteSession, // 删除会话
+    clearSession, // 清除当前会话
+    toggleSkillActive, // 切换 Skill 手动激活状态
+    loadSessionsFromDb, // 加载会话列表
+    toggleRag, // 切换 RAG
+    selectKnowledgeBaseForRag, // 选择知识库
+    classifyError, // 错误分类
+    stopStream, // 停止流式输出
   };
 });

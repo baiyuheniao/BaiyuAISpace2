@@ -22,17 +22,37 @@ use crate::db::DbState;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const TERMINAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const TERMINAL_OUTPUT_LIMIT: usize = 64 * 1024;
+const USER_INTERACTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Default)]
+pub struct PendingChatQuestions(pub std::sync::Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>);
+
+#[derive(Default)]
+pub struct PendingChatToolApprovals(pub std::sync::Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>);
+
+#[derive(Clone, Default)]
+pub struct BuiltinToolContext {
+    pub app_handle: Option<AppHandle>,
+    pub session_id: Option<String>,
+    pub working_directory: Option<String>,
+    pub terminal_shell: String,
+}
 
 /// `stream_message` 在每一次聊天轮次都会调用 `get_all_mcp_tools`（即使 MCP 总开关
 /// 关闭也要调，因为手动激活的 Skill 仍然可以绑定某个服务器）——没有缓存的话，
@@ -700,6 +720,13 @@ pub async fn call_mcp_tool(
     tool_name: String,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, MCPError> {
+    call_mcp_tool_with_context(state, server_id, tool_name, input, BuiltinToolContext::default()).await
+}
+
+pub async fn call_mcp_tool_with_context(
+    state: tauri::State<'_, DbState>, server_id: Option<String>, tool_name: String,
+    input: serde_json::Value, context: BuiltinToolContext,
+) -> Result<serde_json::Value, MCPError> {
     log::info!("MCP tool call requested: server_id={:?}, tool={} input={:?}", server_id, tool_name, input);
 
     // 优先处理内置的测试/演示工具
@@ -711,7 +738,7 @@ pub async fn call_mcp_tool(
     // 内置的网页搜索/抓取网页在数据库里没有对应的服务器行 --
     // 直接分发处理，而不是尝试（并且失败）去查一个不存在的行。
     if tool_name.starts_with("builtin__") {
-        return execute_builtin_tool(&tool_name, input).await;
+        return execute_builtin_tool(&tool_name, input, context).await;
     }
 
     // 从数据库加载服务器配置
@@ -861,7 +888,13 @@ fn builtin_tool_defs() -> Vec<MCPTool> {
                 "required": ["url"]
             }),
         },
+        builtin_tool("builtin__run_terminal", "终端执行", "在当前聊天已设置的工作目录中执行一条终端命令。每次执行前都必须获得用户确认；不能指定其他工作目录。", serde_json::json!({"command":{"type":"string","description":"要执行的单条命令"}}), vec!["command"]),
+        builtin_tool("builtin__ask_user", "向用户提问", "向用户提一个需要继续任务的问题，并等待其回答。可提供不超过五个备选项。", serde_json::json!({"question":{"type":"string","description":"要向用户提出的问题"},"options":{"type":"array","items":{"type":"string"},"description":"可选的简短备选项，最多五个"}}), vec!["question"]),
     ]
+}
+
+fn builtin_tool(name: &str, _title: &str, description: &str, properties: serde_json::Value, required: Vec<&str>) -> MCPTool {
+    MCPTool { server_id: "builtin".to_string(), server_name: "内置工具".to_string(), name: name.to_string(), description: description.to_string(), input_schema: serde_json::json!({"type":"object", "properties":properties, "required":required}) }
 }
 
 const BUILTIN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -869,13 +902,72 @@ const BUILTIN_FETCH_TEXT_LIMIT: usize = 15_000;
 
 /// 直接执行某个内置工具 -- 不起子进程，不走外部 MCP 传输协议，
 /// 就是进程内一次普通的 HTTP 调用。
-async fn execute_builtin_tool(tool_name: &str, input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
+async fn execute_builtin_tool(tool_name: &str, input: serde_json::Value, context: BuiltinToolContext) -> Result<serde_json::Value, MCPError> {
     match tool_name {
         "builtin__web_search" => builtin_web_search(input).await,
         "builtin__fetch_url" => builtin_fetch_url(input).await,
+        "builtin__run_terminal" => builtin_run_terminal(input, context).await,
+        "builtin__ask_user" => builtin_ask_user(input, context).await,
         _ => Err(MCPError::CommunicationError(format!("Unknown builtin tool: {}", tool_name))),
     }
 }
+
+#[tauri::command]
+pub async fn resolve_chat_question(question_id: String, answer: String, pending: State<'_, PendingChatQuestions>) -> Result<(), String> {
+    let Some(sender) = pending.0.lock().await.remove(&question_id) else { return Err("该问题已过期或已被处理".to_string()); };
+    sender.send(answer.trim().chars().take(4_000).collect()).map_err(|_| "问题已取消".to_string())
+}
+
+#[tauri::command]
+pub async fn resolve_chat_tool_approval(approval_id: String, approved: bool, pending: State<'_, PendingChatToolApprovals>) -> Result<(), String> {
+    let Some(sender) = pending.0.lock().await.remove(&approval_id) else { return Err("该终端确认已过期或已被处理".to_string()); };
+    sender.send(approved).map_err(|_| "终端调用已取消".to_string())
+}
+
+fn chat_context(context: &BuiltinToolContext) -> Result<(AppHandle, String), MCPError> {
+    Ok((context.app_handle.clone().ok_or_else(|| MCPError::InvalidConfig("该工具只能在聊天回复中调用".to_string()))?, context.session_id.clone().ok_or_else(|| MCPError::InvalidConfig("缺少聊天会话上下文".to_string()))?))
+}
+
+async fn builtin_ask_user(input: serde_json::Value, context: BuiltinToolContext) -> Result<serde_json::Value, MCPError> {
+    let question = input.get("question").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if question.is_empty() { return Err(MCPError::InvalidConfig("提问内容不能为空".to_string())); }
+    let options = input.get("options").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).take(5).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    let (app_handle, session_id) = chat_context(&context)?;
+    let question_id = Uuid::new_v4().to_string(); let (sender, receiver) = oneshot::channel();
+    app_handle.state::<PendingChatQuestions>().0.lock().await.insert(question_id.clone(), sender);
+    let _ = app_handle.emit("chat://question", serde_json::json!({"questionId":question_id,"sessionId":session_id,"question":question,"options":options}));
+    match tokio::time::timeout(USER_INTERACTION_TIMEOUT, receiver).await {
+        Ok(Ok(answer)) if !answer.trim().is_empty() => Ok(serde_json::json!({"answer":answer})),
+        Ok(Ok(_)) => Ok(serde_json::json!({"answer":"（用户未填写回答）"})),
+        Ok(Err(_)) => Ok(serde_json::json!({"answer":"（用户没有回答）"})),
+        Err(_) => { app_handle.state::<PendingChatQuestions>().0.lock().await.remove(&question_id); Ok(serde_json::json!({"answer":"（用户在十分钟内没有回答）"})) }
+    }
+}
+
+async fn builtin_run_terminal(input: serde_json::Value, context: BuiltinToolContext) -> Result<serde_json::Value, MCPError> {
+    let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if command.is_empty() || command.len() > 16_000 { return Err(MCPError::InvalidConfig("终端命令不能为空或过长".to_string())); }
+    let (app_handle, session_id) = chat_context(&context)?;
+    let directory = context.working_directory.as_deref().ok_or_else(|| MCPError::InvalidConfig("请先在聊天页设置工作目录".to_string()))?;
+    let working_directory = std::fs::canonicalize(directory).map_err(|_| MCPError::InvalidConfig("当前工作目录不可用".to_string()))?;
+    if !working_directory.is_dir() { return Err(MCPError::InvalidConfig("当前工作目录不是文件夹".to_string())); }
+    let shell = TerminalShell::parse(&context.terminal_shell)?; let approval_id = Uuid::new_v4().to_string(); let (sender, receiver) = oneshot::channel();
+    app_handle.state::<PendingChatToolApprovals>().0.lock().await.insert(approval_id.clone(), sender);
+    let _ = app_handle.emit("chat://terminal-approval", serde_json::json!({"approvalId":approval_id,"sessionId":session_id,"shell":shell.label(),"workingDirectory":working_directory,"command":command}));
+    let approved = match tokio::time::timeout(USER_INTERACTION_TIMEOUT, receiver).await { Ok(Ok(value)) => value, _ => { app_handle.state::<PendingChatToolApprovals>().0.lock().await.remove(&approval_id); false } };
+    if !approved { return Ok(serde_json::json!({"cancelled":true,"message":"用户未允许执行终端命令"})); }
+    let mut process = shell.command(command); process.current_dir(&working_directory).stdin(Stdio::null());
+    let output = tokio::time::timeout(TERMINAL_COMMAND_TIMEOUT, process.output()).await.map_err(|_| MCPError::CommunicationError("终端命令执行超时（120 秒）".to_string()))?.map_err(|e| MCPError::LaunchError(format!("无法启动终端：{}", e)))?;
+    Ok(serde_json::json!({"shell":shell.label(),"working_directory":working_directory,"exit_code":output.status.code(),"success":output.status.success(),"stdout":truncate_terminal_output(&output.stdout),"stderr":truncate_terminal_output(&output.stderr)}))
+}
+
+enum TerminalShell { PowerShell, Cmd, GitBash }
+impl TerminalShell {
+    fn parse(raw: &str) -> Result<Self, MCPError> { match raw { "" | "powershell" => Ok(Self::PowerShell), "cmd" => Ok(Self::Cmd), "git-bash" => Ok(Self::GitBash), _ => Err(MCPError::InvalidConfig("未知的终端类型".to_string())) } }
+    fn label(&self) -> &'static str { match self { Self::PowerShell => "PowerShell", Self::Cmd => "CMD", Self::GitBash => "Git Bash" } }
+    fn command(&self, input: &str) -> Command { match self { Self::PowerShell => { let mut c=Command::new("powershell.exe"); c.args(["-NoProfile","-NonInteractive","-Command",input]); c }, Self::Cmd => { let mut c=Command::new("cmd.exe"); c.args(["/D","/S","/C",input]); c }, Self::GitBash => { let path=PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"); let mut c=Command::new(if path.is_file(){path}else{PathBuf::from("bash.exe")}); c.args(["-lc",input]); c } } }
+}
+fn truncate_terminal_output(bytes: &[u8]) -> String { let limited=&bytes[..bytes.len().min(TERMINAL_OUTPUT_LIMIT)]; let mut output=String::from_utf8_lossy(limited).to_string(); if bytes.len()>TERMINAL_OUTPUT_LIMIT { output.push_str("\n[输出已截断，最多 64 KiB]"); } output }
 
 async fn builtin_web_search(input: serde_json::Value) -> Result<serde_json::Value, MCPError> {
     let query = input

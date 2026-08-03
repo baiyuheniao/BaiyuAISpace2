@@ -17,10 +17,12 @@
 
 <script setup lang="ts">
 // 导入 Vue 相关功能
-import { computed, onMounted } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 // 导入 NaiveUI 组件和类型
-import { darkTheme, type GlobalThemeOverrides, NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider, zhCN, dateZhCN } from "naive-ui";
+import { darkTheme, type GlobalThemeOverrides, NButton, NConfigProvider, NDialogProvider, NInput, NMessageProvider, NModal, NNotificationProvider, NRadio, NRadioGroup, NText, zhCN, dateZhCN } from "naive-ui";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // 导入 Store
 import { useSettingsStore } from "@/stores/settings";
@@ -34,6 +36,38 @@ const fontSans = '"Inter Variable", "Inter", -apple-system, "Segoe UI", "PingFan
 
 // 设置 Store
 const settings = useSettingsStore();
+
+interface ChatQuestion {
+  questionId: string;
+  sessionId: string;
+  question: string;
+  options: string[];
+}
+interface TerminalApproval {
+  approvalId: string;
+  sessionId: string;
+  shell: string;
+  workingDirectory: string;
+  command: string;
+}
+const pendingQuestion = ref<ChatQuestion | null>(null);
+const pendingAnswer = ref("");
+const pendingApproval = ref<TerminalApproval | null>(null);
+let unlistenQuestion: UnlistenFn | undefined;
+let unlistenApproval: UnlistenFn | undefined;
+const answerQuestion = async (answer = pendingAnswer.value) => {
+  const question = pendingQuestion.value;
+  if (!question) return;
+  await invoke("resolve_chat_question", { questionId: question.questionId, answer });
+  pendingQuestion.value = null;
+  pendingAnswer.value = "";
+};
+const resolveTerminalApproval = async (approved: boolean) => {
+  const approval = pendingApproval.value;
+  if (!approval) return;
+  await invoke("resolve_chat_tool_approval", { approvalId: approval.approvalId, approved });
+  pendingApproval.value = null;
+};
 
 // 浅色黑白编辑设计系统：所有语义色一律折叠进黑-灰阶。
 const lightThemeOverrides: GlobalThemeOverrides = {
@@ -311,6 +345,18 @@ onMounted(async () => {
   await settings.syncCloseToTray();
   // 把当前的托盘唤起快捷键同步给后端注册（后端启动时只注册了默认值）
   await settings.syncShowHotkey();
+  unlistenQuestion = await listen<ChatQuestion>("chat://question", ({ payload }) => {
+    pendingQuestion.value = payload;
+    pendingAnswer.value = "";
+  });
+  unlistenApproval = await listen<TerminalApproval>("chat://terminal-approval", ({ payload }) => {
+    pendingApproval.value = payload;
+  });
+});
+
+onUnmounted(() => {
+  unlistenQuestion?.();
+  unlistenApproval?.();
 });
 </script>
 
@@ -326,6 +372,27 @@ onMounted(async () => {
       <n-message-provider placement="bottom-left">
         <n-notification-provider placement="bottom-left">
           <Layout />
+          <n-modal :show="Boolean(pendingQuestion)" preset="card" title="模型需要你的回答" :mask-closable="false" style="width: 460px">
+            <n-text>{{ pendingQuestion?.question }}</n-text>
+            <n-radio-group v-if="pendingQuestion?.options.length" v-model:value="pendingAnswer" class="question-options">
+              <n-radio v-for="option in pendingQuestion.options" :key="option" :value="option">{{ option }}</n-radio>
+            </n-radio-group>
+            <n-input v-else v-model:value="pendingAnswer" type="textarea" :rows="3" placeholder="请输入你的回答" style="margin-top: 16px" />
+            <template #footer>
+              <n-button @click="answerQuestion('（用户取消回答）')">取消</n-button>
+              <n-button type="primary" :disabled="!pendingAnswer.trim()" @click="answerQuestion()">提交回答</n-button>
+            </template>
+          </n-modal>
+          <n-modal :show="Boolean(pendingApproval)" preset="card" title="确认终端命令" :mask-closable="false" style="width: 560px">
+            <n-text depth="3">模型请求在以下工作目录执行命令。</n-text>
+            <p class="terminal-meta">终端：{{ pendingApproval?.shell }}</p>
+            <p class="terminal-meta">目录：{{ pendingApproval?.workingDirectory }}</p>
+            <pre class="terminal-command">{{ pendingApproval?.command }}</pre>
+            <template #footer>
+              <n-button @click="resolveTerminalApproval(false)">拒绝</n-button>
+              <n-button type="primary" @click="resolveTerminalApproval(true)">允许执行</n-button>
+            </template>
+          </n-modal>
         </n-notification-provider>
       </n-message-provider>
     </n-dialog-provider>
@@ -336,4 +403,8 @@ onMounted(async () => {
 .full-height {
   height: 100%;
 }
+
+.question-options { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.terminal-meta { margin: 10px 0 0; font-family: $font-mono; font-size: 12px; word-break: break-all; }
+.terminal-command { margin: 16px 0 0; padding: 12px; border: $border-soft; background: $surface; white-space: pre-wrap; word-break: break-word; font-family: $font-mono; }
 </style>

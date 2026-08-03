@@ -286,6 +286,18 @@ const BUILTIN_CAPABILITIES: BuiltinCapability[] = [
     description:
       "抓取网页并提取正文文本。应用内置实现，无需安装任何依赖，随对话页的\"启用 MCP\"开关一起生效；Agent Team 里每个 Agent 也默认可用，不需要额外勾选",
   },
+  {
+    id: "terminal",
+    name: "终端执行",
+    description:
+      "在当前聊天的工作目录中执行命令。每次执行都需要你确认；可在下方选择默认使用的终端。",
+  },
+  {
+    id: "ask-user",
+    name: "向用户提问",
+    description:
+      "让模型在需要澄清信息时向你提问，并在收到回答后继续完成当前回复。",
+  },
 ];
 
 /** "推荐能力"列表里的一项：内置能力（零配置）或社区预设（需要用户点击后填表保存） */
@@ -315,6 +327,17 @@ const isPresetConfigured = (preset: MCPPreset) =>
 
 /** 市场搜索关键词，匹配名称或描述 */
 const marketSearchQuery = ref("");
+const terminalShell = ref<"powershell" | "cmd" | "git-bash">("powershell");
+const terminalShellOptions = [
+  { label: "PowerShell", value: "powershell" },
+  { label: "CMD", value: "cmd" },
+  { label: "Git Bash", value: "git-bash" },
+];
+
+const saveTerminalShell = (value: "powershell" | "cmd" | "git-bash") => {
+  terminalShell.value = value;
+  localStorage.setItem("baiyu.mcp.terminal-shell", value);
+};
 
 /** 市场当前选中的分类；null 表示"全部" */
 const marketSelectedCategory = ref<string | null>(null);
@@ -347,6 +370,8 @@ const filteredMarketEntries = computed(() => {
 
 onMounted(() => {
   mcp.loadServers();
+  const saved = localStorage.getItem("baiyu.mcp.terminal-shell");
+  if (saved === "powershell" || saved === "cmd" || saved === "git-bash") terminalShell.value = saved;
 });
 
 // ============ 弹窗状态 ============
@@ -768,6 +793,31 @@ const handleTestSavedServer = async (server: MCPServer) => {
               自动下载，无需手动准备脚本文件
             </n-text>
           </template>
+        </n-card>
+
+        <n-card
+          class="settings-card"
+          :bordered="false"
+        >
+          <template #header>
+            <div class="card-header">
+              <n-icon :size="20" depth="3"><Terminal /></n-icon>
+              <span>内置终端</span>
+            </div>
+          </template>
+          <n-form-item label="默认终端">
+            <n-select
+              :value="terminalShell"
+              :options="terminalShellOptions"
+              placeholder="选择默认终端"
+              @update:value="saveTerminalShell"
+            />
+            <template #feedback>
+              <n-text depth="3" style="font-size: 12px">
+                终端只会在当前聊天已设置的工作目录中运行；每条命令执行前都会再次向你确认。
+              </n-text>
+            </template>
+          </n-form-item>
         </n-card>
 
         <!-- MCP 市场卡片：比"推荐能力"范围更大的可搜索目录，选中后走同一套

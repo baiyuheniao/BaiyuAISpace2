@@ -40,6 +40,7 @@ use workspace::commands::{
     WorkspaceState, PendingProposals, PendingSleepRequests, PendingRoundsRequests, PendingQuestions, PendingToolApprovals,
     WakeRateState, AutoPauseState, init_workspace_tables,
 };
+use commands::mcp::{PendingChatQuestions, PendingChatToolApprovals};
 use workspace::meeting::MeetingsState;
 use scheduler::init_scheduler_tables;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -364,6 +365,8 @@ fn main() {
             commands::mcp::get_mcp_tools,
             commands::mcp::get_all_mcp_tools,
             commands::mcp::call_mcp_tool,
+            commands::mcp::resolve_chat_question,
+            commands::mcp::resolve_chat_tool_approval,
             commands::mcp::set_builtin_fetch_allow_local_network,
             commands::mcp::test_mcp_connection,
             // Agent 配置迁移中心：只解析用户明确选择的文件，导入的 MCP 默认禁用
@@ -601,6 +604,8 @@ fn main() {
             app.manage(PendingRoundsRequests::default());
             app.manage(PendingQuestions::default());
             app.manage(PendingToolApprovals::default());
+            app.manage(PendingChatQuestions::default());
+            app.manage(PendingChatToolApprovals::default());
             app.manage(WakeRateState::default());
             app.manage(AutoPauseState::default());
             app.manage(MeetingsState::default());

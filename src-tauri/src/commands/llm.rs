@@ -16,7 +16,7 @@ use crate::commands::constants::{
     DEFAULT_LLM_RETRY_COUNT, DEFAULT_LLM_RETRY_INTERVAL_SECS, LLM_CONNECT_TIMEOUT,
     LLM_REQUEST_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
 };
-use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool, MCPTool};
+use crate::commands::mcp::{get_all_mcp_tools, call_mcp_tool_with_context, BuiltinToolContext, MCPTool};
 use crate::commands::file_tools::{self, FileAccessRule};
 use crate::commands::skills::{read_skill_resource_text, Skill};
 use crate::db::DbState;
@@ -168,6 +168,8 @@ pub struct SendMessageRequest {
     pub working_directory: Option<String>,
     #[serde(default)]
     pub file_access_mode: String,
+    #[serde(default)]
+    pub terminal_shell: String,
 }
 
 /// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
@@ -1512,6 +1514,8 @@ async fn execute_tool_calls(
     mcp_tools: &[MCPTool],
     all_skills: &[Skill],
     file_rules: &[FileAccessRule],
+    working_directory: Option<&str>,
+    terminal_shell: &str,
 ) -> Vec<serde_json::Value> {
     let mut tool_results = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
@@ -1540,11 +1544,17 @@ async fn execute_tool_calls(
             file_tools::execute(file_rules, &tool_call.function.name, &serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null))
         } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
             log::info!("Executing MCP tool: {}", tool.name);
-            match call_mcp_tool(
+            match call_mcp_tool_with_context(
                 state.clone(),
                 Some(tool.server_id.clone()),
                 tool.name.clone(),
                 serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null),
+                BuiltinToolContext {
+                    app_handle: Some(app_handle.clone()),
+                    session_id: Some(session_id.to_string()),
+                    working_directory: working_directory.map(str::to_string),
+                    terminal_shell: terminal_shell.to_string(),
+                },
             ).await {
                 Ok(result) => {
                     log::info!("Tool execution result: tool={} original_bytes={}", tool.name, result.to_string().len());
@@ -1626,7 +1636,7 @@ async fn finalize_turn(
         let mut current_calls = tool_calls;
 
         for round in 0..max_tool_rounds {
-            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills, file_rules).await;
+            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills, file_rules, request.working_directory.as_deref(), &request.terminal_shell).await;
             rounds.push((current_calls, tool_results));
             enforce_round_tool_budget(&mut rounds);
 

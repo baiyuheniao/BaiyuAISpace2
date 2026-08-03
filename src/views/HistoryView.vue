@@ -55,6 +55,29 @@ const historyTokenCount = computed(() =>
   )
 );
 
+/**
+ * 按工作目录归档会话：目录组与组内会话都以最后更新时间倒序，
+ * 未设置目录的会话单独归为“未设置工作目录”。
+ */
+const groupedSessions = computed(() => {
+  const groups = new Map<string, ChatSession[]>();
+
+  for (const session of chat.sessions) {
+    const directory = session.workingDirectory?.trim() || "未设置工作目录";
+    const sessions = groups.get(directory) ?? [];
+    sessions.push(session);
+    groups.set(directory, sessions);
+  }
+
+  return [...groups.entries()]
+    .map(([directory, sessions]) => ({
+      directory,
+      sessions: [...sessions].sort((a, b) => b.updatedAt - a.updatedAt),
+      latestUpdatedAt: Math.max(...sessions.map((session) => session.updatedAt)),
+    }))
+    .sort((a, b) => b.latestUpdatedAt - a.latestUpdatedAt);
+});
+
 // ============ 方法函数 ============
 
 /** 导出格式下拉菜单选项 */
@@ -223,20 +246,33 @@ onMounted(() => {
           </n-empty>
         </div>
 
-        <!-- 会话列表 -->
-        <n-list
+        <!-- 按工作目录归档的会话列表；每组内按最近更新时间倒序 -->
+        <div
           v-else
-          class="history-list"
-          hoverable
-          clickable
+          class="history-groups"
         >
-          <!-- 遍历显示每个会话 -->
-          <n-list-item
-            v-for="session in chat.sessions"
-            :key="session.id"
-            class="history-item"
-            @click="handleSessionClick(session)"
+          <section
+            v-for="group in groupedSessions"
+            :key="group.directory"
+            class="history-group"
           >
+            <header class="directory-header">
+              <span class="directory-label">工作目录</span>
+              <code class="directory-path">{{ group.directory }}</code>
+              <span class="directory-count">{{ group.sessions.length }} 条会话</span>
+            </header>
+            <n-list
+              class="history-list"
+              hoverable
+              clickable
+            >
+              <!-- 遍历显示该目录下的会话 -->
+              <n-list-item
+                v-for="session in group.sessions"
+                :key="session.id"
+                class="history-item"
+                @click="handleSessionClick(session)"
+              >
             <n-thing>
               <!-- 会话标题 -->
               <template #header>
@@ -342,8 +378,10 @@ onMounted(() => {
                 <EnterOutline />
               </n-icon>
             </div>
-          </n-list-item>
-        </n-list>
+              </n-list-item>
+            </n-list>
+          </section>
+        </div>
       </div>
     </div>
   </div>
@@ -426,6 +464,47 @@ onMounted(() => {
 /* 会话列表背景 */
 .history-list {
   background: transparent;
+}
+
+.history-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 3rem;
+}
+
+.history-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.directory-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: $border;
+}
+
+.directory-label,
+.directory-count {
+  font-family: $font-mono;
+  font-size: $label-size;
+  letter-spacing: $label-tracking;
+  text-transform: uppercase;
+  color: $ink-faint;
+  white-space: nowrap;
+}
+
+.directory-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: $font-mono;
+  font-size: 13px;
+  color: $ink;
 }
 
 /* 会话项样式 */
