@@ -18,7 +18,7 @@
  * - mcp_servers: MCP 服务器配置表
  */
 
-use crate::types::{ChatMessage, ChatSession, MCPServer, MCPServerType, Skill};
+use crate::types::{ChatMessage, ChatSession, ContextCompaction, MCPServer, MCPServerType, Skill};
 use keyring::Entry;
 use std::sync::Arc;
 use tauri::Manager;
@@ -125,6 +125,20 @@ impl Database {
         if !has_token_usage {
             self.conn.execute("ALTER TABLE messages ADD COLUMN token_usage TEXT", [])?;
         }
+
+        // 压缩记录与原消息分表保存：UI/导出继续读取完整消息，模型请求才按这个
+        // 记录把旧历史替换成摘要。这避免“为省 token 而丢聊天记录”。
+        self.conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS context_compactions (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                summary TEXT NOT NULL,
+                preserve_from_timestamp INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+            [],
+        )?;
 
         self.conn.execute(
             r#"
@@ -393,6 +407,44 @@ impl Database {
         let messages: Result<Vec<_>, _> = rows.collect();
         log::info!("get_messages for session {}: {} messages", session_id, messages.as_ref().map(|m| m.len()).unwrap_or(0));
         Ok(messages?)
+    }
+
+    /// 读取某个会话当前生效的压缩快照。缺失代表该会话仍按完整历史发送。
+    pub fn get_context_compaction(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ContextCompaction>, Box<dyn std::error::Error>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT summary, preserve_from_timestamp, created_at FROM context_compactions WHERE session_id = ?1",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        Ok(rows.next()?.map(|row| -> rusqlite::Result<ContextCompaction> {
+            Ok(ContextCompaction {
+                summary: row.get(0)?,
+                preserve_from_timestamp: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        }).transpose()?)
+    }
+
+    /// 新摘要覆盖旧摘要，但永远不覆盖 `messages` 表中的原始对话。
+    pub fn save_context_compaction(
+        &self,
+        session_id: &str,
+        compaction: &ContextCompaction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.conn.execute(
+            r#"
+            INSERT INTO context_compactions (session_id, summary, preserve_from_timestamp, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(session_id) DO UPDATE SET
+                summary = excluded.summary,
+                preserve_from_timestamp = excluded.preserve_from_timestamp,
+                created_at = excluded.created_at
+            "#,
+            rusqlite::params![session_id, compaction.summary, compaction.preserve_from_timestamp, compaction.created_at],
+        )?;
+        Ok(())
     }
 
     /**

@@ -34,6 +34,7 @@ const chat = useChatStore();
 const pendingWorkingDirectory = ref<string | null>(null);
 const pendingFileAccessMode = ref<"read" | "write">("write");
 const showFileAccessModeModal = ref(false);
+const isCompactingContext = ref(false);
 
 // 设置 Store - 管理 API 配置
 const settings = useSettingsStore();
@@ -80,6 +81,16 @@ const cycleFileAccess = async () => {
   if (!session?.workingDirectory) return;
   const mode = session.fileAccessMode === "write" ? "read" : session.fileAccessMode === "read" ? "none" : "write";
   await chat.setWorkingDirectory(session.workingDirectory, mode);
+};
+
+/** 手动压缩只影响下一轮送往模型的上下文，不会删掉界面中的历史消息。 */
+const compactContext = async () => {
+  isCompactingContext.value = true;
+  try {
+    await chat.compactContext();
+  } finally {
+    isCompactingContext.value = false;
+  }
 };
 
 // ============ 方法函数 ============
@@ -167,6 +178,14 @@ onMounted(async () => {
         :exact="true"
         description="已完成交互的 API 实际 total_tokens 累计；未返回 Usage 的交互不计入"
       />
+      <button
+        class="compact-context-button"
+        type="button"
+        :disabled="isCompactingContext || !hasMessages"
+        @click="compactContext"
+      >
+        {{ isCompactingContext ? "正在压缩…" : "压缩上下文" }}
+      </button>
     </div>
 
     <!-- 消息区域 (滚动容器) -->
@@ -331,6 +350,31 @@ onMounted(async () => {
   font-weight: 500;
   letter-spacing: $label-tracking;
   text-transform: uppercase;
+}
+
+/* 直角黑白按钮；压缩状态只影响活动上下文，完整历史始终可查看和导出。 */
+.compact-context-button {
+  border: $border;
+  border-radius: 0;
+  background: $bg;
+  color: $ink;
+  padding: 4px 9px;
+  font-family: $font-sans;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background $duration-fast $ease, color $duration-fast $ease;
+
+  &:hover:not(:disabled) {
+    background: $ink;
+    color: $bg;
+  }
+
+  &:disabled {
+    color: $ink-faint;
+    border-color: var(--color-line-faint);
+    cursor: not-allowed;
+  }
 }
 
 /* 消息区域 - 占据剩余空间并承担滚动 */

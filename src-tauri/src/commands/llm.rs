@@ -172,6 +172,40 @@ pub struct SendMessageRequest {
     pub terminal_shell: String,
 }
 
+/// 手动压缩上下文的请求。它不携带明文密钥，仍由 Rust 通过配置 ID 从 keyring 读取。
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactChatContextRequest {
+    pub session_id: String,
+    pub messages: Vec<ChatMessage>,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_config_id: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// 用户可选的压缩重点，例如“保留认证改动和当前报错”。
+    #[serde(default)]
+    pub focus: String,
+}
+
+/// 前端只需要知道摘要和从哪条消息开始仍保留原文；完整聊天记录从不删除。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactChatContextResult {
+    pub summary: String,
+    pub preserve_from_timestamp: i64,
+}
+
+/// 数据库中的“活动上下文”快照；原消息仍保留在 messages 表内供查看和导出。
+#[derive(Debug, Clone)]
+pub struct ContextCompaction {
+    pub summary: String,
+    pub preserve_from_timestamp: i64,
+    pub created_at: i64,
+}
+
 /// 工具调用状态事件结构（前端据此展示"正在调用工具/工具调用结果"）
 #[derive(Clone, Serialize)]
 pub struct ToolCallEvent {
@@ -1189,6 +1223,39 @@ pub async fn stream_message(
     // 把手动激活的 skill 的 instructions（加上可读资源文件的内容）作为一段
     // system prompt 注入进去，是和已有的 system 消息合并，而不是替换掉它。
     let mut effective_messages = request.messages.clone();
+
+    // 压缩不会删掉历史消息；它只改变这一轮实际送入模型的“活动上下文”。
+    // 系统消息继续完整保留，较早对话由最新摘要替代，最近几轮仍原样保留。
+    let context_compaction = {
+        let db = state.0.lock().await;
+        db.get_context_compaction(&request.session_id)
+            .map_err(|e| LLMError::ApiError(format!("读取上下文摘要失败: {e}")))?
+    };
+    if let Some(compaction) = context_compaction {
+        effective_messages.retain(|message| {
+            message.role == "system" || message.timestamp >= compaction.preserve_from_timestamp
+        });
+        let summary_block = format!(
+            "【此前对话的压缩交接摘要】\n{}\n【摘要结束；请以最近原始消息为准】",
+            compaction.summary
+        );
+        if let Some(system) = effective_messages.iter_mut().find(|message| message.role == "system") {
+            // Anthropic 的 system 字段在请求构造时只取一条，必须在这里合并，
+            // 不能再单独插入第二条 system 消息。
+            system.content = format!("{}\n\n{}", system.content, summary_block);
+        } else {
+            effective_messages.insert(0, ChatMessage {
+                id: Uuid::new_v4().to_string(),
+                role: "system".to_string(),
+                content: summary_block,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                error: None,
+                images: vec![],
+                videos: vec![],
+                token_usage: None,
+            });
+        }
+    }
     if !active_skills.is_empty() {
         let skill_context = build_skill_context(&active_skills, &app_handle).await;
         if !skill_context.is_empty() {
@@ -2578,16 +2645,21 @@ fn build_run_turn_body(
 }
 
 fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
+    get_api_key_for_config(&request.provider, &request.api_config_id)
+}
+
+/// 普通对话和“压缩摘要”共用同一条 keyring 读取路径，避免任何密钥进入 IPC。
+fn get_api_key_for_config(provider: &str, api_config_id: &str) -> Result<String, LLMError> {
     // 本地模型不需要 API key
-    if request.provider == "local" {
+    if provider == "local" {
         return Ok(String::new());
     }
     // 没有传 api_key —— 退回到以 provider 为键的系统 keyring 查找。
     // 前端调用 save_api_key(provider, key) 时，keyring 里的标签就是
     // "api_keys_{provider}"。这样一来，只要密钥已经存在 keyring 里，
     // 调用方就可以逐步不再在 IPC 请求里嵌入明文密钥。
-    if !request.api_config_id.is_empty() {
-        let label = format!("api_keys_{}", request.api_config_id);
+    if !api_config_id.is_empty() {
+        let label = format!("api_keys_{}", api_config_id);
         if let Ok(entry) = KeyringEntry::new("BaiyuAISpace", &label) {
             if let Ok(key) = entry.get_password() {
                 if !key.is_empty() {
@@ -2598,6 +2670,95 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
         }
     }
     Err(LLMError::MissingApiKey)
+}
+
+const COMPACTION_SYSTEM_PROMPT: &str = r#"你是桌面 AI 助手的上下文压缩器。请把对话写成供下一轮模型继续工作的结构化交接摘要。
+
+必须保留：用户目标和硬约束；已完成工作；已证实事实及证据；涉及的文件、路径、命令、配置键、版本号和报错原文；已尝试且排除的方案；未完成事项和下一步。不要编造，不要把“可能”写成事实。具体名称和数值尽量原样保留。只输出中文 Markdown 摘要，不要回答原对话中的问题。"#;
+
+fn build_compaction_source(messages: &[ChatMessage]) -> String {
+    const MAX_MESSAGE_CHARS: usize = 8_000;
+    const MAX_SOURCE_CHARS: usize = 96_000;
+    let mut source = String::new();
+
+    for message in messages.iter().filter(|message| message.role != "system") {
+        if source.len() >= MAX_SOURCE_CHARS {
+            source.push_str("\n\n【其余较早消息因压缩输入预算未纳入；请勿猜测其内容】");
+            break;
+        }
+        let role = match message.role.as_str() {
+            "assistant" => "助手",
+            _ => "用户",
+        };
+        let content: String = message.content.chars().take(MAX_MESSAGE_CHARS).collect();
+        source.push_str(&format!("\n\n### {role}\n{content}"));
+        if message.content.chars().count() > MAX_MESSAGE_CHARS {
+            source.push_str("\n【该条消息过长，后续部分未纳入摘要输入】");
+        }
+    }
+    source
+}
+
+/// 手动创建上下文摘要并持久化活动上下文边界。该操作不删除任何历史消息。
+#[tauri::command]
+pub async fn compact_chat_context(
+    request: CompactChatContextRequest,
+    state: tauri::State<'_, DbState>,
+) -> Result<CompactChatContextResult, LLMError> {
+    let non_system: Vec<&ChatMessage> = request
+        .messages
+        .iter()
+        .filter(|message| message.role != "system" && !message.content.trim().is_empty())
+        .collect();
+    if non_system.len() < 4 {
+        return Err(LLMError::ApiError("至少需要两轮完整对话才能压缩上下文".to_string()));
+    }
+
+    let preserve_from_timestamp = non_system
+        .iter()
+        .rev()
+        .take(6)
+        .last()
+        .map(|message| message.timestamp)
+        .unwrap_or(0);
+    let focus = request.focus.trim();
+    let source = build_compaction_source(&request.messages);
+    let prompt = if focus.is_empty() {
+        format!("请压缩下面的完整历史。\n{source}")
+    } else {
+        format!("压缩重点：{focus}\n\n请压缩下面的完整历史。\n{source}")
+    };
+    let api_key = get_api_key_for_config(&request.provider, &request.api_config_id)?;
+    let native_messages = vec![serde_json::json!({ "role": "user", "content": prompt })];
+    let outcome = run_turn(
+        &request.provider,
+        &request.model,
+        &api_key,
+        &request.base_url,
+        Some(COMPACTION_SYSTEM_PROMPT),
+        &native_messages,
+        &[],
+        Some(request.max_tokens.unwrap_or(3_000).clamp(1_000, 6_000)),
+        false,
+    )
+    .await?;
+    let summary = match outcome {
+        TurnOutcome::Text(text) if !text.trim().is_empty() => text,
+        TurnOutcome::Text(_) => return Err(LLMError::ApiError("模型没有返回可用的上下文摘要".to_string())),
+        TurnOutcome::ToolCalls(_) => return Err(LLMError::ApiError("压缩模型意外请求了工具调用".to_string())),
+    };
+    let compaction = ContextCompaction {
+        summary: summary.clone(),
+        preserve_from_timestamp,
+        created_at: chrono::Utc::now().timestamp_millis(),
+    };
+    {
+        let db = state.0.lock().await;
+        db.save_context_compaction(&request.session_id, &compaction)
+            .map_err(|e| LLMError::ApiError(format!("保存上下文摘要失败: {e}")))?;
+    }
+    log::info!("[LLM] Context compacted: session={} preserve_from={}", request.session_id, preserve_from_timestamp);
+    Ok(CompactChatContextResult { summary, preserve_from_timestamp })
 }
 
 /// 取消某个会话正在进行的流
