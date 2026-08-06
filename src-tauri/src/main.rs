@@ -369,7 +369,8 @@ fn main() {
             commands::mcp::resolve_chat_tool_approval,
             commands::mcp::set_builtin_fetch_allow_local_network,
             commands::mcp::test_mcp_connection,
-            // Agent 配置迁移中心：只解析用户明确选择的文件，导入的 MCP 默认禁用
+            // Agent 配置迁移中心：仅在用户触发时发现常见来源，导入的 MCP 默认禁用
+            commands::importer::detect_agent_import_sources,
             commands::importer::preview_agent_import,
             commands::importer::import_mcp_servers,
             commands::importer::import_skill_directory,
