@@ -888,6 +888,60 @@ export const useChatStore = defineStore("chat", () => {
   };
 
   /**
+   * 手动创建当前会话的上下文交接摘要。
+   *
+   * 完整消息仍留在 SQLite 和界面中；后端只记录“从哪条消息开始保留原文”，
+   * 后续请求会自动使用“摘要 + 最近消息”。图片/视频不参加摘要请求，避免
+   * base64 附件本身把压缩请求撑爆。
+   */
+  const compactContext = async (focus = "") => {
+    const session = currentSession.value;
+    const config = resolveActiveConfig();
+    if (!session || !config || isLoading.value) return false;
+
+    const completedMessages = session.messages.filter(
+      (message) => !message.streaming && !message.error && message.content.trim(),
+    );
+    if (completedMessages.length < 4) {
+      const notice = "至少完成两轮对话后，才能压缩上下文。";
+      if (!warningNotices.value.includes(notice)) warningNotices.value.push(notice);
+      return false;
+    }
+
+    try {
+      await invoke("compact_chat_context", {
+        request: {
+          sessionId: String(session.id),
+          messages: completedMessages.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            timestamp: message.timestamp,
+            error: message.error,
+            // 压缩器只需要文本证据；不要通过 IPC 传输附件 base64。
+            images: [],
+            videos: [],
+          })),
+          provider: config.provider,
+          model: config.model,
+          apiConfigId: config.id,
+          baseUrl: config.baseUrl,
+          maxTokens: config.maxTokens ?? null,
+          focus,
+        },
+      });
+      const notice = "已压缩活动上下文；完整聊天记录仍保留。";
+      if (!warningNotices.value.includes(notice)) warningNotices.value.push(notice);
+      return true;
+    } catch (error) {
+      console.error("Failed to compact chat context:", error);
+      const notice = `上下文压缩失败：${classifyError(error).message}`;
+      if (!errorNotices.value.includes(notice)) errorNotices.value.push(notice);
+      return false;
+    }
+  };
+
+  /**
    * 从数据库批量删除消息（编辑/重新生成截断旧分支时用）
    * 失败塞进 dbSaveErrorNotices 队列走统一弹窗，理由同 saveMessageToDb——
    * store 里拿不到 NMessageProvider 上下文，没法直接弹窗
@@ -1122,6 +1176,7 @@ export const useChatStore = defineStore("chat", () => {
     createSession, // 创建新会话
     loadSession, // 加载会话
     sendMessage, // 发送消息
+    compactContext, // 生成摘要并切换活动上下文，不删除历史记录
     editUserMessage, // 编辑用户消息并重新生成
     regenerateMessage, // 重新生成 AI 回复
     deleteSession, // 删除会话

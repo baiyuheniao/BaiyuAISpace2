@@ -6,5 +6,6 @@
 // 位置导入，而不必反过来依赖 commands/ 目录。
 // 类型的权威定义仍然放在各自的 command 模块里；这里只做重新导出。
 pub use crate::commands::llm::{ChatMessage, ChatSession};
+pub use crate::commands::llm::ContextCompaction;
 pub use crate::commands::mcp::{MCPServer, MCPServerType};
 pub use crate::commands::skills::Skill;

@@ -333,6 +333,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // LLM 相关命令
             commands::llm::stream_message,
+            commands::llm::compact_chat_context,
             commands::llm::cancel_stream,
             // 检测最新版本(设置页手动检测按钮)
             commands::app_update::check_latest_releases,
