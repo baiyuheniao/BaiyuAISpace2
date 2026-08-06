@@ -44,6 +44,13 @@ interface ProjectRuleFile {
   content: string;
 }
 
+interface DetectedImportSource {
+  path: string;
+  sourceKind: string;
+  importKind: "mcp" | "skill";
+  label: string;
+}
+
 type Section = "mcp" | "skill" | "rules";
 
 const message = useMessage();
@@ -56,13 +63,59 @@ const skillPreview = ref<AgentImportPreview | null>(null);
 const projectRules = ref<ProjectRuleFile[]>([]);
 const selectedRulePath = ref<string | null>(null);
 const ruleContent = ref("");
+const detectedSources = ref<DetectedImportSource[]>([]);
 const selectedRule = computed(() => projectRules.value.find((rule) => rule.path === selectedRulePath.value) ?? null);
+const detectedMcpSources = computed(() => detectedSources.value.filter((source) => source.importKind === "mcp"));
+const detectedSkillSources = computed(() => detectedSources.value.filter((source) => source.importKind === "skill"));
 
 const getOnePath = (result: string | string[] | null): string | null =>
   Array.isArray(result) ? result[0] ?? null : result;
 
 const preview = async (path: string): Promise<AgentImportPreview> =>
   invoke<AgentImportPreview>("preview_agent_import", { sourcePath: path });
+
+const detectSources = async () => {
+  isBusy.value = true;
+  try {
+    detectedSources.value = await invoke<DetectedImportSource[]>("detect_agent_import_sources");
+    if (detectedSources.value.length === 0) {
+      message.info("未发现可迁移的常见配置；你仍可手动选择文件或文件夹");
+      return;
+    }
+    message.success(`发现 ${detectedSources.value.length} 个可迁移来源`);
+  } catch (error) {
+    message.error(String(error));
+  } finally {
+    isBusy.value = false;
+  }
+};
+
+const previewDetectedMcp = async (source: DetectedImportSource) => {
+  isBusy.value = true;
+  try {
+    const result = await preview(source.path);
+    if (result.mcpServers.length === 0) throw new Error("这个来源中没有可导入的 MCP 服务");
+    mcpPreview.value = result;
+    selectedMcpNames.value = result.mcpServers.map((server) => server.name);
+  } catch (error) {
+    message.error(String(error));
+  } finally {
+    isBusy.value = false;
+  }
+};
+
+const previewDetectedSkill = async (source: DetectedImportSource) => {
+  isBusy.value = true;
+  try {
+    const result = await preview(source.path);
+    if (!result.skill) throw new Error("这个来源中没有可导入的 SKILL.md");
+    skillPreview.value = result;
+  } catch (error) {
+    message.error(String(error));
+  } finally {
+    isBusy.value = false;
+  }
+};
 
 const chooseMcpConfig = async () => {
   const path = getOnePath(await openFileDialog({
@@ -213,7 +266,17 @@ const importRuleAsSkill = async () => {
           支持 Claude Desktop、Claude Code 的 JSON 配置与 Codex TOML 配置。环境变量、请求头和认证信息不会被复制；导入后的服务默认关闭。
         </div>
       </div>
-      <button class="primary-action" :disabled="isBusy" @click="chooseMcpConfig">选择 MCP 配置文件</button>
+      <div class="source-actions">
+        <button class="primary-action" :disabled="isBusy" @click="detectSources">自动发现本机配置</button>
+        <button class="secondary-action" :disabled="isBusy" @click="chooseMcpConfig">手动选择 MCP 配置文件</button>
+      </div>
+      <div v-if="detectedMcpSources.length" class="discovery-block enter-up">
+        <div class="discovery-head"><span>已发现的 MCP 配置</span><span>仅扫描常见安装位置</span></div>
+        <div v-for="source in detectedMcpSources" :key="source.path" class="discovery-row">
+          <div><strong>{{ source.label }}</strong><small>{{ source.path }}</small></div>
+          <button class="secondary-action" :disabled="isBusy" @click="previewDetectedMcp(source)">预览并导入</button>
+        </div>
+      </div>
 
       <div v-if="mcpPreview" class="preview-block enter-up">
         <div class="preview-head">
@@ -239,7 +302,17 @@ const importRuleAsSkill = async () => {
         </div>
         <div class="rule-copy">选择包含 <code>SKILL.md</code> 的文件夹。正文会成为 Skill 指令，同级常规文件会作为资源副本保存；导入的 Skill 默认关闭。</div>
       </div>
-      <button class="primary-action" :disabled="isBusy" @click="chooseSkillDirectory">选择 Skill 文件夹</button>
+      <div class="source-actions">
+        <button class="primary-action" :disabled="isBusy" @click="detectSources">自动发现本机 Skill</button>
+        <button class="secondary-action" :disabled="isBusy" @click="chooseSkillDirectory">手动选择 Skill 文件夹</button>
+      </div>
+      <div v-if="detectedSkillSources.length" class="discovery-block enter-up">
+        <div class="discovery-head"><span>已发现的 Skill</span><span>仅扫描常见安装位置</span></div>
+        <div v-for="source in detectedSkillSources" :key="source.path" class="discovery-row">
+          <div><strong>{{ source.label }}</strong><small>{{ source.path }}</small></div>
+          <button class="secondary-action" :disabled="isBusy" @click="previewDetectedSkill(source)">预览并导入</button>
+        </div>
+      </div>
       <div v-if="skillPreview?.skill" class="preview-block skill-preview enter-up">
         <p class="section-label">准备导入</p>
         <h3>{{ skillPreview.skill.name }}</h3>
@@ -301,6 +374,15 @@ code { font-family: $font-mono; font-size: .9em; }
 .secondary-action { background: $bg; color: $ink; }
 .primary-action:hover:not(:disabled), .secondary-action:hover:not(:disabled) { background: $surface; color: $ink; }
 button:disabled { cursor: not-allowed; opacity: .45; }
+.source-actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+.discovery-block { margin-top: 2rem; border: $border; }
+.discovery-head { display: flex; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: $border; color: $ink-soft; font-family: $font-mono; font-size: .73rem; }
+.discovery-row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 1rem; border-bottom: $border-faint; }
+.discovery-row:last-child { border-bottom: 0; }
+.discovery-row div { min-width: 0; }
+.discovery-row strong, .discovery-row small { display: block; }
+.discovery-row strong { font-family: $font-serif; }
+.discovery-row small { margin-top: .35rem; color: $ink-soft; font-family: $font-mono; font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-block { margin-top: 3rem; border: $border; }
 .preview-head, .editor-head { display: flex; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: $border; color: $ink-soft; font-family: $font-mono; font-size: .73rem; }
 .mcp-row { display: grid; grid-template-columns: auto minmax(130px, .3fr) 1fr auto; gap: 1rem; align-items: center; padding: 1rem; border-bottom: $border-faint; cursor: pointer; }
@@ -324,5 +406,5 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   from { opacity: 0; transform: translateY(40px) scale(.95); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-@media (max-width: 820px) { .migration-page { padding: 2rem 1.5rem 4rem; } .page-head, .intro-grid { grid-template-columns: 1fr; display: grid; gap: 1.5rem; align-items: start; } .migration-nav { grid-template-columns: 1fr; } .migration-nav button { border-right: 0; border-bottom: $border-faint; } .mcp-row { grid-template-columns: auto 1fr; } .server-detail { grid-column: 2; } .security-mark { grid-column: 2; justify-self: start; } .rule-workbench { grid-template-columns: 1fr; } .rule-list { border-right: 0; border-bottom: $border; max-height: 180px; } }
+@media (max-width: 820px) { .migration-page { padding: 2rem 1.5rem 4rem; } .page-head, .intro-grid { grid-template-columns: 1fr; display: grid; gap: 1.5rem; align-items: start; } .migration-nav { grid-template-columns: 1fr; } .migration-nav button { border-right: 0; border-bottom: $border-faint; } .mcp-row { grid-template-columns: auto 1fr; } .server-detail { grid-column: 2; } .security-mark { grid-column: 2; justify-self: start; } .discovery-row { align-items: flex-start; flex-direction: column; } .rule-workbench { grid-template-columns: 1fr; } .rule-list { border-right: 0; border-bottom: $border; max-height: 180px; } }
 </style>

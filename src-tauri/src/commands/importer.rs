@@ -4,8 +4,9 @@
 
 //! 外部 Agent 配置迁移。
 //!
-//! 本模块刻意只读取用户在文件选择器中明确选中的路径。MCP 凭证、环境变量值和
-//! 请求头绝不导入；所有导入的 MCP 默认禁用，必须由用户检查后再启用。
+//! 本模块会在用户主动点击“自动发现”后，仅读取常见 Agent 配置目录中的已知文件；也
+//! 支持读取用户在文件选择器中明确选中的路径。MCP 凭证、环境变量值和请求头绝不
+//! 导入；所有导入的 MCP 默认禁用，必须由用户检查后再启用。
 
 use crate::commands::mcp::{MCPServer, MCPServerType};
 use crate::commands::skills::{skill_resources_dir, Skill};
@@ -23,6 +24,8 @@ const MAX_SKILL_RESOURCES: usize = 64;
 const MAX_SKILL_RESOURCE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_RULE_FILES: usize = 100;
 const MAX_RULE_SCAN_DEPTH: usize = 8;
+const MAX_DISCOVERED_SOURCES: usize = 100;
+const MAX_SKILL_SCAN_DEPTH: usize = 3;
 
 #[derive(Error, Debug)]
 pub enum ImportError {
@@ -91,6 +94,17 @@ pub struct ProjectRuleFile {
     pub content: String,
 }
 
+/// 自动发现只返回来源的路径和种类，不会把配置内容发送到前端。
+/// 用户仍需先预览并明确确认，才会写入本应用数据库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedImportSource {
+    pub path: String,
+    pub source_kind: String,
+    pub import_kind: String,
+    pub label: String,
+}
+
 fn read_limited(path: &Path) -> Result<String, ImportError> {
     let metadata = fs::metadata(path).map_err(|e| ImportError::Read(e.to_string()))?;
     if metadata.len() > MAX_CONFIG_BYTES {
@@ -110,6 +124,7 @@ fn source_kind(path: &Path) -> &'static str {
         .as_str()
     {
         "claude_desktop_config.json" => "Claude Desktop",
+        ".claude.json" => "Claude Code",
         ".mcp.json" => "Claude Code",
         "config.toml" => "Codex",
         "skill.md" => "Skill",
@@ -455,6 +470,99 @@ fn direct_skill_resources(root: &Path) -> Result<Vec<PathBuf>, ImportError> {
         }
     }
     Ok(files)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+fn add_detected_mcp_source(path: PathBuf, sources: &mut Vec<DetectedImportSource>) {
+    if sources.len() >= MAX_DISCOVERED_SOURCES || !path.is_file() {
+        return;
+    }
+    // 只保留确实含有可迁移 MCP 的已知配置，避免展示无法导入的普通配置文件。
+    if !matches!(parse_mcp_file(&path), Ok(servers) if !servers.is_empty()) {
+        return;
+    }
+    sources.push(DetectedImportSource {
+        label: source_kind(&path).to_string(),
+        source_kind: source_kind(&path).to_string(),
+        import_kind: "mcp".to_string(),
+        path: path.to_string_lossy().to_string(),
+    });
+}
+
+fn scan_skill_roots(dir: &Path, depth: usize, sources: &mut Vec<DetectedImportSource>) {
+    if depth > MAX_SKILL_SCAN_DEPTH || sources.len() >= MAX_DISCOVERED_SOURCES {
+        return;
+    }
+    if dir.join("SKILL.md").is_file() {
+        let label = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Skill")
+            .to_string();
+        sources.push(DetectedImportSource {
+            path: dir.to_string_lossy().to_string(),
+            source_kind: "Skill".to_string(),
+            import_kind: "skill".to_string(),
+            label,
+        });
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if sources.len() >= MAX_DISCOVERED_SOURCES {
+            return;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".git") | Some("node_modules") | Some("target") | Some("dist")
+        ) {
+            continue;
+        }
+        scan_skill_roots(&path, depth + 1, sources);
+    }
+}
+
+#[tauri::command]
+pub async fn detect_agent_import_sources() -> Vec<DetectedImportSource> {
+    let Some(home) = user_home_dir() else {
+        return vec![];
+    };
+    let mut sources = Vec::new();
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        add_detected_mcp_source(
+            PathBuf::from(app_data)
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+            &mut sources,
+        );
+    }
+    for path in [
+        home.join(".claude.json"),
+        home.join(".codex").join("config.toml"),
+    ] {
+        add_detected_mcp_source(path, &mut sources);
+    }
+    for root in [
+        home.join(".claude").join("skills"),
+        home.join(".codex").join("skills"),
+    ] {
+        scan_skill_roots(&root, 0, &mut sources);
+    }
+    sources
 }
 
 fn is_rule_file(path: &Path) -> bool {
