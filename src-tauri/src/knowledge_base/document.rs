@@ -79,14 +79,19 @@ pub async fn parse_document(file_path: &str) -> Result<String, KnowledgeBaseErro
                 .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
             strip_html_tags(&raw)
         }
-        DocumentFormat::Markdown | DocumentFormat::Txt => {
-            tokio::fs::read_to_string(file_path)
-                .await
-                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
-        }
+        DocumentFormat::Markdown | DocumentFormat::Txt => tokio::fs::read_to_string(file_path)
+            .await
+            .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?,
     };
 
-    Ok(clean_text(&content))
+    let content = clean_text(&content);
+    if content.is_empty() {
+        return Err(KnowledgeBaseError::DocumentParseError(
+            "未从文档中提取到可用于知识库的文本".into(),
+        ));
+    }
+
+    Ok(content)
 }
 
 // ============ PDF ============
@@ -116,9 +121,10 @@ async fn try_pdftotext(file_path: &str) -> Result<String, ()> {
 /// 但中文整段消失），不会触发任何错误，也就永远走不到下面的回退分支。
 async fn parse_pdf(file_path: &str) -> Result<String, KnowledgeBaseError> {
     let path_owned = file_path.to_string();
-    let extract_result = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&path_owned))
-        .await
-        .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+    let extract_result =
+        tokio::task::spawn_blocking(move || pdf_extract::extract_text(&path_owned))
+            .await
+            .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
 
     let pdftotext_result = try_pdftotext(file_path).await.ok();
 
@@ -149,19 +155,46 @@ async fn parse_word(file_path: &str) -> Result<String, KnowledgeBaseError> {
         .await
         .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("读取 DOCX 失败: {}", e)))?;
 
-    use std::io::Read;
     let cursor = std::io::Cursor::new(&bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|_| {
-        KnowledgeBaseError::DocumentParseError("无法解析 DOCX 文件（格式损坏或不是有效 ZIP）".into())
+        KnowledgeBaseError::DocumentParseError(
+            "无法解析 DOCX 文件（格式损坏或不是有效 ZIP）".into(),
+        )
     })?;
 
-    let mut xml_content = String::new();
-    if let Ok(mut file) = archive.by_name("word/document.xml") {
-        file.read_to_string(&mut xml_content)
-            .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
-    }
+    let file = archive.by_name("word/document.xml").map_err(|_| {
+        KnowledgeBaseError::DocumentParseError(
+            "DOCX 缺少 Word 正文内容（word/document.xml）".into(),
+        )
+    })?;
+    let xml_content = read_zip_entry_lossy(file, "DOCX 正文 XML")?;
 
     Ok(extract_text_from_docx_xml(&xml_content))
+}
+
+/// 读取 Office ZIP 内的 XML。现实中少量 Office 文件会夹带非 UTF-8 字节；
+/// 以替换字符保留可读取的正文，避免单个坏字节让整份文档无法导入。
+fn read_zip_entry_lossy(
+    mut file: zip::read::ZipFile<'_>,
+    entry_description: &str,
+) -> Result<String, KnowledgeBaseError> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| {
+        KnowledgeBaseError::DocumentParseError(format!("读取 {entry_description} 失败: {e}"))
+    })?;
+
+    match String::from_utf8(bytes) {
+        Ok(xml) => Ok(xml),
+        Err(error) => {
+            let byte_count = error.as_bytes().len();
+            log::warn!(
+                "{entry_description} 含非 UTF-8 字节，已使用容错解码继续提取文本（{byte_count} 字节）"
+            );
+            Ok(String::from_utf8_lossy(error.as_bytes()).into_owned())
+        }
+    }
 }
 
 /// 从 DOCX XML 中提取纯文本，保留段落换行及表格结构（单元格用 Tab 分隔，行用换行）。
@@ -170,7 +203,7 @@ async fn parse_word(file_path: &str) -> Result<String, KnowledgeBaseError> {
 /// 判断逻辑：行结束（TR）优先于单元格结束（TC）优先于段落结束（PP）。
 fn extract_text_from_docx_xml(xml: &str) -> String {
     const CELL_END: &str = "\x02TC\x02";
-    const ROW_END: &str  = "\x02TR\x02";
+    const ROW_END: &str = "\x02TR\x02";
     const PARA_END: &str = "\x02PP\x02";
 
     let xml = xml
@@ -209,10 +242,11 @@ async fn parse_pptx(file_path: &str) -> Result<String, KnowledgeBaseError> {
         .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
 
     tokio::task::spawn_blocking(move || {
-        use std::io::Read;
         let cursor = std::io::Cursor::new(&bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|_| {
-            KnowledgeBaseError::DocumentParseError("无法解析 PPTX 文件".into())
+            KnowledgeBaseError::DocumentParseError(
+                "无法解析 PPTX 文件（格式损坏或不是有效 ZIP）".into(),
+            )
         })?;
 
         // 收集幻灯片文件名并按页码排序
@@ -221,15 +255,18 @@ async fn parse_pptx(file_path: &str) -> Result<String, KnowledgeBaseError> {
             .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
             .collect();
         slide_names.sort();
+        if slide_names.is_empty() {
+            return Err(KnowledgeBaseError::DocumentParseError(
+                "PPTX 未找到可解析的幻灯片内容".into(),
+            ));
+        }
 
         let mut result = String::new();
         for (idx, name) in slide_names.iter().enumerate() {
-            let mut xml = String::new();
-            archive
-                .by_name(name)
-                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?
-                .read_to_string(&mut xml)
-                .map_err(|e| KnowledgeBaseError::DocumentParseError(e.to_string()))?;
+            let file = archive.by_name(name).map_err(|e| {
+                KnowledgeBaseError::DocumentParseError(format!("读取 PPTX 幻灯片内容失败: {e}"))
+            })?;
+            let xml = read_zip_entry_lossy(file, "PPTX 幻灯片 XML")?;
             result.push_str(&format!("--- 第 {} 页 ---\n", idx + 1));
             result.push_str(&extract_text_from_pptx_xml(&xml));
             result.push('\n');
@@ -276,9 +313,8 @@ async fn parse_excel(file_path: &str) -> Result<String, KnowledgeBaseError> {
     let path_owned = file_path.to_string();
     tokio::task::spawn_blocking(move || {
         use calamine::{open_workbook_auto, Reader};
-        let mut workbook = open_workbook_auto(&path_owned).map_err(|e| {
-            KnowledgeBaseError::DocumentParseError(format!("Excel 解析失败: {e}"))
-        })?;
+        let mut workbook = open_workbook_auto(&path_owned)
+            .map_err(|e| KnowledgeBaseError::DocumentParseError(format!("Excel 解析失败: {e}")))?;
         let sheet_names = workbook.sheet_names().to_vec();
         let mut result = String::new();
         for sheet_name in sheet_names {
@@ -330,9 +366,9 @@ fn strip_html_tags(html: &str) -> String {
                     match base {
                         "br" => result.push('\n'),
                         "td" | "th" => result.push('\t'),
-                        "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                        | "li" | "tr" | "blockquote" | "pre" | "article"
-                        | "section" | "header" | "footer" | "nav" | "main" => {
+                        "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "tr"
+                        | "blockquote" | "pre" | "article" | "section" | "header" | "footer"
+                        | "nav" | "main" => {
                             result.push('\n');
                         }
                         _ => {}
@@ -386,17 +422,8 @@ pub async fn calculate_file_hash(file_path: &str) -> Result<String, KnowledgeBas
 /// 标题分隔符保留在左侧块末尾（含 `\n# ` 字符），对语义影响极小。
 /// 之后依次是段落、句子、逗号、空格，最后由 `hard_split_by_chars` 兜底。
 const SPLIT_SEPARATORS: &[&str] = &[
-    "\n# ",
-    "\n## ",
-    "\n### ",
-    "\n#### ",
-    "\n##### ",
-    "\n\n",
-    "\n",
-    "。", "！", "？", "；",
-    ". ", "! ", "? ", "; ",
-    "，", ", ",
-    " ",
+    "\n# ", "\n## ", "\n### ", "\n#### ", "\n##### ", "\n\n", "\n", "。", "！", "？", "；", ". ",
+    "! ", "? ", "; ", "，", ", ", " ",
 ];
 
 /// 按字符数（而非字节数）统计长度。UI 上"分块大小"标注的单位是字符数
@@ -417,7 +444,11 @@ fn tail_chars(s: &str, n: usize) -> &str {
         return s;
     }
     let skip = total - n;
-    let byte_idx = s.char_indices().nth(skip).map(|(b, _)| b).unwrap_or(s.len());
+    let byte_idx = s
+        .char_indices()
+        .nth(skip)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
     &s[byte_idx..]
 }
 
@@ -542,4 +573,120 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
 pub fn estimate_tokens(text: &str) -> i32 {
     let char_count = text.chars().count();
     (char_count / 3) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_office_zip(entries: &[(&str, &[u8])], extension: &str) -> PathBuf {
+        let sequence = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "baiyu_knowledge_base_document_{}_{}_{}.{}",
+            std::process::id(),
+            sequence,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            extension
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, content) in entries {
+            writer
+                .start_file(*name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn parses_docx_with_non_utf8_xml_bytes() {
+        let xml = b"<w:document><w:body><w:p><w:r><w:t>\xE5\x89\x8D\xFF\xE5\x90\x8E</w:t></w:r></w:p></w:body></w:document>";
+        let path = write_office_zip(&[("word/document.xml", xml)], "docx");
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), "前�后");
+    }
+
+    #[tokio::test]
+    async fn parses_pptx_with_non_utf8_xml_bytes() {
+        let xml = b"<p:sld><a:p><a:r><a:t>\xE5\x89\x8D\xFF\xE5\x90\x8E</a:t></a:r></a:p></p:sld>";
+        let path = write_office_zip(&[("ppt/slides/slide1.xml", xml)], "pptx");
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result.unwrap().contains("前�后"));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_docx_document_xml() {
+        let path = write_office_zip(&[("word/styles.xml", b"<w:styles/>")], "docx");
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("DOCX 缺少 Word 正文内容"));
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_docx_zip() {
+        let sequence = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "baiyu_knowledge_base_invalid_document_{}_{}.docx",
+            std::process::id(),
+            sequence
+        ));
+        std::fs::write(&path, b"not a zip archive").unwrap();
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("无法解析 DOCX 文件（格式损坏或不是有效 ZIP）"));
+    }
+
+    #[tokio::test]
+    async fn reports_pptx_without_slides() {
+        let path = write_office_zip(&[("ppt/presentation.xml", b"<p:presentation/>")], "pptx");
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("PPTX 未找到可解析的幻灯片内容"));
+    }
+
+    #[tokio::test]
+    async fn reports_empty_extracted_office_text() {
+        let xml = b"<w:document><w:body><w:p/></w:body></w:document>";
+        let path = write_office_zip(&[("word/document.xml", xml)], "docx");
+
+        let result = parse_document(path.to_str().unwrap()).await;
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("未从文档中提取到可用于知识库的文本"));
+    }
 }

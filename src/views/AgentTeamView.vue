@@ -33,7 +33,7 @@ import ChatMessage from "@/components/ChatMessage.vue";
 import TokenCount from "@/components/TokenCount.vue";
 import { countMessageTokens } from "@/utils/tokenCount";
 import {
-  useWorkspaceStore, AGENT_GUIDELINES_BASE, AGENT_GUIDELINES_SUB,
+  useWorkspaceStore, AGENT_GUIDELINES_MAIN, AGENT_GUIDELINES_SUB,
   type AgentProposalEvent, type AgentRole, type AgentStatus, type CreateAgentRequest,
   type UpdateAgentRequest, type WorkspaceAgent, type WorkspaceAgentTask, type WorkspaceLogEntry,
   type ToolApprovalEvent,
@@ -119,7 +119,7 @@ const showCreateAgentModal = ref(false);
 // 系统提示词预填默认协作行为准则（防止 Agent 间无意义互相唤醒刷 API 调用），
 // 用户可见、可改、可删。主管/子 Agent 的准则略有差异（休眠条目子 Agent 才有）。
 const roleGuidelines: Record<AgentRole, string> = {
-  main: AGENT_GUIDELINES_BASE,
+  main: AGENT_GUIDELINES_MAIN,
   sub: AGENT_GUIDELINES_SUB,
 };
 const emptyAgentForm = (): CreateAgentRequest => ({
