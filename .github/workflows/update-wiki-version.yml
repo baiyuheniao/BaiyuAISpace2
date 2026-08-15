@@ -1,0 +1,27 @@
+name: Update Wiki version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-wiki-version.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update-wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Wiki
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+      - name: Update version
+        run: |
+          sed -i 's/v0.2.0-beta.31/v0.2.0-beta.40/g' wiki/Home.md
+          git -C wiki config user.name "github-actions[bot]"
+          git -C wiki config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C wiki add Home.md
+          git -C wiki diff --cached --quiet || git -C wiki commit -m "docs: update Wiki version to beta.40"
+          git -C wiki push
