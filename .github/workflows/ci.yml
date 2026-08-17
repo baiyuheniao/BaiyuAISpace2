@@ -53,3 +53,8 @@ jobs:
       # cargo check 比完整 build 快，作为编译门禁足够
       - name: Backend compile check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      # 仓库已有 Agent Team 数据库/命令、LLM 请求体、RAG 文档解析等单元测试；
+      # 只做 cargo check 只能证明代码能编译，无法阻止已覆盖行为发生回归。
+      - name: Backend unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
