@@ -329,14 +329,26 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const lastTaskUpdateAgentId = ref<string | null>(null);
 
   let unlistenFns: UnlistenFn[] = [];
+  // Layout 与 AgentTeamView 都会在挂载时调用 initListeners。旧实现只检查
+  // unlistenFns.length，而 listen() 全部 await 完之前它始终是 0；两处并发
+  // 调用就会各注册一整套监听器，导致消息、日志和审批卡片成双出现。
+  // 缓存初始化中的 Promise，让并发调用共享同一轮注册；失败后清理已注册的
+  // 部分监听器并清空 Promise，后续调用仍可重试。
+  let initListenersPromise: Promise<void> | null = null;
+
+  const pushUniqueById = <T extends { id: string }>(items: T[], item: T) => {
+    if (!items.some((existing) => existing.id === item.id)) items.push(item);
+  };
 
   const initListeners = async () => {
     if (unlistenFns.length > 0) return;
+    if (initListenersPromise) return initListenersPromise;
     console.log("[Workspace] 初始化事件监听器");
-    unlistenFns = await Promise.all([
+    const registered: UnlistenFn[] = [];
+    initListenersPromise = Promise.all([
       listen<WorkspaceMessage>("workspace://message", (e) => {
         console.log(`[Workspace] 消息: ${e.payload.fromAgentId} → ${e.payload.toAgentId} | ${e.payload.content.slice(0, 60)}`);
-        if (e.payload.workspaceId === currentWorkspaceId.value) messages.value.push(e.payload);
+        if (e.payload.workspaceId === currentWorkspaceId.value) pushUniqueById(messages.value, e.payload);
       }),
       listen<WorkspaceLogEntry>("workspace://log", (e) => {
         console.debug(`[Workspace] 日志 [${e.payload.kind}]: ${e.payload.content.slice(0, 80)}`);
@@ -356,7 +368,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           });
         }
         if (e.payload.workspaceId !== currentWorkspaceId.value) return;
-        logs.value.push(e.payload);
+        pushUniqueById(logs.value, e.payload);
         // 主 Agent 的提议被批准后，子 Agent 是在其后台任务里异步创建的：
         // 这条日志是创建完成的唯一前端信号，createAgent() 那种"invoke 返回值
         // 直接 push 进 agents"的手动创建路径在这里走不通，得靠它触发一次
@@ -372,23 +384,23 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       }),
       listen<AgentProposalEvent>("workspace://agent-proposal", (e) => {
         console.log(`[Workspace] Agent 提议创建子 Agent: proposalId=${e.payload.proposalId} by ${e.payload.proposedByAgentName}`);
-        proposals.value.push(e.payload);
+        if (!proposals.value.some((p) => p.proposalId === e.payload.proposalId)) proposals.value.push(e.payload);
       }),
       listen<SleepRequestEvent>("workspace://sleep-request", (e) => {
         console.log(`[Workspace] 休眠申请: requestId=${e.payload.requestId} agent=${e.payload.agentName} reason=${e.payload.reason}`);
-        sleepRequests.value.push(e.payload);
+        if (!sleepRequests.value.some((r) => r.requestId === e.payload.requestId)) sleepRequests.value.push(e.payload);
       }),
       listen<RoundsRequestEvent>("workspace://rounds-request", (e) => {
         console.log(`[Workspace] 轮数申请: requestId=${e.payload.requestId} agent=${e.payload.agentName} rounds=${e.payload.rounds}`);
-        roundsRequests.value.push(e.payload);
+        if (!roundsRequests.value.some((r) => r.requestId === e.payload.requestId)) roundsRequests.value.push(e.payload);
       }),
       listen<QuestionEvent>("workspace://question", (e) => {
         console.log(`[Workspace] Agent 提问: questionId=${e.payload.questionId} agent=${e.payload.agentName} | ${e.payload.question.slice(0, 60)}`);
-        questions.value.push(e.payload);
+        if (!questions.value.some((q) => q.questionId === e.payload.questionId)) questions.value.push(e.payload);
       }),
       listen<ToolApprovalEvent>("workspace://tool-approval", (e) => {
         console.log(`[Workspace] 工具调用审批请求: approvalId=${e.payload.approvalId} agent=${e.payload.agentName} tool=${e.payload.toolName}`);
-        toolApprovals.value.push(e.payload);
+        if (!toolApprovals.value.some((t) => t.approvalId === e.payload.approvalId)) toolApprovals.value.push(e.payload);
       }),
       // 待处理事项被"别人"解决时（主 Agent 用工具批准了休眠、10 分钟超时
       // 自动收场、应用判定过期），把还挂在界面上的卡片撤掉——否则用户对着
@@ -410,7 +422,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         console.log(`[Workspace] Agent 未在运行: agentId=${e.payload.agentId} name=${e.payload.agentName}`);
         inactiveAgentNotices.value.push(e.payload);
       }),
-    ]);
+    ].map((registration) => registration.then((unlisten) => {
+      registered.push(unlisten);
+      return unlisten;
+    }))).then((listeners) => {
+      unlistenFns = listeners;
+    }).catch((error) => {
+      registered.forEach((unlisten) => unlisten());
+      throw error;
+    }).finally(() => {
+      initListenersPromise = null;
+    });
+    return initListenersPromise;
   };
 
   const disposeListeners = () => {
