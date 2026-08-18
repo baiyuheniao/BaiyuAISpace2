@@ -808,7 +808,19 @@ async fn send_with_retry(
         let builder = request_builder.try_clone().ok_or_else(|| {
             LLMError::ApiError("internal error: request body not clonable for retry".to_string())
         })?;
-        match builder.send().await {
+        let send_result = match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        return Err(LLMError::StreamError("请求已取消".to_string()));
+                    }
+                    result = builder.send() => result,
+                }
+            }
+            None => builder.send().await,
+        };
+        match send_result {
             Ok(response) => {
                 if response.status().is_success() {
                     return Ok(response);
@@ -2379,6 +2391,36 @@ pub async fn run_turn(
     max_tokens: Option<u32>,
     enable_thinking: bool,
 ) -> Result<TurnOutcome, LLMError> {
+    run_turn_with_cancel(
+        provider,
+        model,
+        api_key,
+        base_url,
+        system_prompt,
+        native_messages,
+        tools,
+        max_tokens,
+        enable_thinking,
+        None,
+    )
+    .await
+}
+
+/// Agent Team 版本的非流式往返。与普通 `run_turn` 共用请求构造和解析，
+/// 但允许工作组/Agent 删除时立即中断正在等待响应的 HTTP 请求，而不是继续
+/// 占用后台任务直到 600 秒总超时和后续重试全部结束。
+pub(crate) async fn run_turn_with_cancel(
+    provider: &str,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    system_prompt: Option<&str>,
+    native_messages: &[serde_json::Value],
+    tools: &[MCPTool],
+    max_tokens: Option<u32>,
+    enable_thinking: bool,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<TurnOutcome, LLMError> {
     let url = build_url(provider, base_url, model, false);
     let client = create_http_client(&url)?;
     let body = build_run_turn_body(provider, model, system_prompt, native_messages, tools, max_tokens, enable_thinking);
@@ -2389,11 +2431,22 @@ pub async fn run_turn(
         &request_builder,
         DEFAULT_LLM_RETRY_COUNT,
         DEFAULT_LLM_RETRY_INTERVAL_SECS,
-        None,
+        cancel_token,
     )
     .await?;
 
-    let json: serde_json::Value = response.json().await.map_err(LLMError::RequestError)?;
+    let json: serde_json::Value = match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    return Err(LLMError::StreamError("请求已取消".to_string()));
+                }
+                result = response.json() => result.map_err(LLMError::RequestError)?,
+            }
+        }
+        None => response.json().await.map_err(LLMError::RequestError)?,
+    };
 
     match provider {
         "anthropic" => {
@@ -2779,6 +2832,46 @@ pub async fn cancel_stream(session_id: String) -> Result<(), String> {
 #[cfg(test)]
 mod provider_tool_calling_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_in_flight_request_before_timeout() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            // 故意不返回响应头，模拟一个仍保持连接但迟迟没有结果的模型端点。
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let request = client.post(format!("http://{address}/v1/chat/completions")).body("{}");
+        let cancel = CancellationToken::new();
+        let cancel_from_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_from_task.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_with_retry(&request, 3, 1, Some(&cancel)),
+        )
+        .await
+        .expect("cancellation should finish well before the HTTP timeout");
+
+        assert!(matches!(result, Err(LLMError::StreamError(ref message)) if message == "请求已取消"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.abort();
+    }
 
     fn sample_tool() -> MCPTool {
         MCPTool {
