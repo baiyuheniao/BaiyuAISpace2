@@ -1184,6 +1184,13 @@ async fn run_agent_loop(
                 error_notified = false;
             }
             Err(e) => {
+                // 删除 Agent / 工作组时，取消令牌会主动中断正在等待的模型请求。
+                // 这是正常的生命周期收尾，不应再写 error 日志、回写已删除行，
+                // 或向主 Agent 上报一条“处理失败”的误报。
+                if cancel.is_cancelled() {
+                    log::info!("Workspace agent {} 的进行中任务已随停止信号取消", agent_id);
+                    break;
+                }
                 log::error!("Workspace agent {} 处理失败: {}", agent_id, e);
                 insert_workspace_log(&app_handle, &workspace_id, Some(agent_id.clone()), "error", e.to_string()).await;
                 // 用户已手动暂停的 Agent 保持 Paused，别用 Error 覆盖掉这个
