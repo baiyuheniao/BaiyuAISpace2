@@ -6,8 +6,8 @@ use super::db;
 use super::meeting::{self, MeetingCheckIn, MeetingConfig, MeetingHandle, MeetingsState};
 use super::types::*;
 use crate::commands::llm::{
-    append_text_reply, append_tool_round, build_native_messages, build_skill_context, run_turn,
-    ChatMessage, ImageAttachment, PendingToolCall, TurnOutcome,
+    append_text_reply, append_tool_round, build_native_messages, build_skill_context,
+    run_turn_with_cancel, ChatMessage, ImageAttachment, PendingToolCall, TurnOutcome,
 };
 use crate::commands::mcp::{call_mcp_tool, get_all_mcp_tools, MCPTool};
 use crate::commands::file_tools::{self, FileAccessRule};
@@ -1418,7 +1418,7 @@ async fn process_agent_wake(
                 };
                 native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&rescue_hint)));
 
-                let rescue_outcome = run_turn(
+                let rescue_outcome = run_turn_with_cancel(
                     &agent.provider,
                     &agent.model,
                     &api_key,
@@ -1428,6 +1428,7 @@ async fn process_agent_wake(
                     &rescue_tools,
                     agent.max_tokens.map(|v| v.max(1) as u32),
                     agent.enable_thinking,
+                    Some(cancel),
                 )
                 .await
                 .map_err(|e| WorkspaceError::LlmError(e.to_string()))?;
@@ -1480,7 +1481,7 @@ async fn process_agent_wake(
         total_rounds += 1;
 
         log::debug!("[workspace] Agent「{}」第 {} 轮推理", agent.name, total_rounds);
-        let outcome = run_turn(
+        let outcome = run_turn_with_cancel(
             &agent.provider,
             &agent.model,
             &api_key,
@@ -1492,6 +1493,7 @@ async fn process_agent_wake(
             // （Anthropic 是 32000，其余不设限），配置了就按 Agent 的来。
             agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
+            Some(cancel),
         )
         .await
         .map_err(|e| WorkspaceError::LlmError(e.to_string()))?;
@@ -1631,7 +1633,7 @@ async fn process_agent_wake(
         };
         native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&nudge)));
 
-        match run_turn(
+        match run_turn_with_cancel(
             &agent.provider,
             &agent.model,
             &api_key,
@@ -1641,6 +1643,7 @@ async fn process_agent_wake(
             &[],
             agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
+            Some(cancel),
         )
         .await
         {
