@@ -2873,6 +2873,47 @@ mod provider_tool_calling_tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn timeout_retries_exactly_the_configured_number_of_times() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let attempts_from_server = attempts.clone();
+        let server = tokio::spawn(async move {
+            // retry_count=2 表示首次请求失败后再试 2 次，总共应建立 3 次连接。
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                attempts_from_server.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = socket.read(&mut request).await;
+                    // 保持连接但不返回响应，稳定触发客户端总超时。
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let request = client.post(format!("http://{address}/v1/chat/completions")).body("{}");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_with_retry(&request, 2, 0, None),
+        )
+        .await
+        .expect("short test timeout and retries should finish within the test deadline");
+
+        assert!(matches!(result, Err(LLMError::RequestError(ref error)) if error.is_timeout()));
+        server.await.unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
     fn sample_tool() -> MCPTool {
         MCPTool {
             server_id: "srv1".to_string(),
