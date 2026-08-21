@@ -275,6 +275,9 @@ pub enum LLMError {
     /// 流式响应错误
     #[error("Stream error: {0}")]
     StreamError(String),
+    /// 一次非流式往返（包括全部重试和响应体读取）超过总预算
+    #[error("LLM 请求总时长超过限制（{0}）")]
+    TotalTimeout(String),
 }
 
 impl Serialize for LLMError {
@@ -858,6 +861,20 @@ async fn send_with_retry(
             }
             None => wait.await,
         }
+    }
+}
+
+/// 给一整段非流式请求流程加总时长预算。`reqwest::Client::timeout` 对每一次
+/// 重试分别计时；如果直接把 600 秒客户端复用 4 次，默认 3 次重试会把用户
+/// 实际等待放大到约 40 分钟。这里的外层预算覆盖首次请求、重试间隔、所有
+/// 重试以及成功响应的 body 读取，确保常量表达的确实是整轮总上限。
+async fn with_total_timeout<T, F>(duration: Duration, future: F) -> Result<T, LLMError>
+where
+    F: std::future::Future<Output = Result<T, LLMError>>,
+{
+    match tokio::time::timeout(duration, future).await {
+        Ok(result) => result,
+        Err(_) => Err(LLMError::TotalTimeout(format!("{:?}", duration))),
     }
 }
 
@@ -2427,26 +2444,30 @@ pub(crate) async fn run_turn_with_cancel(
 
     let headers = build_headers(provider, api_key);
     let request_builder = client.post(&url).headers(headers).json(&body);
-    let response = send_with_retry(
-        &request_builder,
-        DEFAULT_LLM_RETRY_COUNT,
-        DEFAULT_LLM_RETRY_INTERVAL_SECS,
-        cancel_token,
-    )
-    .await?;
+    let request_flow = async {
+        let response = send_with_retry(
+            &request_builder,
+            DEFAULT_LLM_RETRY_COUNT,
+            DEFAULT_LLM_RETRY_INTERVAL_SECS,
+            cancel_token,
+        )
+        .await?;
 
-    let json: serde_json::Value = match cancel_token {
-        Some(token) => {
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => {
-                    return Err(LLMError::StreamError("请求已取消".to_string()));
+        let json: serde_json::Value = match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        return Err(LLMError::StreamError("请求已取消".to_string()));
+                    }
+                    result = response.json() => result.map_err(LLMError::RequestError)?,
                 }
-                result = response.json() => result.map_err(LLMError::RequestError)?,
             }
-        }
-        None => response.json().await.map_err(LLMError::RequestError)?,
+            None => response.json().await.map_err(LLMError::RequestError)?,
+        };
+        Ok(json)
     };
+    let json = with_total_timeout(LLM_REQUEST_TIMEOUT, request_flow).await?;
 
     match provider {
         "anthropic" => {
@@ -2912,6 +2933,47 @@ mod provider_tool_calling_tests {
         assert!(matches!(result, Err(LLMError::RequestError(ref error)) if error.is_timeout()));
         server.await.unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn total_timeout_caps_all_retries_instead_of_resetting_per_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let attempts_from_server = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                attempts_from_server.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = socket.read(&mut request).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let request = client.post(format!("http://{address}/v1/chat/completions")).body("{}");
+        let started = std::time::Instant::now();
+        let result = with_total_timeout(
+            Duration::from_millis(250),
+            send_with_retry(&request, 10, 0, None),
+        )
+        .await;
+
+        assert!(matches!(result, Err(LLMError::TotalTimeout(_))));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let observed = attempts.load(Ordering::SeqCst);
+        assert!((2..=3).contains(&observed), "total budget should stop retries early; observed {observed}");
+        server.abort();
     }
 
     fn sample_tool() -> MCPTool {
