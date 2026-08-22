@@ -1394,6 +1394,9 @@ async fn process_agent_wake(
     // 本次唤醒的工具调用摘要，唤醒结束后自动落入 scratchpad——工具轮的中间
     // 结果不跨唤醒，此前全靠模型自觉记备忘，不自觉就永久失忆
     let mut wake_tool_notes: Vec<String> = Vec::new();
+    // 强制收尾失败不能被当成一次成功唤醒；先记住错误，让下面仍有机会把
+    // 已完成的工具摘要写入 scratchpad，再在状态复位前交给外层错误处理。
+    let mut finalization_failure: Option<String> = None;
     // 子 Agent 真正断供前的最后一次求救机会：request_more_rounds 本身免
     // 配额，但轮数耗尽后强制收尾轮会把 tools 字段整个摘掉（见下方），这个
     // 逃生舱反而在最需要它的时刻不可用了。每次唤醒只给一次求救机会，避免
@@ -1640,7 +1643,7 @@ async fn process_agent_wake(
         };
         native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&nudge)));
 
-        match run_turn_with_cancel(
+        let finalization = run_turn_with_cancel(
             &agent.provider,
             &agent.model,
             &api_key,
@@ -1653,8 +1656,10 @@ async fn process_agent_wake(
             Some(cancel),
         )
         .await
-        {
-            Ok(TurnOutcome::Text(text)) if !text.trim().is_empty() => {
+        .map_err(|e| e.to_string());
+
+        match require_forced_final_text(finalization) {
+            Ok(text) => {
                 log::info!(
                     "[workspace] Agent「{}」强制收尾轮产出回复 ({} 字符)",
                     agent.name,
@@ -1663,18 +1668,9 @@ async fn process_agent_wake(
                 append_text_reply(&agent.provider, &mut native_messages, &text);
                 send_workspace_message(app_handle, workspace_id, agent_id, "user", &text).await;
             }
-            Ok(TurnOutcome::Text(_)) => {
-                log::warn!("[workspace] Agent「{}」强制收尾轮仍未产出内容", agent.name);
-            }
-            Ok(TurnOutcome::ToolCalls(_)) => {
-                // 请求里没给 tools 字段，正常到不了这里；真到了也只记录，不再执行
-                log::warn!(
-                    "[workspace] Agent「{}」强制收尾轮仍试图调用工具，放弃本次唤醒",
-                    agent.name
-                );
-            }
-            Err(e) => {
-                log::warn!("[workspace] Agent「{}」强制收尾轮请求失败: {}", agent.name, e);
+            Err(error) => {
+                log::warn!("[workspace] Agent「{}」强制收尾失败: {}", agent.name, error);
+                finalization_failure = Some(error);
             }
         }
     }
@@ -1712,6 +1708,13 @@ async fn process_agent_wake(
         }
     }
 
+    // 旧实现会在强制收尾失败后继续返回 Ok，并把 Agent 复位为 Idle，造成
+    // “没有回复也没有错误”的静默失败。现在保留完工具摘要后把错误交给
+    // run_agent_loop：它会写入可见日志、设为 Error，并按既有规则通知主 Agent。
+    if let Some(error) = finalization_failure {
+        return Err(WorkspaceError::LlmError(error));
+    }
+
     // 别覆盖掉 Sleeping（由 workspace_sleep 设置）、Meeting（由会议协调器
     // 管理，散会时协调器自己会还原与会者状态），也别覆盖 Paused——用户在
     // 这轮进行中按下的"暂停"是紧急停止，如果这里照旧复位成 Idle，暂停就
@@ -1727,6 +1730,17 @@ async fn process_agent_wake(
         set_agent_status(app_handle, agent_id, AgentStatus::Idle).await;
     }
     Ok(())
+}
+
+/// 强制收尾轮必须产出非空文字。请求失败、空文字或（未提供 tools 时仍然）
+/// 返回工具调用都属于真实失败，不能让上层把本次唤醒误记为成功。
+fn require_forced_final_text(outcome: Result<TurnOutcome, String>) -> Result<String, String> {
+    match outcome {
+        Ok(TurnOutcome::Text(text)) if !text.trim().is_empty() => Ok(text),
+        Ok(TurnOutcome::Text(_)) => Err("强制收尾轮未产出文字内容".to_string()),
+        Ok(TurnOutcome::ToolCalls(_)) => Err("强制收尾轮在未提供工具时仍返回工具调用".to_string()),
+        Err(error) => Err(format!("强制收尾轮请求失败: {}", error)),
+    }
 }
 
 /// 跟这个 Agent 相关的近期消息，转换成 `build_native_messages` 期望的扁平
@@ -3120,5 +3134,29 @@ mod danger_classifier_tests {
         // 但下划线/空格分隔的真实危险动词照常命中。
         assert!(is_dangerous_tool("kill_process", "Kill a running process by pid"));
         assert!(is_dangerous_tool("run_command", "Run a shell command"));
+    }
+}
+
+#[cfg(test)]
+mod forced_finalization_tests {
+    use super::require_forced_final_text;
+    use crate::commands::llm::{PendingToolCall, TurnOutcome};
+
+    #[test]
+    fn accepts_non_empty_forced_final_text() {
+        let result = require_forced_final_text(Ok(TurnOutcome::Text("完成".to_string())));
+        assert_eq!(result.as_deref(), Ok("完成"));
+    }
+
+    #[test]
+    fn rejects_silent_or_invalid_forced_final_results() {
+        assert!(require_forced_final_text(Ok(TurnOutcome::Text("  ".to_string()))).is_err());
+        assert!(require_forced_final_text(Ok(TurnOutcome::ToolCalls(vec![PendingToolCall {
+            id: "unexpected".to_string(),
+            name: "unused".to_string(),
+            arguments: serde_json::json!({}),
+        }])))
+        .is_err());
+        assert!(require_forced_final_text(Err("timeout".to_string())).is_err());
     }
 }
