@@ -629,7 +629,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (approved && options?.remember) await loadAgents();
   };
 
-  /** 手动紧急停止 / 恢复一个 Agent。 */
+  /** 手动紧急停止 / 恢复一个 Agent；恢复 Error 会重新唤醒并重试未完成任务。 */
   const pauseAgent = async (agentId: string) => {
     await invoke("workspace_pause_agent", { agentId });
   };

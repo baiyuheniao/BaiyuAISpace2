@@ -344,12 +344,12 @@ const handlePauseAgent = async (agentId: string) => {
   }
 };
 
-const handleResumeAgent = async (agentId: string) => {
+const handleResumeAgent = async (agent: WorkspaceAgent) => {
   try {
-    await workspace.resumeAgent(agentId);
-    message.success("已恢复运行");
+    await workspace.resumeAgent(agent.id);
+    message.success(agent.status === "error" ? "已重新尝试上次任务" : "已恢复运行");
   } catch (e) {
-    message.error(`恢复失败: ${e}`);
+    message.error(`${agent.status === "error" ? "重试" : "恢复"}失败: ${e}`);
   }
 };
 
@@ -1226,15 +1226,18 @@ onBeforeUnmount(() => {
                         放弃此 worktree 的未提交修改？私有目录会保留。
                       </n-popconfirm>
                       <n-button
-                        v-if="agent.status === 'paused'"
+                        v-if="agent.status === 'paused' || agent.status === 'error'"
                         quaternary
                         circle
                         size="tiny"
-                        title="恢复运行"
-                        @click.stop="handleResumeAgent(agent.id)"
+                        :title="agent.status === 'error' ? '重试上次任务' : '恢复运行'"
+                        @click.stop="handleResumeAgent(agent)"
                       >
                         <template #icon>
-                          <n-icon><PlayOutline /></n-icon>
+                          <n-icon>
+                            <RefreshOutline v-if="agent.status === 'error'" />
+                            <PlayOutline v-else />
+                          </n-icon>
                         </template>
                       </n-button>
                       <n-button
