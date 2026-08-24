@@ -602,10 +602,13 @@ fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessag
                 body["max_tokens"] = serde_json::json!(v);
             }
 
-            // SiliconFlow 的 thinking：enable_thinking + thinking_budget（Qwen3 系列）
-            if enable_thinking && provider == "siliconflow" {
-                body["enable_thinking"] = serde_json::json!(true);
-                body["thinking_budget"] = serde_json::json!(8000);
+            // SiliconFlow 的推理开关默认是开启的。关闭时也必须显式传 false，
+            // 否则 Qwen3.5 会只返回 reasoning_content，压缩等只需要正文的调用会失败。
+            if provider == "siliconflow" {
+                body["enable_thinking"] = serde_json::json!(enable_thinking);
+                if enable_thinking {
+                    body["thinking_budget"] = serde_json::json!(8000);
+                }
             }
 
             // 本地 OpenAI 兼容服务：思考开关关闭时，显式发送 reasoning_effort=none
@@ -1261,29 +1264,7 @@ pub async fn stream_message(
             .map_err(|e| LLMError::ApiError(format!("读取上下文摘要失败: {e}")))?
     };
     if let Some(compaction) = context_compaction {
-        effective_messages.retain(|message| {
-            message.role == "system" || message.timestamp >= compaction.preserve_from_timestamp
-        });
-        let summary_block = format!(
-            "【此前对话的压缩交接摘要】\n{}\n【摘要结束；请以最近原始消息为准】",
-            compaction.summary
-        );
-        if let Some(system) = effective_messages.iter_mut().find(|message| message.role == "system") {
-            // Anthropic 的 system 字段在请求构造时只取一条，必须在这里合并，
-            // 不能再单独插入第二条 system 消息。
-            system.content = format!("{}\n\n{}", system.content, summary_block);
-        } else {
-            effective_messages.insert(0, ChatMessage {
-                id: Uuid::new_v4().to_string(),
-                role: "system".to_string(),
-                content: summary_block,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-                error: None,
-                images: vec![],
-                videos: vec![],
-                token_usage: None,
-            });
-        }
+        effective_messages = apply_context_compaction(effective_messages, &compaction);
     }
     if !active_skills.is_empty() {
         let skill_context = build_skill_context(&active_skills, &app_handle).await;
@@ -2397,6 +2378,27 @@ pub fn append_text_reply(provider: &str, native_messages: &mut Vec<serde_json::V
 /// （只发一次续写请求，从不重新提供 `tools`，只会返回文本）不同，这个函数
 /// 总是会重新提供 `tools`，也可能再次返回 `ToolCalls`——正是这一点让
 /// Workspace Agent 循环能够连续多轮调用工具，而不只是一轮。
+/// 从 OpenAI 兼容响应中提取压缩摘要。正文优先；只有正文为空时，才退回服务端
+/// 已返回的 reasoning 字段。
+fn extract_compaction_response_text(message: &serde_json::Value) -> (String, bool) {
+    let content = message
+        .get("content")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if !content.trim().is_empty() {
+        return (content.to_string(), false);
+    }
+    let reasoning = message
+        .get("reasoning_content")
+        .and_then(|value| value.as_str())
+        .or_else(|| message.get("reasoning").and_then(|value| value.as_str()))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("");
+    (reasoning.to_string(), !reasoning.is_empty())
+}
+
+/// 非流式模型调用。`allow_reasoning_fallback` 仅供上下文压缩使用，避免将
+/// reasoning 内容意外作为 Agent Team 的普通回复。
 pub async fn run_turn(
     provider: &str,
     model: &str,
@@ -2407,6 +2409,7 @@ pub async fn run_turn(
     tools: &[MCPTool],
     max_tokens: Option<u32>,
     enable_thinking: bool,
+    allow_reasoning_fallback: bool,
 ) -> Result<TurnOutcome, LLMError> {
     run_turn_with_cancel(
         provider,
@@ -2418,6 +2421,7 @@ pub async fn run_turn(
         tools,
         max_tokens,
         enable_thinking,
+        allow_reasoning_fallback,
         None,
     )
     .await
@@ -2436,6 +2440,7 @@ pub(crate) async fn run_turn_with_cancel(
     tools: &[MCPTool],
     max_tokens: Option<u32>,
     enable_thinking: bool,
+    allow_reasoning_fallback: bool,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<TurnOutcome, LLMError> {
     let url = build_url(provider, base_url, model, false);
@@ -2544,24 +2549,22 @@ pub(crate) async fn run_turn_with_cancel(
             if !calls.is_empty() {
                 return Ok(TurnOutcome::ToolCalls(calls));
             }
-            let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            // 思考型模型（DeepSeek 系 reasoning_content / Ollama reasoning）可能
-            // content 留空、全部输出都在思考字段里。把这种情况在日志里点名——
-            // 调用方（Workspace 唤醒循环）会把空文本视为"未交卷"转入强制收尾，
-            // 但没有这行日志，排查时只能看到一次莫名其妙的空回复。
-            if text.trim().is_empty() {
-                let reasoning_len = message
-                    .get("reasoning_content")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| message.get("reasoning").and_then(|v| v.as_str()))
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                if reasoning_len > 0 {
-                    log::warn!(
-                        "[LLM] run_turn 返回空 content，但携带 {} 字符的 reasoning——思考型模型把输出埋进了思考字段",
-                        reasoning_len
-                    );
-                }
+            let (text, used_reasoning_fallback) = if allow_reasoning_fallback {
+                extract_compaction_response_text(&message)
+            } else {
+                (
+                    message.get("content").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+                    false,
+                )
+            };
+            // 某些推理模型会把压缩器要求的摘要错误地只放进 reasoning 字段。
+            // 本函数仅由 compact_chat_context 调用，故可安全兜底；普通聊天绝不能
+            // 复用此逻辑，以免将模型思考过程显示给用户。
+            if used_reasoning_fallback {
+                log::warn!(
+                    "[LLM] 上下文压缩响应正文为空，改用 {} 字符的 reasoning 字段",
+                    text.len()
+                );
             }
             Ok(TurnOutcome::Text(text))
         }
@@ -2692,9 +2695,12 @@ fn build_run_turn_body(
             if let Some(v) = max_tokens {
                 b["max_tokens"] = serde_json::json!(v);
             }
-            if enable_thinking && provider == "siliconflow" {
-                b["enable_thinking"] = serde_json::json!(true);
-                b["thinking_budget"] = serde_json::json!(8000);
+            // 与流式请求保持一致：SiliconFlow 默认开启思考，因此关掉时也要明确传 false。
+            if provider == "siliconflow" {
+                b["enable_thinking"] = serde_json::json!(enable_thinking);
+                if enable_thinking {
+                    b["thinking_budget"] = serde_json::json!(8000);
+                }
             }
             // 与流式路径同款：本地服务在思考开关关闭时显式关掉思考，
             // Workspace Agent 也能享受到（不开思考的 Agent 不再白等思考）
@@ -2773,6 +2779,38 @@ fn build_compaction_source(messages: &[ChatMessage]) -> String {
     source
 }
 
+/// 用已保存的摘要替换较早的活动上下文，但不修改数据库中的完整消息历史。
+/// 单独抽出这一步，既让流式请求路径更直观，也能离线验证真正发给模型的消息边界。
+fn apply_context_compaction(
+    mut messages: Vec<ChatMessage>,
+    compaction: &ContextCompaction,
+) -> Vec<ChatMessage> {
+    messages.retain(|message| {
+        message.role == "system" || message.timestamp >= compaction.preserve_from_timestamp
+    });
+    let summary_block = format!(
+        "【此前对话的压缩交接摘要】\n{}\n【摘要结束；请以最近原始消息为准】",
+        compaction.summary
+    );
+    if let Some(system) = messages.iter_mut().find(|message| message.role == "system") {
+        // Anthropic 的 system 字段在请求构造时只取一条，必须在这里合并，
+        // 不能再单独插入第二条 system 消息。
+        system.content = format!("{}\n\n{}", system.content, summary_block);
+    } else {
+        messages.insert(0, ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            role: "system".to_string(),
+            content: summary_block,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            error: None,
+            images: vec![],
+            videos: vec![],
+            token_usage: None,
+        });
+    }
+    messages
+}
+
 /// 手动创建上下文摘要并持久化活动上下文边界。该操作不删除任何历史消息。
 #[tauri::command]
 pub async fn compact_chat_context(
@@ -2814,6 +2852,7 @@ pub async fn compact_chat_context(
         &[],
         Some(request.max_tokens.unwrap_or(3_000).clamp(1_000, 6_000)),
         false,
+        true,
     )
     .await?;
     let summary = match outcome {
@@ -3608,6 +3647,11 @@ mod provider_tool_calling_tests {
         assert_eq!(sf["enable_thinking"], true);
         assert_eq!(sf["thinking_budget"], 8000);
 
+        // SiliconFlow 服务端默认开启思考；关闭时同样必须明确传 false。
+        let sf_without_thinking = build_run_turn_body("siliconflow", "qwen3", None, &msgs, &[], None, false);
+        assert_eq!(sf_without_thinking["enable_thinking"], false);
+        assert!(sf_without_thinking.get("thinking_budget").is_none());
+
         // 其他每一家 OpenAI 兼容的 provider 都是静默不处理，而不是发送一个
         // API 根本不认识的字段。
         let deepseek = build_run_turn_body("deepseek", "deepseek-chat", None, &msgs, &[], None, true);
@@ -3703,5 +3747,75 @@ mod provider_tool_calling_tests {
         let context = compact_tool_result(&result, "builtin__web_search");
         assert_eq!(context["results"][0]["title"], "OpenAI");
         assert_eq!(context["results"][0]["url"], "https://openai.com");
+    }
+
+    #[test]
+    fn context_compaction_replaces_old_history_with_summary() {
+        let mut messages = vec![ChatMessage {
+            id: "system".into(),
+            role: "system".into(),
+            content: "你是一个可靠的助手".into(),
+            timestamp: 0,
+            error: None,
+            images: vec![],
+            videos: vec![],
+            token_usage: None,
+        }];
+        for index in 1..=8 {
+            messages.push(ChatMessage {
+                id: format!("message-{index}"),
+                role: if index % 2 == 0 { "assistant".into() } else { "user".into() },
+                content: format!("原始消息 {index}"),
+                timestamp: index * 10,
+                error: None,
+                images: vec![],
+                videos: vec![],
+                token_usage: None,
+            });
+        }
+
+        // 假装上一步的压缩模型已经返回了这份摘要；这里不依赖真实网络或模型。
+        let compaction = ContextCompaction {
+            summary: "目标：完成上下文压缩测试。已完成：写入摘要。".into(),
+            preserve_from_timestamp: 30,
+            created_at: 999,
+        };
+        let effective = apply_context_compaction(messages, &compaction);
+
+        // 系统提示仍在，1-2 两条旧原文被摘要替代，3-8 六条最近原文继续保留。
+        assert_eq!(effective.len(), 7);
+        assert_eq!(effective[0].role, "system");
+        assert!(effective[0].content.contains("你是一个可靠的助手"));
+        assert!(effective[0].content.contains(&compaction.summary));
+        assert!(effective.iter().all(|message| message.content != "原始消息 1"));
+        assert!(effective.iter().all(|message| message.content != "原始消息 2"));
+        for index in 3..=8 {
+            assert!(effective.iter().any(|message| message.content == format!("原始消息 {index}")));
+        }
+
+        // 再检查通用 OpenAI 格式的请求体，确保这正是会被发送给模型的消息集合。
+        let body = build_stream_request_body("openai", "test-model", &effective, &[], false, None);
+        let request_messages = body["messages"].as_array().expect("OpenAI 请求必须带 messages 数组");
+        assert_eq!(request_messages.len(), 7);
+        assert!(request_messages[0]["content"].as_str().unwrap().contains("压缩交接摘要"));
+        assert_eq!(request_messages[6]["content"], "原始消息 8");
+    }
+
+    #[test]
+    fn compaction_response_uses_reasoning_only_when_content_is_empty() {
+        let normal = serde_json::json!({
+            "content": "正式摘要",
+            "reasoning_content": "不应使用的推理内容"
+        });
+        assert_eq!(extract_compaction_response_text(&normal), ("正式摘要".to_string(), false));
+
+        let reasoning_only = serde_json::json!({
+            "content": "",
+            "reasoning_content": "模型放错字段的摘要"
+        });
+        assert_eq!(
+            extract_compaction_response_text(&reasoning_only),
+            ("模型放错字段的摘要".to_string(), true)
+        );
     }
 }

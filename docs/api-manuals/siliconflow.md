@@ -65,8 +65,10 @@ curl https://api.siliconflow.cn/v1/chat/completions \
 - 聚合了多种开源模型的 API
 - 价格相对优惠
 - 部分模型可能因账号权限被禁用 (`Model disabled`)，与请求格式无关
+- `enable_thinking` 的服务端默认值是开启。对支持该字段的 Qwen3.5 等模型，客户端在关闭思考时也必须显式发送 `false`；只省略字段会收到 `reasoning_content`，而不是预期的普通正文。
 
 ## 更新日志
 
+- 2026-08-11: 根据官方 Chat Completions 文档补充 `enable_thinking` 默认开启及显式关闭要求；用于修复上下文压缩的正文为空问题。
 - 2026-07-02: 补充图片输入格式，并用真实 API Key + 真实图片完成端到端实测验证
 - 2026-04-25: 初始文档

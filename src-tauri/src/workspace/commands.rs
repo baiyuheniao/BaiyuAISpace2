@@ -1438,6 +1438,7 @@ async fn process_agent_wake(
                     &rescue_tools,
                     agent.max_tokens.map(|v| v.max(1) as u32),
                     agent.enable_thinking,
+                    false,
                     Some(cancel),
                 )
                 .await
@@ -1503,6 +1504,7 @@ async fn process_agent_wake(
             // （Anthropic 是 32000，其余不设限），配置了就按 Agent 的来。
             agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
+            false,
             Some(cancel),
         )
         .await
@@ -1653,6 +1655,7 @@ async fn process_agent_wake(
             &[],
             agent.max_tokens.map(|v| v.max(1) as u32),
             agent.enable_thinking,
+            false,
             Some(cancel),
         )
         .await
