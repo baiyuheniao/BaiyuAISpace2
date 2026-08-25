@@ -1,4 +1,4 @@
-# BaiyuAISpace
+# BaiyuAISpace2
 
 <p align="center">
   <img src="./assets/BaiyuLogo.png" alt="BaiyuAISpace Logo" width="100" height="auto">
