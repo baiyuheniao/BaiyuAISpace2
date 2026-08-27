@@ -195,3 +195,6 @@ website/
 
 # Tauri UI 驱动的本地运行状态
 .agents/skills/run-baiyuaispace2/driver.state.json
+
+# 本地安全评估报告（含测试环境与排查细节）
+docs/test-evidence/SECURITY_ASSESSMENT_2026-08-01.md
