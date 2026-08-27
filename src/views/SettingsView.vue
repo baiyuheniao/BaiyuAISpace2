@@ -1287,6 +1287,8 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             </div>
           </template>
 
+          <div class="settings-group-title">外观</div>
+
           <div class="general-setting-item">
             <div class="general-setting-text">
               <span class="general-setting-label">显示模式</span>
@@ -1305,41 +1307,6 @@ const providerOptions = computed(() => settings.presetProviderOptions);
 
           <div class="general-setting-item">
             <div class="general-setting-text">
-              <span class="general-setting-label">关闭窗口时最小化到系统托盘</span>
-              <n-text
-                depth="3"
-                style="font-size: 12px;"
-              >
-                开启后，点击窗口右上角的关闭按钮只会隐藏窗口，程序继续在系统托盘运行；需从托盘图标菜单选择“退出程序”才会真正结束。关闭后，点击关闭按钮将直接退出程序。
-              </n-text>
-            </div>
-            <n-switch
-              :value="settings.closeToTray"
-              @update:value="handleCloseToTrayChange"
-            />
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
-              <span class="general-setting-label">默认启动窗口模式</span>
-              <n-text
-                depth="3"
-                style="font-size: 12px;"
-              >
-                选择首次启动或重新选择模式后的打开方式。软件会自动记住上次的窗口位置、尺寸、最大化和全屏状态；之后启动时优先恢复该状态。
-              </n-text>
-            </div>
-            <n-select
-              :value="settings.startupWindowMode"
-              :options="startupWindowModeOptions"
-              placeholder="请选择默认启动窗口模式"
-              style="width: 180px;"
-              @update:value="handleStartupWindowModeChange"
-            />
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
               <span class="general-setting-label">字体大小</span>
               <n-text depth="3" style="font-size: 12px;">
                 调整软件的基础字号；修改后会立即应用，并在下次启动时保留。
@@ -1352,28 +1319,6 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               style="width: 180px;"
               @update:value="handleFontSizeChange"
             />
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
-              <span class="general-setting-label">内置文件工具限制</span>
-              <n-text depth="3" style="font-size: 12px;">控制单次读取、目录列表和搜索的返回量；超出上限时工具会明确提示。</n-text>
-            </div>
-            <n-space>
-              <n-input-number v-model:value="settings.fileReadLimitMb" placeholder="读取上限" :min="1" :max="16" style="width: 120px"><template #suffix>MB</template></n-input-number>
-              <n-input-number v-model:value="settings.fileListLimit" placeholder="列表条数" :min="10" :max="5000" style="width: 120px"><template #suffix>条</template></n-input-number>
-              <n-input-number v-model:value="settings.fileSearchLimit" placeholder="搜索条数" :min="10" :max="1000" style="width: 120px"><template #suffix>条</template></n-input-number>
-            </n-space>
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
-              <span class="general-setting-label">允许抓取本机与内网地址</span>
-              <n-text depth="3" style="font-size: 12px;">
-                默认关闭，用于防止网页抓取被诱导访问本机或局域网服务。仅在你需要调试自己信任的开发服务时开启。
-              </n-text>
-            </div>
-            <n-switch v-model:value="settings.allowLocalNetworkFetch" />
           </div>
 
           <div class="general-setting-item">
@@ -1419,6 +1364,8 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             </div>
             <n-switch v-model:value="settings.messageBorderEnabled" />
           </div>
+
+          <div class="settings-group-title">聊天显示</div>
 
           <div class="general-setting-item">
             <div class="general-setting-text">
@@ -1487,6 +1434,131 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               v-model:value="settings.userName"
               placeholder="用户"
               style="width: 180px"
+            />
+          </div>
+
+          <div class="settings-group-title">对话与工具</div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">内置文件工具限制</span>
+              <n-text depth="3" style="font-size: 12px;">控制单次读取、目录列表和搜索的返回量；超出上限时工具会明确提示。</n-text>
+            </div>
+            <n-space>
+              <n-input-number v-model:value="settings.fileReadLimitMb" placeholder="读取上限" :min="1" :max="16" style="width: 120px"><template #suffix>MB</template></n-input-number>
+              <n-input-number v-model:value="settings.fileListLimit" placeholder="列表条数" :min="10" :max="5000" style="width: 120px"><template #suffix>条</template></n-input-number>
+              <n-input-number v-model:value="settings.fileSearchLimit" placeholder="搜索条数" :min="10" :max="1000" style="width: 120px"><template #suffix>条</template></n-input-number>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item general-setting-item--stack">
+            <div class="general-setting-text">
+              <span class="general-setting-label">全局 System Prompt</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                对之后发送的每条新消息生效，会自动附加到对话的系统消息中，用于统一设定模型的身份、语气或回答规范；留空则不附加。已发送的历史消息不受影响。
+              </n-text>
+            </div>
+            <n-input
+              v-model:value="settings.systemPrompt"
+              type="textarea"
+              placeholder="例如：你是一个简洁、专业的助手，优先给出可执行的建议，避免空泛的客套话。"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">请求失败自动重试</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                当服务商返回限流或过载类错误（如 429、模型引擎过载）时，自动按此配置重试。重试次数设为 0 即关闭自动重试。
+              </n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="12"
+            >
+              <n-input-number
+                v-model:value="settings.retryCount"
+                placeholder="重试次数"
+                :min="0"
+                :max="10"
+                style="width: 140px;"
+              >
+                <template #suffix>
+                  次
+                </template>
+              </n-input-number>
+              <n-input-number
+                v-model:value="settings.retryIntervalSecs"
+                placeholder="重试间隔"
+                :min="1"
+                :max="60"
+                style="width: 140px;"
+              >
+                <template #suffix>
+                  秒
+                </template>
+              </n-input-number>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">最大工具调用轮数</span>
+              <n-text depth="3" style="font-size: 12px;">
+                普通 Chat 在一次回答中最多连续调用工具的轮数。达到上限后，模型会基于已获得的结果收尾并说明未完成项。
+              </n-text>
+            </div>
+            <n-input-number
+              v-model:value="settings.maxToolRounds"
+              placeholder="请输入 1–100"
+              :min="1"
+              :max="100"
+              style="width: 140px;"
+            >
+              <template #suffix>轮</template>
+            </n-input-number>
+
+          <div class="settings-group-title">系统行为</div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">关闭窗口时最小化到系统托盘</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                开启后，点击窗口右上角的关闭按钮只会隐藏窗口，程序继续在系统托盘运行；需从托盘图标菜单选择“退出程序”才会真正结束。关闭后，点击关闭按钮将直接退出程序。
+              </n-text>
+            </div>
+            <n-switch
+              :value="settings.closeToTray"
+              @update:value="handleCloseToTrayChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">默认启动窗口模式</span>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                选择首次启动或重新选择模式后的打开方式。软件会自动记住上次的窗口位置、尺寸、最大化和全屏状态；之后启动时优先恢复该状态。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.startupWindowMode"
+              :options="startupWindowModeOptions"
+              placeholder="请选择默认启动窗口模式"
+              style="width: 180px;"
+              @update:value="handleStartupWindowModeChange"
             />
           </div>
 
@@ -1590,6 +1662,18 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             </n-space>
           </div>
 
+          <div class="settings-group-title settings-group-title--danger">安全与数据</div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">允许抓取本机与内网地址</span>
+              <n-text depth="3" style="font-size: 12px;">
+                默认关闭，用于防止网页抓取被诱导访问本机或局域网服务。仅在你需要调试自己信任的开发服务时开启。
+              </n-text>
+            </div>
+            <n-switch v-model:value="settings.allowLocalNetworkFetch" />
+          </div>
+
           <div class="general-setting-item">
             <div class="general-setting-text">
               <span class="general-setting-label">清空数据库</span>
@@ -1617,80 +1701,6 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               此操作将永久删除全部会话、聊天记录、MCP 服务器配置、Skill，且无法恢复，确定继续？
             </n-popconfirm>
           </div>
-
-          <div class="general-setting-item general-setting-item--stack">
-            <div class="general-setting-text">
-              <span class="general-setting-label">全局 System Prompt</span>
-              <n-text
-                depth="3"
-                style="font-size: 12px;"
-              >
-                对之后发送的每条新消息生效，会自动附加到对话的系统消息中，用于统一设定模型的身份、语气或回答规范；留空则不附加。已发送的历史消息不受影响。
-              </n-text>
-            </div>
-            <n-input
-              v-model:value="settings.systemPrompt"
-              type="textarea"
-              placeholder="例如：你是一个简洁、专业的助手，优先给出可执行的建议，避免空泛的客套话。"
-              :autosize="{ minRows: 3, maxRows: 8 }"
-            />
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
-              <span class="general-setting-label">请求失败自动重试</span>
-              <n-text
-                depth="3"
-                style="font-size: 12px;"
-              >
-                当服务商返回限流或过载类错误（如 429、模型引擎过载）时，自动按此配置重试。重试次数设为 0 即关闭自动重试。
-              </n-text>
-            </div>
-            <n-space
-              align="center"
-              :size="12"
-            >
-              <n-input-number
-                v-model:value="settings.retryCount"
-                placeholder="重试次数"
-                :min="0"
-                :max="10"
-                style="width: 140px;"
-              >
-                <template #suffix>
-                  次
-                </template>
-              </n-input-number>
-              <n-input-number
-                v-model:value="settings.retryIntervalSecs"
-                placeholder="重试间隔"
-                :min="1"
-                :max="60"
-                style="width: 140px;"
-              >
-                <template #suffix>
-                  秒
-                </template>
-              </n-input-number>
-            </n-space>
-          </div>
-
-          <div class="general-setting-item">
-            <div class="general-setting-text">
-              <span class="general-setting-label">最大工具调用轮数</span>
-              <n-text depth="3" style="font-size: 12px;">
-                普通 Chat 在一次回答中最多连续调用工具的轮数。达到上限后，模型会基于已获得的结果收尾并说明未完成项。
-              </n-text>
-            </div>
-            <n-input-number
-              v-model:value="settings.maxToolRounds"
-              placeholder="请输入 1–100"
-              :min="1"
-              :max="100"
-              style="width: 140px;"
-            >
-              <template #suffix>轮</template>
-            </n-input-number>
           </div>
         </n-card>
 
@@ -2411,6 +2421,27 @@ const providerOptions = computed(() => settings.presetProviderOptions);
   .n-button {
     margin-left: auto;
   }
+}
+
+/* 通用设置分组标题 */
+.settings-group-title {
+  margin-top: 28px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-line);
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  color: $ink-soft;
+}
+
+.settings-group-title:first-child {
+  margin-top: 0;
+}
+
+/* 危险/安全组：黑白单色下用加重分隔线 + 更深字色表达，不用彩色 */
+.settings-group-title--danger {
+  border-bottom-width: 2px;
+  color: $ink;
 }
 
 /* 通用设置项 */

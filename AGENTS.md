@@ -64,10 +64,11 @@ pnpm format                        # prettier
 - **提交**：未经用户明确要求不 commit/push。信息风格 `feat:`/`fix:`/`chore:` + 中文摘要。
 - **UI**：严格的黑白编辑设计系统——无彩色、无圆角、指定字体与缓动曲线。
   动 UI 前必读 `design-system` skill；token 权威源是 `src/styles/variables.scss`。
+  做布局/交互重构（把页面改成用户想象的样子）用 `ui-refactor` skill。
   所有提示/报错/警告统一走左下角弹窗机制；表单必须写中文 placeholder。
 - **超时**：流式响应与大文件下载禁用总超时，只用读间隔超时（历史上因此出过五处 bug）。
 - **汇报**：发现问题除技术描述外，附一段人话解释；用户不在场时用钉钉 MCP 通知结果。
 - 项目级 skills 在 `.Codex/skills/`：`run-baiyuaispace2`（启动/驱动应用）、
   `self-test`（完整测试流程）、`audit-llm-providers`（API 手册审计）、
   `handle-issues`（GitHub Issue 处理）、`debug-from-logs`（报障排查）、
-  `design-system`（UI 规范）。对应任务先用 skill，别从零推导。
+  `design-system`（UI 规范）、`ui-refactor`（布局/交互重构）。对应任务先用 skill，别从零推导。
