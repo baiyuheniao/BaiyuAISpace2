@@ -31,7 +31,9 @@ import { NAvatar, NIcon, NSpin, NAlert, NTooltip } from "naive-ui";
 // 聊天 Store - 编辑/重新生成都要落库并重新发起生成请求，这两件事和消息本身
 // 的截断/删除逻辑都在 store 里，组件只负责触发
 import { useChatStore } from "@/stores/chat";
+import { useSettingsStore } from "@/stores/settings";
 import TokenCount from "@/components/TokenCount.vue";
+import logoImg from "../../assets/logo.png";
 
 // Markdown 渲染管线。marked/KaTeX/DOMPurify/hljs/Mermaid 的全局配置都在该
 // 模块顶层完成，整个应用只执行一次——不能放回本组件的 <script setup>：
@@ -43,7 +45,7 @@ import { renderMarkdown, renderMermaidDiagrams } from "@/utils/markdown";
 import type { Message } from "@/stores/chat";
 
 // 导入图标
-import { Person, Sparkles, Copy, Create, Refresh, Checkmark, Close, GlobeOutline } from "@vicons/ionicons5";
+import { Copy, Create, Refresh, Checkmark, Close, GlobeOutline } from "@vicons/ionicons5";
 
 // ============ Props 定义 ============
 
@@ -52,6 +54,12 @@ const props = defineProps<{
 }>();
 
 const chat = useChatStore();
+const settings = useSettingsStore();
+
+// 头像：可配置（本地 data URL 或 http(s) URL），留空则回退到默认 Logo。
+const avatarSrc = computed(() =>
+  isUser.value ? settings.userAvatar || logoImg : settings.aiAvatar || logoImg
+);
 
 interface ToolDisplayResult {
   display_type?: "web_search" | "web_fetch" | "preview";
@@ -249,28 +257,29 @@ const handleRegenerate = async () => {
     :class="{ 'user-message': isUser }"
   >
     <div class="message-avatar">
-      <n-avatar 
-        round 
-        :size="36" 
+      <n-avatar
+        round
+        :size="36"
         class="avatar"
         :class="{ 'user-avatar': isUser, 'ai-avatar': isAssistant }"
       >
-        <n-icon :size="18">
-          <Person v-if="isUser" />
-          <Sparkles v-else />
-        </n-icon>
+        <img
+          :src="avatarSrc"
+          class="avatar-img"
+          alt=""
+        >
       </n-avatar>
     </div>
 
     <div class="message-content">
       <div class="message-header">
-        <span class="message-author">{{ isUser ? "你" : "AI 助手" }}</span>
+        <span class="message-author">{{ isUser ? settings.userName : settings.aiName }}</span>
         <span class="message-time">{{ formatTime(message.timestamp) }}</span>
       </div>
 
       <div
         class="message-body"
-        :class="{ 'user-body': isUser }"
+        :class="{ 'user-body': isUser, 'no-border': !settings.messageBorderEnabled }"
       >
         <!-- 思考过程（思考型模型的 reasoning 流式增量；默认折叠，点击展开。
              仅内存态展示，不写入正文、不入库，刷新后消失） -->
@@ -503,6 +512,12 @@ const handleRegenerate = async () => {
   flex-shrink: 0;
 }
 
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .user-avatar {
   background: $ink;
   color: $bg;
@@ -565,6 +580,10 @@ const handleRegenerate = async () => {
 .message-body.user-body {
   background: $surface;
   border: $border;
+}
+
+.message-body.no-border {
+  border-color: transparent;
 }
 
 .markdown-content {

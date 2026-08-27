@@ -299,6 +299,25 @@ export const useSettingsStore = defineStore(
     const fileSearchLimit = ref(100);
     const allowLocalNetworkFetch = ref(false);
 
+    // ============ 聊天界面偏好 ============
+
+    // 消息列表内容宽度（px）。设计系统默认 900，用户可在设置中调整。
+    const chatContentWidth = ref(900);
+
+    // 输入框获得焦点时是否上浮（translateY + 阴影）。默认开启。
+    const inputFocusLiftEnabled = ref(true);
+
+    // 消息体是否显示细边框。默认开启。
+    const messageBorderEnabled = ref(true);
+
+    // AI / 用户头像：本地图片路径或 http(s) URL；空字符串表示使用默认 Logo。
+    const aiAvatar = ref("");
+    const userAvatar = ref("");
+
+    // AI 与用户显示名。默认 "BAI" / "用户"。
+    const aiName = ref("BAI");
+    const userName = ref("用户");
+
     // ============ API 配置状态 ============
     
     // LLM API 配置列表 (支持多配置)
@@ -682,6 +701,13 @@ export const useSettingsStore = defineStore(
       fileListLimit,
       fileSearchLimit,
       allowLocalNetworkFetch,
+      chatContentWidth,
+      inputFocusLiftEnabled,
+      messageBorderEnabled,
+      aiAvatar,
+      userAvatar,
+      aiName,
+      userName,
       apiConfigs,
       activeConfigId,
       activeConfig,
@@ -712,7 +738,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["themeMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["themeMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "chatContentWidth", "inputFocusLiftEnabled", "messageBorderEnabled", "aiAvatar", "userAvatar", "aiName", "userName", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

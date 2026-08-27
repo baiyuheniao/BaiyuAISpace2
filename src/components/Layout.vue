@@ -342,7 +342,7 @@ onBeforeUnmount(() => {
       <!-- Footer decoration -->
       <div class="sidebar-footer">
         <div v-if="settings.sidebarInternalBordersEnabled" class="footer-orbit orbit-ring" />
-        <span class="footer-note">Baiyu AI Space — Monochrome</span>
+        <span class="footer-note">Baiyu AI Space</span>
       </div>
     </aside>
 

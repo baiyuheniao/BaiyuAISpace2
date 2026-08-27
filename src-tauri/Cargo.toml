@@ -44,6 +44,7 @@ scopeguard = "1.2"
 urlencoding = "2.1"
 scraper = "0.20"
 jieba-rs = "=0.7.4"
+base64 = "0.22"
 
 [features]
 default = ["custom-protocol"]

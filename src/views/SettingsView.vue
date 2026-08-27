@@ -23,7 +23,7 @@
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { open as openExternalUrl } from "@tauri-apps/plugin-shell";
 import { check as checkTauriUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -98,6 +98,25 @@ const errorSoundLevelOptions: Array<{
 const handleErrorSoundLevelChange = (value: string) => {
   if (value === "off" || value === "critical" || value === "all") {
     settings.errorSoundLevel = value;
+  }
+};
+
+// 选择本地图片作为头像：经后端读成 data URL 后写入设置，
+// 这样前端直接渲染，不需要 asset 协议或 fs 权限。
+const pickAvatar = async (target: "ai" | "user") => {
+  const selected = await open({
+    multiple: false,
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp"] },
+    ],
+  });
+  if (typeof selected !== "string") return;
+  try {
+    const dataUrl = await invoke<string>("read_image_as_data_url", { path: selected });
+    if (target === "ai") settings.aiAvatar = dataUrl;
+    else settings.userAvatar = dataUrl;
+  } catch (error) {
+    message.error(`读取头像失败：${error}`);
   }
 };
 
@@ -1368,6 +1387,107 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               </n-text>
             </div>
             <n-switch v-model:value="settings.sidebarInternalBordersEnabled" />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">消息内容宽度</span>
+              <n-text depth="3" style="font-size: 12px;">聊天页消息列表的最大内容宽度（像素）。</n-text>
+            </div>
+            <n-input-number
+              v-model:value="settings.chatContentWidth"
+              :min="480"
+              :max="2000"
+              style="width: 130px"
+            >
+              <template #suffix>px</template>
+            </n-input-number>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">输入框聚焦时上浮</span>
+              <n-text depth="3" style="font-size: 12px;">输入框获得焦点时轻微上浮并显示阴影；关闭后保持静止。</n-text>
+            </div>
+            <n-switch v-model:value="settings.inputFocusLiftEnabled" />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">消息体显示边框</span>
+              <n-text depth="3" style="font-size: 12px;">每条消息的正文卡片是否显示细边框。</n-text>
+            </div>
+            <n-switch v-model:value="settings.messageBorderEnabled" />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">AI 头像</span>
+              <n-text depth="3" style="font-size: 12px;">填 http(s) 链接，或点右侧按钮选本地图片；留空使用默认 Logo。</n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="8"
+            >
+              <n-input
+                v-model:value="settings.aiAvatar"
+                placeholder="图片 URL 或 data URL"
+                style="width: 300px"
+              />
+              <n-button
+                size="small"
+                @click="pickAvatar('ai')"
+              >
+                选择本地图片
+              </n-button>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">用户头像</span>
+              <n-text depth="3" style="font-size: 12px;">填 http(s) 链接，或点右侧按钮选本地图片；留空使用默认 Logo。</n-text>
+            </div>
+            <n-space
+              align="center"
+              :size="8"
+            >
+              <n-input
+                v-model:value="settings.userAvatar"
+                placeholder="图片 URL 或 data URL"
+                style="width: 300px"
+              />
+              <n-button
+                size="small"
+                @click="pickAvatar('user')"
+              >
+                选择本地图片
+              </n-button>
+            </n-space>
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">AI 显示名</span>
+              <n-text depth="3" style="font-size: 12px;">聊天中 AI 消息的作者名。</n-text>
+            </div>
+            <n-input
+              v-model:value="settings.aiName"
+              placeholder="BAI"
+              style="width: 180px"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">用户显示名</span>
+              <n-text depth="3" style="font-size: 12px;">聊天中你自己消息的作者名。</n-text>
+            </div>
+            <n-input
+              v-model:value="settings.userName"
+              placeholder="用户"
+              style="width: 180px"
+            />
           </div>
 
           <div class="general-setting-item">

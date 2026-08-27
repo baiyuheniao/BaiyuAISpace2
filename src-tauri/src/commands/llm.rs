@@ -368,6 +368,25 @@ fn build_url(provider: &str, base_url: &str, model: &str, streaming: bool) -> St
     }
 }
 
+/// 判断某个 provider 的「思考模式」开关是否真的会改变请求行为。
+///
+/// 必须与 `build_stream_request_body` / `build_run_turn_body` 里实际发送思考参数
+/// 的分支保持同步：只有这些 provider 的 `enable_thinking` 会落到请求里，其余
+/// provider（OpenAI / Azure / Mistral / Moonshot / 智谱 / 通义 / 文心 / 豆包 /
+/// DeepSeek / MiniMax / 零一万物等）的思考开关是空操作——前端据此隐藏按钮，
+/// 避免用户点了个没反应的开关。
+///
+/// - anthropic / google：发送 thinking 配置
+/// - siliconflow：发送 enable_thinking + thinking_budget
+/// - local / custom / openclaw：关掉时发送 reasoning_effort=none（关思考生效）
+#[tauri::command]
+pub fn supports_thinking(provider: String) -> bool {
+    matches!(
+        provider.as_str(),
+        "anthropic" | "google" | "siliconflow" | "local" | "custom" | "openclaw"
+    )
+}
+
 fn build_stream_request_body(provider: &str, model: &str, messages: &[ChatMessage], tools: &[MCPTool], enable_thinking: bool, max_tokens: Option<u32>) -> serde_json::Value {
     // 一次流式请求如果在收到任何 token 之前就被停止了（见 `cancel_stream`），
     // 会留下一条内容为空、也没有附件的 assistant 消息。把这种消息原样传回去

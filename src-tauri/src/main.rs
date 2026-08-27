@@ -335,6 +335,7 @@ fn main() {
             commands::llm::stream_message,
             commands::llm::compact_chat_context,
             commands::llm::cancel_stream,
+            commands::llm::supports_thinking,
             // 检测最新版本(设置页手动检测按钮)
             commands::app_update::check_latest_releases,
             // 检测并安装 Beta 版更新(独立于稳定版 updater 端点)
@@ -346,6 +347,7 @@ fn main() {
             delete_session_cmd,
             delete_message_cmd,
             export_text_file_cmd,
+            read_image_as_data_url,
             clear_database_cmd,
             // 安全存储相关命令
             save_api_key,
@@ -751,6 +753,37 @@ async fn delete_message_cmd(
 #[tauri::command]
 fn export_text_file_cmd(file_path: String, content: String) -> Result<(), String> {
     std::fs::write(&file_path, content).map_err(|e| format!("导出失败: {}", e))
+}
+
+/// 读取本地图片并返回 data URL，供头像等需要在前端直接展示的场景使用。
+/// 与 export_text_file_cmd 一样直接用 std::fs，不引入 tauri-plugin-fs。
+/// 限制单张 1MB，避免把过大的 base64 塞进 localStorage。
+#[tauri::command]
+fn read_image_as_data_url(path: String) -> Result<String, String> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("读取图片失败: {}", e))?;
+    if meta.len() > MAX_BYTES {
+        return Err("图片过大，头像请控制在 1MB 以内".to_string());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {}", e))?;
+    let mime = match std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("bmp") => "image/bmp",
+        _ => "image/png",
+    };
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime, encoded))
 }
 
 /// 清空数据库：删除全部会话、消息、MCP 服务器配置、Skill（设置页“危险操作”按钮对应的后端命令）
