@@ -60,6 +60,7 @@ import {
 } from "@vicons/ionicons5";
 import { useMessage } from "@/composables/useNotify";
 import { useMCPStore, type MCPServer } from "@/stores/mcp";
+import MemoryPanel from "@/components/MemoryPanel.vue";
 
 // ============ 状态管理 ============
 
@@ -90,25 +91,6 @@ interface MCPPreset {
 }
 
 const MCP_PRESETS: MCPPreset[] = [
-  {
-    id: "filesystem",
-    name: "文件系统访问",
-    description: "高级兼容方式：读写指定目录下的本地文件。普通文件操作请直接在 Chat 或 Agent Team 中选择工作目录。",
-    serverType: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"],
-    needsConfig: "请将最后一行参数改为你要允许访问的目录路径",
-    category: "文件与数据",
-  },
-  {
-    id: "memory",
-    name: "知识图谱记忆",
-    description: "基于知识图谱的持久化记忆，让模型记住对话中的实体与关系",
-    serverType: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-memory"],
-    category: "效率与记忆",
-  },
   {
     id: "playwright",
     name: "浏览器自动化",
@@ -713,6 +695,7 @@ const handleTestSavedServer = async (server: MCPServer) => {
             MCP 服务管理
           </h1>
         </header>
+        <MemoryPanel />
 
         <!-- 推荐能力卡片：内置能力（零配置）与社区预设（需配置）合并展示，
              用状态标签区分"能直接用"和"点了才能用"，而不是拆成两张视觉权重相同的卡片 -->

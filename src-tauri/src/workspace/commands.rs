@@ -732,6 +732,9 @@ async fn send_workspace_message_impl(
             Ok(conn) => {
                 if let Err(e) = db::insert_message(&conn, &msg) {
                     log::error!("[workspace] 写入消息失败: {}", e);
+                } else if from_agent_id!="user" && from_agent_id!="system" {
+                    let context=crate::memory::Context::agent(workspace_id,from_agent_id);
+                    if app_handle.state::<crate::memory::MemoryState>().capture(&context,&msg.id,&format!("助手（待核实）：{content}")).is_err() {log::warn!("Agent 消息已保存，但记忆副本未保存");}
                 }
             }
             Err(e) => log::error!("[workspace] 打开数据库连接失败（写消息）: {}", e),
@@ -1315,7 +1318,7 @@ async fn process_agent_wake(
     // Running、空转检查不通过再改成 Idle——一次虚假唤醒（比如广播的余波）就
     // 会把休眠中 Agent 的 Sleeping 状态洗成 Idle，"全员休眠→触发验收"的
     // 条件随之被无声破坏。
-    let chat_history = build_chat_history(app_handle, workspace_id, &agent).await;
+    let mut chat_history = build_chat_history(app_handle, workspace_id, &agent).await;
     if chat_history.is_empty() {
         log::debug!("[workspace] Agent「{}」历史消息为空，跳过本次唤醒（状态保持 {:?}）", agent.name, agent.status);
         return Ok(());
@@ -1340,8 +1343,13 @@ async fn process_agent_wake(
         .find(|m| m.role == "user")
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    let system_prompt = build_agent_system_prompt(app_handle, &agent, &latest_query).await;
-    let mut native_messages = build_native_messages(&agent.provider, &chat_history);
+    let memory_state = app_handle.state::<crate::memory::MemoryState>();
+    let _memory_activity = memory_state.activity();
+    let memory_context = crate::memory::Context::agent(workspace_id, agent_id);
+    if let Some(latest) = chat_history.iter().rev().find(|m|m.role=="user") {
+        if memory_state.capture(&memory_context,&latest.id,&latest.content).is_err() { log::warn!("Agent 上下文未保存到记忆"); }
+    }
+    let mut system_prompt = build_agent_system_prompt(app_handle, &agent, &latest_query).await;
 
     // 本地模型（比如 Ollama）不需要 API 密钥——跟 llm.rs 请求层
     // `get_api_key()` 里的同一条例外规则保持一致。
@@ -1364,7 +1372,19 @@ async fn process_agent_wake(
     // 的服务器），但设计意图是它像聊天页一样「开箱即用、不需要额外配置」——
     // 之前这里被 mcp_server_ids 是否为空整个短路掉，导致没勾选任何外部 MCP
     // 服务器的 Agent（包括没配置过 MCP 的主 Agent）永远拿不到这两个内置工具。
+    let memory_settings=memory_state.settings();
+    if memory_settings.enabled && memory_settings.auto_compact {
+        if let Some(summary)=memory_state.compaction(&memory_context.session) { chat_history=crate::commands::llm::apply_context_compaction(chat_history,&summary); }
+        let budget=if chat_history.len()>agent.history_limit.max(8) as usize {0} else {memory_settings.context_tokens};
+        if let Some(summary)=crate::commands::llm::auto_compact_messages(&agent.provider,&agent.model,&api_key,&agent.base_url,&chat_history,budget,cancel).await.map_err(|e|WorkspaceError::InvalidConfig(e.to_string()))? {
+            memory_state.save_compaction(&memory_context.session,&summary).map_err(WorkspaceError::InvalidConfig)?;
+            chat_history=crate::commands::llm::apply_context_compaction(chat_history,&summary);
+        }
+        for message in chat_history.iter().filter(|m|m.role=="system") { system_prompt.push_str("\n\n"); system_prompt.push_str(&message.content); }
+    }
+    let mut native_messages = build_native_messages(&agent.provider, &chat_history);
     let mut tools = workspace_tool_defs(&workspace, &agent);
+    if memory_state.settings().enabled { tools.extend(crate::memory::tool_defs()); }
     {
         let db_state = app_handle.state::<DbState>();
         match get_all_mcp_tools(db_state).await {
@@ -1546,7 +1566,7 @@ async fn process_agent_wake(
                         workspace_id,
                         Some(agent_id.to_string()),
                         "tool_call",
-                        format!("调用工具 {} 参数: {}", call.name, call.arguments),
+                        if call.name.starts_with("memory_") {format!("调用记忆工具 {}（正文不写入工具审计）",call.name)} else {format!("调用工具 {} 参数: {}", call.name, call.arguments)},
                     )
                     .await;
                     let result = dispatch_tool_call(app_handle, &workspace, &agent, call, cancel).await;
@@ -1758,7 +1778,10 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
             Ok(c) => c,
             Err(_) => return vec![],
         };
-        let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, agent.history_limit.max(1) as i64)
+        // 开启摘要时先读取完整可见历史，再应用已存摘要边界；不能先丢掉窗口外消息。
+        let memory_settings=app_handle.state::<crate::memory::MemoryState>().settings();
+        let limit=if memory_settings.enabled && memory_settings.auto_compact {i64::MAX} else {agent.history_limit.max(1) as i64};
+        let messages = db::list_recent_messages_for_agent(&conn, workspace_id, &agent.id, limit)
             .unwrap_or_default();
         // 这里也要包含软删除的 Agent——一个已删除 Agent 过去发的消息仍然
         // 落在这个历史窗口里，需要能正确解析出发送者名字，而不是给模型看
@@ -1782,12 +1805,11 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
 
     messages
         .into_iter()
-        .enumerate()
-        .map(|(i, m)| {
+        .map(|m| {
             let is_own = m.from_agent_id == agent.id;
             let content = if is_own { m.content } else { format!("[来自 {}]: {}", name_of(&m.from_agent_id), m.content) };
             ChatMessage {
-                id: format!("wm_{}", i),
+                id: m.id,
                 role: if is_own { "assistant".to_string() } else { "user".to_string() },
                 content,
                 timestamp: m.created_at,
@@ -1808,6 +1830,9 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
 /// 重新实现一套检索逻辑。
 async fn build_agent_system_prompt(app_handle: &AppHandle, agent: &WorkspaceAgent, latest_query: &str) -> String {
     let mut sections = vec![agent.system_prompt.clone()];
+    let context = crate::memory::Context::agent(&agent.workspace_id,&agent.id);
+    let memory_prompt = crate::memory::prompt(app_handle,&context,latest_query).await;
+    if !memory_prompt.is_empty() { sections.push(memory_prompt); }
 
     // 工作记忆：每次唤醒的上下文只由最近 40 条消息重建，工具调用轮次的中间
     // 结果醒来就丢——scratchpad 是这个空白之外唯一跨唤醒保留的私有存储，靠
@@ -2123,6 +2148,9 @@ async fn dispatch_tool_call(
     call: &PendingToolCall,
     cancel: &CancellationToken,
 ) -> serde_json::Value {
+    if call.name.starts_with("memory_") {
+        return crate::memory::execute(app_handle,&crate::memory::Context::agent(&workspace.id,&agent.id),&call.name,&call.arguments).await;
+    }
     if call.name.starts_with("baiyu_file_") {
         let mut rules = Vec::new();
         if agent.file_access_mode != "none" {

@@ -30,6 +30,7 @@ mod secure_storage;
 mod types;
 mod workspace;
 mod workspace_smoke_test;
+mod memory;
 
 // 引入类型和函数
 use commands::llm::{ChatMessage, ChatSession};
@@ -334,6 +335,11 @@ fn main() {
             // LLM 相关命令
             commands::llm::stream_message,
             commands::llm::compact_chat_context,
+            memory::memory_overview,
+            memory::memory_save_settings,
+            memory::memory_forget_entries,
+            memory::memory_review_entry,
+            memory::memory_restore_snapshot,
             commands::llm::cancel_stream,
             commands::llm::supports_thinking,
             // 检测最新版本(设置页手动检测按钮)
@@ -497,6 +503,9 @@ fn main() {
                 }
             };
             app.manage(load_window_preferences(app_data_dir.join("window-preferences.json")));
+            app.manage(memory::MemoryState::open(&app_data_dir.join("memdir").join("memory.sqlite"))
+                .map_err(std::io::Error::other)?);
+            memory::start_background(app.handle().clone());
             let vector_db_path = app_data_dir.join("vector_store").to_str().unwrap_or("vector_store").to_string();
             
             let vector_store = runtime.block_on(async {
@@ -716,9 +725,18 @@ async fn save_message_cmd(
     session_id: String,
     message: ChatMessage,
     db_state: tauri::State<'_, DbState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let db = db_state.0.lock().await;
-    db.save_message(&session_id, &message).map_err(|e| commands::local_model::friendly_err("保存消息失败，请重试", e))
+    db.save_message(&session_id, &message).map_err(|e| commands::local_model::friendly_err("保存消息失败，请重试", e))?;
+    let directory: Option<String>=db.conn.query_row("SELECT working_directory FROM sessions WHERE id=?1",[&session_id],|r|r.get(0)).unwrap_or(None);
+    drop(db);
+    if message.error.is_none() && ["user","assistant"].contains(&message.role.as_str()) && !message.content.trim().is_empty() {
+        let context=memory::Context::chat(&session_id,directory.as_deref());
+        let content=format!("{}：{}",if message.role=="user" {"用户"} else {"助手（待核实）"},message.content);
+        if app_handle.state::<memory::MemoryState>().capture(&context,&message.id,&content).is_err() { log::warn!("消息已保存，但记忆副本未保存"); }
+    }
+    Ok(())
 }
 
 #[tauri::command]

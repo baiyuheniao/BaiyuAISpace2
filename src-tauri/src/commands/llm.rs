@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -199,7 +199,7 @@ pub struct CompactChatContextResult {
 }
 
 /// 数据库中的“活动上下文”快照；原消息仍保留在 messages 表内供查看和导出。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextCompaction {
     pub summary: String,
     pub preserve_from_timestamp: i64,
@@ -1200,6 +1200,9 @@ pub async fn stream_message(
     );
     
     let api_key = get_api_key(&request)?;
+    let memory_state = app_handle.state::<crate::memory::MemoryState>();
+    let _memory_activity = memory_state.activity();
+    let memory_context = crate::memory::Context::chat(&request.session_id, request.working_directory.as_deref());
     let message_id = Uuid::new_v4().to_string();
     let session_id = request.session_id.clone();
 
@@ -1270,6 +1273,7 @@ pub async fn stream_message(
     // 内置文件工具独立于 MCP 总开关，只由当前 Chat 的持久化授权决定。
     let file_rules = file_tools::rules_for_directory(request.working_directory.as_deref(), &request.file_access_mode);
     mcp_tools.extend(file_tools::tool_defs(&file_rules));
+    if memory_state.settings().enabled { mcp_tools.extend(crate::memory::tool_defs()); }
 
     // 把手动激活的 skill 的 instructions（加上可读资源文件的内容）作为一段
     // system prompt 注入进去，是和已有的 system 消息合并，而不是替换掉它。
@@ -1284,6 +1288,23 @@ pub async fn stream_message(
     };
     if let Some(compaction) = context_compaction {
         effective_messages = apply_context_compaction(effective_messages, &compaction);
+    }
+    let memory_settings = memory_state.settings();
+    if memory_settings.enabled {
+        append_memory_prompt(&mut effective_messages,format!("【当前会话环境（由应用提供）】{}",serde_json::json!({"session_id":request.session_id,"working_directory":request.working_directory,"file_access":request.file_access_mode,"date":chrono::Local::now().format("%Y-%m-%d").to_string()})));
+    }
+    if memory_settings.enabled && memory_settings.auto_compact {
+        if let Some(compaction) = auto_compact_messages(&request.provider, &request.model, &api_key, &request.base_url, &effective_messages, memory_settings.context_tokens, &cancel_token).await? {
+            state.0.lock().await.save_context_compaction(&request.session_id, &compaction)
+                .map_err(|e| LLMError::ApiError(format!("保存自动摘要失败：{e}")))?;
+            effective_messages = apply_context_compaction(effective_messages, &compaction);
+        }
+    }
+    if let Some(latest) = request.messages.iter().rev().find(|m|m.role=="user") {
+        let memory_prompt = crate::memory::prompt(&app_handle, &memory_context, &latest.content).await;
+        if !memory_prompt.is_empty() {
+            append_memory_prompt(&mut effective_messages, memory_prompt);
+        }
     }
     if !active_skills.is_empty() {
         let skill_context = build_skill_context(&active_skills, &app_handle).await;
@@ -1578,9 +1599,17 @@ fn tool_display_result(value: &serde_json::Value, tool_name: &str) -> serde_json
 
 fn enforce_round_tool_budget(rounds: &mut [(Vec<ToolCall>, Vec<serde_json::Value>)]) {
     let mut used = 0usize;
+    let mut seen = std::collections::HashMap::new();
     // 倒序优先保留最近工具结果；较早结果退化为可追溯元信息。
     for (calls, results) in rounds.iter_mut().rev() {
         for (call, result) in calls.iter().zip(results.iter_mut()).rev() {
+            // 只合并完全相同的只读调用结果，保留每次调用 ID 和最近一份正文。
+            if ["search","read","list","fetch"].iter().any(|word|call.function.name.contains(word)) {
+                let key=(call.function.name.clone(),call.function.arguments.clone(),result.to_string());
+                if let Some(latest_id)=seen.get(&key) {
+                    *result=serde_json::json!({"status":"completed","duplicate_of":latest_id,"note":"结果与该次调用完全相同，请参考其正文"});
+                } else { seen.insert(key,call.id.clone()); }
+            }
             let size = result.to_string().len();
             if used + size <= TOOL_ROUND_TOKEN_BUDGET * 4 {
                 used += size;
@@ -1636,6 +1665,9 @@ async fn execute_tool_calls(
                 log::warn!("Skill not found for autonomous call: {}", skill_id);
                 serde_json::json!({ "error": format!("skill '{}' not found", skill_id) })
             }
+        } else if tool_call.function.name.starts_with("memory_") && mcp_tools.iter().any(|t|t.name==tool_call.function.name) {
+            let context = crate::memory::Context::chat(session_id,working_directory);
+            crate::memory::execute(app_handle,&context,&tool_call.function.name,&serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null)).await
         } else if tool_call.function.name.starts_with("baiyu_file_") {
             file_tools::execute(file_rules, &tool_call.function.name, &serde_json::from_str(&tool_call.function.arguments).unwrap_or(serde_json::Value::Null))
         } else if let Some(tool) = mcp_tools.iter().find(|t| t.name == tool_call.function.name) {
@@ -2748,7 +2780,7 @@ fn get_api_key(request: &SendMessageRequest) -> Result<String, LLMError> {
 }
 
 /// 普通对话和“压缩摘要”共用同一条 keyring 读取路径，避免任何密钥进入 IPC。
-fn get_api_key_for_config(provider: &str, api_config_id: &str) -> Result<String, LLMError> {
+pub(crate) fn get_api_key_for_config(provider: &str, api_config_id: &str) -> Result<String, LLMError> {
     // 本地模型不需要 API key
     if provider == "local" {
         return Ok(String::new());
@@ -2773,7 +2805,34 @@ fn get_api_key_for_config(provider: &str, api_config_id: &str) -> Result<String,
 
 const COMPACTION_SYSTEM_PROMPT: &str = r#"你是桌面 AI 助手的上下文压缩器。请把对话写成供下一轮模型继续工作的结构化交接摘要。
 
-必须保留：用户目标和硬约束；已完成工作；已证实事实及证据；涉及的文件、路径、命令、配置键、版本号和报错原文；已尝试且排除的方案；未完成事项和下一步。不要编造，不要把“可能”写成事实。具体名称和数值尽量原样保留。只输出中文 Markdown 摘要，不要回答原对话中的问题。"#;
+必须保留：用户目标和硬约束；已完成工作；已证实事实及证据；人物、日期、预算、偏好、决策及其理由；涉及的文件、路径、命令、配置键、版本号和报错原文；已尝试且排除的方案；未完成事项和下一步。适用于研究、写作、规划、开发等各种任务。不要编造，不要把“可能”写成事实。具体名称和数值尽量原样保留。只输出中文 Markdown 摘要，不要回答原对话中的问题。"#;
+
+/// Token 数是保守估算；仅替换活动上下文，摘要失败则明确返回错误，绝不悄悄丢弃历史。
+pub(crate) async fn auto_compact_messages(provider: &str, model: &str, api_key: &str, base_url: &str, messages: &[ChatMessage], budget: usize, cancel: &CancellationToken) -> Result<Option<ContextCompaction>, LLMError> {
+    let total: usize = messages.iter().map(|m|crate::memory::estimate_tokens(&m.content)+8).sum();
+    let history: Vec<_> = messages.iter().filter(|m|m.role!="system").collect();
+    if total < budget * 4 / 5 || history.len() <= 8 { return Ok(None); }
+    let keep_index=(0..=history.len()-6).rev().find(|i|history[*i].role=="user").unwrap_or(history.len()-6);
+    let boundary = history[keep_index].timestamp;
+    let old: Vec<_> = messages.iter().filter(|m|m.role=="system" || m.timestamp<boundary).map(|m|serde_json::json!({"role":m.role,"content":crate::memory::redact(&m.content)})).collect();
+    let source = serde_json::to_string(&old).map_err(|e|LLMError::ApiError(e.to_string()))?;
+    // 每轮有界输入；超限不截掉关键早期决策，而是交给手动压缩处理。
+    if source.len()>600_000 { return Err(LLMError::ApiError("历史超出自动摘要输入上限，请先手动压缩上下文".into())); }
+    let outcome = run_turn_with_cancel(provider,model,api_key,base_url,Some(COMPACTION_SYSTEM_PROMPT),&[serde_json::json!({"role":"user","content":source})],&[],Some(3000),false,true,Some(cancel)).await?;
+    match outcome {
+        TurnOutcome::Text(summary) if !summary.trim().is_empty() => Ok(Some(ContextCompaction {summary,preserve_from_timestamp:boundary,created_at:chrono::Utc::now().timestamp_millis()})),
+        _ => Err(LLMError::ApiError("自动摘要未返回有效正文，完整历史已保留".into()))
+    }
+}
+
+/// Anthropic/Gemini 构造器只读取第一条 system，因此必须合并而非新增并列消息。
+fn append_memory_prompt(messages: &mut Vec<ChatMessage>, prompt: String) {
+    if let Some(system) = messages.iter_mut().find(|m|m.role=="system") {
+        system.content.push_str("\n\n"); system.content.push_str(&prompt);
+    } else {
+        messages.insert(0, ChatMessage {id:Uuid::new_v4().to_string(),role:"system".into(),content:prompt,timestamp:0,error:None,images:vec![],videos:vec![],token_usage:None});
+    }
+}
 
 fn build_compaction_source(messages: &[ChatMessage]) -> String {
     const MAX_MESSAGE_CHARS: usize = 8_000;
@@ -2800,7 +2859,7 @@ fn build_compaction_source(messages: &[ChatMessage]) -> String {
 
 /// 用已保存的摘要替换较早的活动上下文，但不修改数据库中的完整消息历史。
 /// 单独抽出这一步，既让流式请求路径更直观，也能离线验证真正发给模型的消息边界。
-fn apply_context_compaction(
+pub(crate) fn apply_context_compaction(
     mut messages: Vec<ChatMessage>,
     compaction: &ContextCompaction,
 ) -> Vec<ChatMessage> {
@@ -3495,6 +3554,36 @@ mod provider_tool_calling_tests {
         });
 
         (format!("http://{}", addr), captured)
+    }
+
+    #[test]
+    fn memory_prompt_preserves_system_for_every_provider() {
+        let mut messages=vec![msg("system","原始用户规则"),msg("user","回忆偏好")];
+        append_memory_prompt(&mut messages,"记忆参考内容".into());
+        for provider in ["openai","anthropic","google"] {
+            let body=build_stream_request_body(provider,"test-model",&messages,&crate::memory::tool_defs(),false,None).to_string();
+            assert!(body.contains("原始用户规则"),"{provider}");
+            assert!(body.contains("记忆参考内容"),"{provider}");
+            assert!(body.contains("memory_search"),"{provider}");
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_auto_compaction_preserves_recent_turns_and_previous_summary() {
+        let (url,captured)=mock_llm_server(vec![serde_json::json!({"choices":[{"message":{"content":"保留决策：预算 500 元，下一步确认行程。"}}]})]).await;
+        let mut messages=vec![msg("system","此前摘要：预算 500 元")];
+        for i in 0..12 { let mut m=msg(if i%2==0 {"user"} else {"assistant"},&format!("第 {i} 轮行程安排"));m.timestamp=i+1;messages.push(m); }
+        let original=messages.clone();
+        let summary=auto_compact_messages("local","test","",&url,&messages,1,&CancellationToken::new()).await.unwrap().unwrap();
+        let active=apply_context_compaction(messages,&summary);
+        assert_eq!(active.iter().filter(|m|m.role!="system").count(),6);
+        assert_eq!(active.last().unwrap().content,original.last().unwrap().content);
+        assert!(active[0].content.contains("保留决策"));
+        assert_eq!(original.len(),13);
+        let requests=captured.lock().await;
+        let request=requests[0].to_string();
+        assert!(request.contains("此前摘要"));
+        assert!(!request.contains("第 11 轮"));
     }
 
     #[tokio::test]
