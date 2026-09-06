@@ -2809,12 +2809,32 @@ const COMPACTION_SYSTEM_PROMPT: &str = r#"你是桌面 AI 助手的上下文压�
 
 /// Token 数是保守估算；仅替换活动上下文，摘要失败则明确返回错误，绝不悄悄丢弃历史。
 pub(crate) async fn auto_compact_messages(provider: &str, model: &str, api_key: &str, base_url: &str, messages: &[ChatMessage], budget: usize, cancel: &CancellationToken) -> Result<Option<ContextCompaction>, LLMError> {
+    if budget == 0 {
+        return Ok(None);
+    }
     let total: usize = messages.iter().map(|m|crate::memory::estimate_tokens(&m.content)+8).sum();
     let history: Vec<_> = messages.iter().filter(|m|m.role!="system").collect();
-    if total < budget * 4 / 5 || history.len() <= 8 { return Ok(None); }
-    let keep_index=(0..=history.len()-6).rev().find(|i|history[*i].role=="user").unwrap_or(history.len()-6);
-    let boundary = history[keep_index].timestamp;
+    if total < budget * 4 / 5 || history.is_empty() { return Ok(None); }
+    // 以预算决定要保留多少“最近原文”，而不是用固定消息条数。这样一条
+    // 超长用户消息也会触发压缩；最新用户消息始终留在活动上下文中。
+    let preserve_budget = (budget * 3 / 5).max(1);
+    let mut preserved_tokens = 0usize;
+    let mut boundary_index = history.len() - 1;
+    for index in (0..history.len()).rev() {
+        let cost = crate::memory::estimate_tokens(&history[index].content) + 8;
+        if index != history.len() - 1 && preserved_tokens.saturating_add(cost) > preserve_budget { break; }
+        preserved_tokens = preserved_tokens.saturating_add(cost);
+        boundary_index = index;
+    }
+    boundary_index = (boundary_index..history.len())
+        .find(|index| history[*index].role == "user")
+        .or_else(|| history.iter().rposition(|message| message.role == "user"))
+        .unwrap_or(boundary_index);
+    let boundary = history[boundary_index].timestamp;
     let old: Vec<_> = messages.iter().filter(|m|m.role=="system" || m.timestamp<boundary).map(|m|serde_json::json!({"role":m.role,"content":crate::memory::redact(&m.content)})).collect();
+    if old.is_empty() && boundary_index == 0 {
+        return Err(LLMError::ApiError("最新一条消息本身超出自动摘要预算，请缩短消息或使用手动压缩".into()));
+    }
     let source = serde_json::to_string(&old).map_err(|e|LLMError::ApiError(e.to_string()))?;
     // 每轮有界输入；超限不截掉关键早期决策，而是交给手动压缩处理。
     if source.len()>600_000 { return Err(LLMError::ApiError("历史超出自动摘要输入上限，请先手动压缩上下文".into())); }
@@ -3574,7 +3594,7 @@ mod provider_tool_calling_tests {
         let mut messages=vec![msg("system","此前摘要：预算 500 元")];
         for i in 0..12 { let mut m=msg(if i%2==0 {"user"} else {"assistant"},&format!("第 {i} 轮行程安排"));m.timestamp=i+1;messages.push(m); }
         let original=messages.clone();
-        let summary=auto_compact_messages("local","test","",&url,&messages,1,&CancellationToken::new()).await.unwrap().unwrap();
+        let summary=auto_compact_messages("local","test","",&url,&messages,160,&CancellationToken::new()).await.unwrap().unwrap();
         let active=apply_context_compaction(messages,&summary);
         assert_eq!(active.iter().filter(|m|m.role!="system").count(),6);
         assert_eq!(active.last().unwrap().content,original.last().unwrap().content);
@@ -3584,6 +3604,25 @@ mod provider_tool_calling_tests {
         let request=requests[0].to_string();
         assert!(request.contains("此前摘要"));
         assert!(!request.contains("第 11 轮"));
+    }
+
+    #[tokio::test]
+    async fn memory_auto_compaction_handles_one_oversized_message_before_nine_turns() {
+        let (url, captured) = mock_llm_server(vec![serde_json::json!({
+            "choices": [{ "message": { "content": "压缩摘要保留：超长材料暗号海豚-418。" } }]
+        })]).await;
+        let mut messages = vec![msg("system", "保留系统规则")];
+        let mut long = msg("user", &format!("{}\n超长材料暗号：海豚-418。", "重复材料。".repeat(900)));
+        long.timestamp = 1;
+        messages.push(long);
+        let mut assistant = msg("assistant", "已收到超长材料"); assistant.timestamp = 2; messages.push(assistant);
+        let mut latest = msg("user", "请继续处理刚才的材料"); latest.timestamp = 3; messages.push(latest.clone());
+        let summary = auto_compact_messages("local", "test", "", &url, &messages, 1000, &CancellationToken::new()).await.unwrap().unwrap();
+        let active = apply_context_compaction(messages, &summary);
+        assert_eq!(active.iter().filter(|m| m.role != "system").count(), 1);
+        assert_eq!(active.last().unwrap().content, latest.content);
+        assert!(active[0].content.contains("海豚-418"));
+        assert!(captured.lock().await[0].to_string().contains("海豚-418"));
     }
 
     #[tokio::test]
