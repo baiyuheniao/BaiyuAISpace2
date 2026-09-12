@@ -1393,6 +1393,26 @@ const providerOptions = computed(() => settings.presetProviderOptions);
             <n-switch v-model:value="settings.messageBorderEnabled" />
           </div>
 
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">默认启用 MCP 工具</span>
+              <n-text depth="3" style="font-size: 12px;">
+                开启后，每次启动软件时聊天页侧边栏的「MCP 工具」默认为开；聊天页内仍可临时切换，不影响此默认值。
+              </n-text>
+            </div>
+            <n-switch v-model:value="settings.chatMcpDefaultEnabled" />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">默认允许模型自主调用 Skill</span>
+              <n-text depth="3" style="font-size: 12px;">
+                开启后，每次启动软件时聊天页侧边栏的「模型可自主调用 Skill」默认为开；聊天页内仍可临时切换，不影响此默认值。
+              </n-text>
+            </div>
+            <n-switch v-model:value="settings.chatSkillAutonomyDefaultEnabled" />
+          </div>
+
           <div class="settings-group-title">聊天显示</div>
 
           <div class="general-setting-item">
