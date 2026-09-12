@@ -33,6 +33,33 @@ html.dark {
   --shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.32);
 }
 
+// 正常色调（柔和）：仍是纯黑白灰体系，但把纯黑/纯白往中间收，
+// 降低明暗反差，散光/对高对比敏感的用户看起来更舒服。
+// 高对比度 = 上面的默认配色，不挂 soft-tone 类。
+html.soft-tone {
+  --color-bg: #fafafa;
+  --color-ink: #1f1f1f;
+  --color-ink-soft: #4a4a4a;
+  --color-ink-faint: #7d7d7d;
+  --color-surface: #f0f0f0;
+  --color-line: #333333;
+  --color-line-soft: rgba(0, 0, 0, 0.32);
+  --color-line-faint: rgba(0, 0, 0, 0.16);
+  --shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.06);
+}
+
+html.dark.soft-tone {
+  --color-bg: #1e1e1e;
+  --color-ink: #e3e3e3;
+  --color-ink-soft: #b5b5b5;
+  --color-ink-faint: #8c8c8c;
+  --color-surface: #282828;
+  --color-line: #c9c9c9;
+  --color-line-soft: rgba(227, 227, 227, 0.38);
+  --color-line-faint: rgba(227, 227, 227, 0.2);
+  --shadow-hover: 0 20px 60px rgba(0, 0, 0, 0.24);
+}
+
 * {
   margin: 0;
   padding: 0;

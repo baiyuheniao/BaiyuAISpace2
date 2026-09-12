@@ -62,7 +62,8 @@ import {
   type ErrorSoundLevel,
   type StartupWindowMode,
   type FontSize,
-  type ThemeMode
+  type ThemeMode,
+  type ColorTone
 } from "@/stores/settings";
 import {
   KeyOutline,
@@ -135,6 +136,17 @@ const themeModeOptions: Array<{ label: string; value: ThemeMode }> = [
 const handleThemeModeChange = (value: string) => {
   if (value === "light" || value === "dark" || value === "system") {
     settings.setThemeMode(value);
+  }
+};
+
+const colorToneOptions: Array<{ label: string; value: ColorTone }> = [
+  { label: "高对比度", value: "contrast" },
+  { label: "正常色调", value: "normal" },
+];
+
+const handleColorToneChange = (value: string) => {
+  if (value === "contrast" || value === "normal") {
+    settings.setColorTone(value);
   }
 };
 
@@ -1302,6 +1314,22 @@ const providerOptions = computed(() => settings.presetProviderOptions);
               placeholder="请选择显示模式"
               style="width: 180px;"
               @update:value="handleThemeModeChange"
+            />
+          </div>
+
+          <div class="general-setting-item">
+            <div class="general-setting-text">
+              <span class="general-setting-label">色调</span>
+              <n-text depth="3" style="font-size: 12px;">
+                高对比度为纯黑纯白（#000000 + #FFFFFF）；正常色调整体仍是黑白灰，但明暗反差更柔和，对散光和敏感眼更友好。浅色与深色模式会分别适配。
+              </n-text>
+            </div>
+            <n-select
+              :value="settings.colorTone"
+              :options="colorToneOptions"
+              placeholder="请选择色调"
+              style="width: 180px;"
+              @update:value="handleColorToneChange"
             />
           </div>
 

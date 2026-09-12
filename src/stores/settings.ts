@@ -7,6 +7,9 @@ import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 
 export type ThemeMode = "light" | "dark" | "system";
+// 色调：contrast = 高对比度（纯黑 #000000 + 纯白 #FFFFFF，原始黑白编辑配色）；
+// normal = 正常色调（仍是黑白灰，但整体更柔和，降低散光/敏感眼的刺眼感）。
+export type ColorTone = "contrast" | "normal";
 
 /**
  * 设置 Store - 管理应用全局设置
@@ -170,17 +173,29 @@ export const useSettingsStore = defineStore(
     // ============ 主题相关状态 ============
     const themeMode = ref<ThemeMode>("system");
     const isDark = ref(false);
+    // 默认高对比度，保持老用户打开应用时看到的还是原来的纯黑白配色。
+    const colorTone = ref<ColorTone>("contrast");
     let systemThemeQuery: MediaQueryList | undefined;
+
+    const applyColorTone = () => {
+      document.documentElement.classList.toggle("soft-tone", colorTone.value === "normal");
+    };
 
     const applyTheme = () => {
       const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
       isDark.value = themeMode.value === "dark" || (themeMode.value === "system" && systemPrefersDark);
       document.documentElement.classList.toggle("dark", isDark.value);
+      applyColorTone();
     };
 
     const setThemeMode = (mode: ThemeMode) => {
       themeMode.value = mode;
       applyTheme();
+    };
+
+    const setColorTone = (tone: ColorTone) => {
+      colorTone.value = tone;
+      applyColorTone();
     };
 
     const initTheme = () => {
@@ -673,7 +688,9 @@ export const useSettingsStore = defineStore(
     return {
       themeMode,
       isDark,
+      colorTone,
       setThemeMode,
+      setColorTone,
       initTheme,
       syncErrorNotices,
       closeToTray,
@@ -738,7 +755,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["themeMode", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "chatContentWidth", "inputFocusLiftEnabled", "messageBorderEnabled", "aiAvatar", "userAvatar", "aiName", "userName", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["themeMode", "colorTone", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "chatContentWidth", "inputFocusLiftEnabled", "messageBorderEnabled", "aiAvatar", "userAvatar", "aiName", "userName", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext

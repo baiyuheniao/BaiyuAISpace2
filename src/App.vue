@@ -326,7 +326,58 @@ const darkThemeOverrides: GlobalThemeOverrides = {
   Modal: { borderRadius: "0" },
 };
 
-const themeOverrides = computed(() => settings.isDark ? darkThemeOverrides : lightThemeOverrides);
+// 正常色调（柔和）：不另写两套完整 overrides，而是在现有高对比度版本上做
+// 有序子串替换——把纯黑/纯白往灰阶中间收，线框透明度同步降低，保持黑白灰体系不变。
+const softLightColorMap: Array<[string, string]> = [
+  ["#000000", "#242424"],
+  ["#444444", "#4d4d4d"],
+  ["#888888", "#7d7d7d"],
+  ["#aaaaaa", "#a3a3a3"],
+  ["#ffffff", "#fafafa"],
+  ["#f5f5f5", "#f0f0f0"],
+  ["#eeeeee", "#e9e9e9"],
+  ["#e8e8e8", "#e3e3e3"],
+  ["rgba(0, 0, 0, 0.8)", "rgba(0, 0, 0, 0.55)"],
+  ["rgba(0, 0, 0, 0.6)", "rgba(0, 0, 0, 0.35)"],
+  ["rgba(0, 0, 0, 0.4)", "rgba(0, 0, 0, 0.2)"],
+  ["rgba(0, 0, 0, 0.3)", "rgba(0, 0, 0, 0.18)"],
+];
+
+const softDarkColorMap: Array<[string, string]> = [
+  ["#f5f5f5", "#e0e0e0"],
+  ["#c7c7c7", "#b5b5b5"],
+  ["#969696", "#8c8c8c"],
+  ["#696969", "#5f5f5f"],
+  ["#111111", "#1e1e1e"],
+  ["#1d1d1d", "#282828"],
+  ["#252525", "#2e2e2e"],
+  ["#303030", "#363636"],
+  ["#3a3a3a", "#404040"],
+  ["rgba(245, 245, 245, 0.8)", "rgba(224, 224, 224, 0.5)"],
+  ["rgba(245, 245, 245, 0.6)", "rgba(224, 224, 224, 0.35)"],
+  ["rgba(245, 245, 245, 0.4)", "rgba(224, 224, 224, 0.22)"],
+  ["rgba(245, 245, 245, 0.3)", "rgba(224, 224, 224, 0.18)"],
+];
+
+const applyColorMap = (overrides: GlobalThemeOverrides, map: Array<[string, string]>): GlobalThemeOverrides => {
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return map.reduce((text, [from, to]) => text.split(from).join(to), value);
+    }
+    if (Array.isArray(value)) return value.map(walk);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, walk(item)]));
+    }
+    return value;
+  };
+  return walk(overrides) as GlobalThemeOverrides;
+};
+
+const themeOverrides = computed(() => {
+  const base = settings.isDark ? darkThemeOverrides : lightThemeOverrides;
+  if (settings.colorTone !== "normal") return base;
+  return applyColorMap(base, settings.isDark ? softDarkColorMap : softLightColorMap);
+});
 
 // ============ 生命周期钩子 ============
 
