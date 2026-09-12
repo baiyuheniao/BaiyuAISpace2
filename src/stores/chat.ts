@@ -11,7 +11,7 @@ import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useSettingsStore } from "./settings";
+import { BUILTIN_SYSTEM_PROMPT, useSettingsStore } from "./settings";
 import { useKnowledgeBaseStore, type RetrievalResult } from "./knowledgeBase";
 import { classifyError } from "@/utils/errorMessage";
 
@@ -207,14 +207,14 @@ export const useChatStore = defineStore("chat", () => {
   /** 上一次检索结果 */
   const lastRetrievalResult = ref<RetrievalResult | null>(null);
 
-  /** MCP (Model Context Protocol) 是否启用 */
-  const mcpEnabled = ref(false);
+  /** MCP (Model Context Protocol) 是否启用。初始值取设置里的默认开关，会话内可临时切换（不持久化）。 */
+  const mcpEnabled = ref(settings.chatMcpDefaultEnabled);
 
   /** 手动激活的 Skill ID 列表 */
   const activeSkillIds = ref<string[]>([]);
 
-  /** 是否允许模型自主判断调用其它已启用的 Skill */
-  const skillAutonomyEnabled = ref(false);
+  /** 是否允许模型自主判断调用其它已启用的 Skill。初始值取设置里的默认开关，会话内可临时切换（不持久化）。 */
+  const skillAutonomyEnabled = ref(settings.chatSkillAutonomyDefaultEnabled);
 
   /** 是否启用思考模式 (Extended Thinking) */
   const thinkingEnabled = ref(false);
@@ -676,7 +676,11 @@ export const useChatStore = defineStore("chat", () => {
         }));
 
       // ============ 全局 System Prompt ============
-      const globalSystemPrompt = settings.systemPrompt.trim();
+      // 拼装顺序：硬编码的 BUILTIN_SYSTEM_PROMPT 在前，用户在设置页填写的在后，
+      // 两者用空行分隔；都为空则不注入。内置提示词不进用户存档，天然对所有人生效。
+      const globalSystemPrompt = [BUILTIN_SYSTEM_PROMPT.trim(), settings.systemPrompt.trim()]
+        .filter(Boolean)
+        .join("\n\n");
       if (globalSystemPrompt) {
         if (apiMessages.length > 0 && apiMessages[0].role === "system") {
           apiMessages[0] = {

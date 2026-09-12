@@ -143,6 +143,14 @@ export interface RerankerApiConfig {
   createdAt: number;
 }
 
+/**
+ * 内置 System Prompt（硬编码，对所有聊天生效）。
+ * 在拼装请求时永远拼在用户于设置页填写的 systemPrompt 之前，
+ * 与用户存档完全无关——改这里不需要清空或迁移任何 localStorage 数据。
+ * 留空字符串表示不注入。
+ */
+export const BUILTIN_SYSTEM_PROMPT = "";
+
 /** 报错弹窗始终显示；此设置只决定哪些报错需要声音提醒。 */
 export type ErrorSoundLevel = "off" | "critical" | "all";
 export type StartupWindowMode = "window" | "fullscreen";
@@ -324,6 +332,13 @@ export const useSettingsStore = defineStore(
 
     // 消息体是否显示细边框。默认开启。
     const messageBorderEnabled = ref(true);
+
+    // 聊天界面侧边栏「MCP 工具」开关的默认值。聊天页的开关本身不持久化，
+    // 每次启动从这里取初始状态；默认开启。
+    const chatMcpDefaultEnabled = ref(true);
+
+    // 聊天界面侧边栏「模型可自主调用 Skill」开关的默认值，同上。默认开启。
+    const chatSkillAutonomyDefaultEnabled = ref(true);
 
     // AI / 用户头像：本地图片路径或 http(s) URL；空字符串表示使用默认 Logo。
     const aiAvatar = ref("");
@@ -721,6 +736,8 @@ export const useSettingsStore = defineStore(
       chatContentWidth,
       inputFocusLiftEnabled,
       messageBorderEnabled,
+      chatMcpDefaultEnabled,
+      chatSkillAutonomyDefaultEnabled,
       aiAvatar,
       userAvatar,
       aiName,
@@ -755,7 +772,7 @@ export const useSettingsStore = defineStore(
   {
     persist: {
       key: "baiyu-aispace-settings",
-      paths: ["themeMode", "colorTone", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "chatContentWidth", "inputFocusLiftEnabled", "messageBorderEnabled", "aiAvatar", "userAvatar", "aiName", "userName", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
+      paths: ["themeMode", "colorTone", "closeToTray", "errorSoundLevel", "sidebarInternalBordersEnabled", "fontSize", "showHotkey", "newSessionHotkey", "fullscreenHotkey", "startupWindowMode", "systemPrompt", "retryCount", "retryIntervalSecs", "maxToolRounds", "fileReadLimitMb", "fileListLimit", "fileSearchLimit", "allowLocalNetworkFetch", "chatContentWidth", "inputFocusLiftEnabled", "messageBorderEnabled", "chatMcpDefaultEnabled", "chatSkillAutonomyDefaultEnabled", "aiAvatar", "userAvatar", "aiName", "userName", "apiConfigs", "activeConfigId", "embeddingApiConfigs", "activeEmbeddingApiConfigId", "rerankerApiConfigs"],
       // apiKey lives in secure storage (see saveApiKeyToSecureStorage) and is
       // only kept in these arrays in-memory for request building. Without
       // this serializer it would otherwise round-trip into plaintext
