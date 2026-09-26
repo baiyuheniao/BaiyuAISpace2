@@ -181,7 +181,7 @@ graph LR
 ### 1. 环境准备
 
 ```bash
-# 安装 Node.js 18+ 和 pnpm
+# 安装 Node.js 18+ 和 pnpm（npm也可以，看自己习惯，我喜欢pnpm。可以去看一下README后面，有放镜像的配置命令。）
 npm install -g pnpm
 
 # 安装 Rust
@@ -309,18 +309,18 @@ pnpm tauri build
 
 | 提供商                    | 国家/地区   | 代表模型                                                            | 特点                   |
 | ---------------------- | ------- | --------------------------------------------------------------- | -------------------- |
-| **OpenAI**             | 🇺🇸 美国 | gpt-4o, gpt-5                                             | 有条件而且不知道用啥就这个            |
-| **Anthropic**          | 🇺🇸 美国 | claude-sonnet-4-6, claude-opus-4.8                        | 长文本、代码能力强                   |
-| **Google**             | 🇺🇸 美国 | gemini-3.1-pro                                            | 多模态、上下文长                    |
-| **Azure OpenAI**       | 🇺🇸 美国 | gpt-4o, gpt-4                                             | 企业级、合规性好（OpenAI服务还是要翻） |
+| **OpenAI**             | 🇺🇸 美国 | gpt-4o, gpt-6 astra                                             | 有条件而且不知道用啥就这个            |
+| **Anthropic**          | 🇺🇸 美国 | claude-sonnet-5, claude-opus-5.5                        | 长文本、代码能力强                   |
+| **Google**             | 🇺🇸 美国 | gemini-4-pro                                            | 多模态、上下文长                    |
+| **Azure OpenAI**       | 🇺🇸 美国 | gpt-4o, gpt-6                                             | 企业级、合规性好（OpenAI服务还是要翻） |
 | **Mistral AI**         | 🇫🇷 法国 | mistral-medium-3.5                                        | 欧洲开源先锋               |
-| **Moonshot (Kimi)**    | 🇨🇳 中国 | kimi-k2.6                                                | 长文本，强中文场景，Agent 能力强        |
-| **智谱 AI (GLM)**        | 🇨🇳 中国 | glm-5.1                                                 | 中文通用能力强 尤其代码               |
-| **阿里 (通义)**            | 🇨🇳 中国 | qwen3.6 max，qwen                                      | 同参数性能更好，低成本，多模态不错     |
+| **Moonshot (Kimi)**    | 🇨🇳 中国 | kimi-k3                                                | 长文本，强中文场景，Agent 能力强        |
+| **智谱 AI (GLM)**        | 🇨🇳 中国 | glm-5.3                                                 | 中文通用能力强 尤其代码               |
+| **阿里 (通义)**            | 🇨🇳 中国 | qwen3.8 max，qwen                                      | 同参数性能更好，低成本，多模态不错     |
 | **百度 (文心)**            | 🇨🇳 中国 | ernie-4.0, ernie-4.0-turbo                            | 中文生态完善（似乎出场率不高？）        |
 | **字节 (豆包)**            | 🇨🇳 中国 | doubao-pro-256k, doubao-pro-32k                        | 性价比高，上手简单                  |
-| **DeepSeek**           | 🇨🇳 中国 | deepseek-V4, deepseek-r1                                | 价格便宜，编程和推理能力很强           |
-| **硅基流动 (SiliconFlow)** | 🇨🇳 中国 | Qwen2.5, DeepSeek-V3/R1                               | 多模型聚合，价格优惠                 |
+| **DeepSeek**           | 🇨🇳 中国 | deepseek-v4-pro, deepseek-v4-flash                                | 价格便宜，编程和推理能力很强           |
+| **硅基流动 (SiliconFlow)** | 🇨🇳 中国 | Qwen3.8, 等等一堆                               | 多模型聚合，价格优惠                 |
 | **MiniMax**            | 🇨🇳 中国 | abab6.5s                                                  | 多模态、语音合成、Agent能力不错      |
 | **零一万物 (Yi)**          | 🇨🇳 中国 | yi-large, yi-medium                                    | 开源+商用 我没怎么见         |
 | **本地（Ollama）**         | 🌐 本地   | Llama 3、Qwen3、Gemma 等                             | 完全离线，数据不出设备          |
@@ -328,7 +328,7 @@ pnpm tauri build
 | **OpenClaw（本地网关）**    | 🌐 本地   | 任意 OpenClaw 网关代理的模型                          | 需在 OpenClaw 侧手动开启 chatCompletions 端点并配置鉴权 token |
 | **自定义**                | 🌐 全球   | 任意 OpenAI 兼容接口                                   | 灵活配置 Base URL        |
 
-> 💡 各服务商模型更新频繁，完整列表请查看官方文档。设置中可直接输入模型名称添加新模型。
+> 💡 各服务商模型更新频繁，完整列表请查看官方文档。设置中可直接输入模型名称添加新模型。这里的示例中的模型名称不一定能直接添加到API配置里面。
 
 ***
 
