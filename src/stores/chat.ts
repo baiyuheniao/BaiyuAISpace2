@@ -63,6 +63,11 @@ export interface ToolCallInfo {
   arguments: string; // 调用参数（JSON 字符串）
   status: "calling" | "done" | "error"; // 当前状态
   result?: string; // 调用结果（JSON 字符串，仅 done/error 时有）
+  /**
+   * 该调用首次出现时，所属消息 content 已累积的长度。ChatMessage.vue 按它把
+   * 正文切成"正文 → 工具卡片 → 正文"交错展示；缺省（旧数据）时卡片排在正文末尾。
+   */
+  contentOffset?: number;
 }
 
 /**
@@ -410,6 +415,8 @@ export const useChatStore = defineStore("chat", () => {
           arguments: evt.arguments,
           status: evt.status,
           result: evt.result,
+          // 记下此刻正文已流到哪里，供界面按"消息-调用-消息"的先后顺序展示
+          contentOffset: message.content.length,
         });
       }
       if (evt.status === "error") {
