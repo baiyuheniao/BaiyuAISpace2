@@ -1445,6 +1445,7 @@ async fn process_agent_wake(
                     images: vec![],
                     videos: vec![],
                     token_usage: None,
+                    tool_calls: None,
                 };
                 native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&rescue_hint)));
 
@@ -1633,6 +1634,7 @@ async fn process_agent_wake(
                         images: vec![],
                         videos: vec![],
                         token_usage: None,
+                        tool_calls: None,
                     };
                     native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&warn)));
                 }
@@ -1662,6 +1664,7 @@ async fn process_agent_wake(
             images: vec![],
             videos: vec![],
             token_usage: None,
+            tool_calls: None,
         };
         native_messages.extend(build_native_messages(&agent.provider, std::slice::from_ref(&nudge)));
 
@@ -1819,6 +1822,7 @@ async fn build_chat_history(app_handle: &AppHandle, workspace_id: &str, agent: &
                 images: m.images,
                 videos: vec![],
                 token_usage: None,
+                tool_calls: None,
             }
         })
         .collect()

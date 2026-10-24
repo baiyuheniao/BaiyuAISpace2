@@ -126,6 +126,17 @@ impl Database {
             self.conn.execute("ALTER TABLE messages ADD COLUMN token_usage TEXT", [])?;
         }
 
+        // 助手回复触发的工具调用记录（JSON 文本）。旧库没有这一列，按需补上；
+        // 补列前已存在的消息该列为 NULL，读出来就是"没有工具调用记录"。
+        let has_tool_calls = self.conn.query_row(
+            "SELECT 1 FROM pragma_table_info('messages') WHERE name = 'tool_calls'",
+            [],
+            |_| Ok(true),
+        ).unwrap_or(false);
+        if !has_tool_calls {
+            self.conn.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT", [])?;
+        }
+
         // 压缩记录与原消息分表保存：UI/导出继续读取完整消息，模型请求才按这个
         // 记录把旧历史替换成摘要。这避免“为省 token 而丢聊天记录”。
         self.conn.execute(
@@ -322,14 +333,22 @@ impl Database {
         message: &ChatMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let token_usage = message.token_usage.as_ref().map(serde_json::to_string).transpose()?;
+        // 空数组等同于没有记录，统一存 NULL，避免给每条普通回复都落一个 "[]"。
+        let tool_calls = message
+            .tool_calls
+            .as_ref()
+            .filter(|value| !value.is_null() && value.as_array().map_or(true, |items| !items.is_empty()))
+            .map(serde_json::to_string)
+            .transpose()?;
         self.conn.execute(
             r#"
-            INSERT INTO messages (id, session_id, role, content, timestamp, error, token_usage)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, timestamp, error, token_usage, tool_calls)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 error = excluded.error,
-                token_usage = excluded.token_usage
+                token_usage = excluded.token_usage,
+                tool_calls = excluded.tool_calls
             "#,
             rusqlite::params![
                 message.id,
@@ -339,6 +358,7 @@ impl Database {
                 message.timestamp,
                 message.error.as_deref().unwrap_or(""),
                 token_usage,
+                tool_calls,
             ],
         )?;
 
@@ -382,16 +402,17 @@ impl Database {
         
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, role, content, timestamp, error, token_usage
-            FROM messages 
-            WHERE session_id = ? 
+            SELECT id, role, content, timestamp, error, token_usage, tool_calls
+            FROM messages
+            WHERE session_id = ?
             ORDER BY timestamp ASC
             "#,
         )?;
-        
+
         let rows = stmt.query_map([session_id], |row| {
             let error: Option<String> = row.get(4)?;
             let token_usage_json: Option<String> = row.get(5)?;
+            let tool_calls_json: Option<String> = row.get(6)?;
             Ok(ChatMessage {
                 id: row.get(0)?,
                 role: row.get(1)?,
@@ -401,6 +422,7 @@ impl Database {
                 images: vec![],
                 videos: vec![],
                 token_usage: token_usage_json.as_deref().and_then(|value| serde_json::from_str(value).ok()),
+                tool_calls: tool_calls_json.as_deref().and_then(|value| serde_json::from_str(value).ok()),
             })
         })?;
 
@@ -685,3 +707,129 @@ impl Database {
 /// 数据库状态封装结构
 /// 用于在 Tauri 应用中共享数据库实例
 pub struct DbState(pub Arc<tokio::sync::Mutex<Database>>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Database {
+        let db = Database {
+            path: ":memory:".to_string(),
+            conn: rusqlite::Connection::open_in_memory().expect("open in-memory db"),
+        };
+        db.init().expect("init schema");
+        db
+    }
+
+    fn session(id: &str) -> ChatSession {
+        ChatSession {
+            id: id.into(),
+            title: "测试会话".into(),
+            messages: vec![],
+            created_at: 1,
+            updated_at: 1,
+            provider: "openai".into(),
+            model: "test-model".into(),
+            api_config_id: "cfg".into(),
+            working_directory: None,
+            file_access_mode: "none".into(),
+        }
+    }
+
+    fn assistant(id: &str, timestamp: i64, content: &str, tool_calls: Option<serde_json::Value>) -> ChatMessage {
+        ChatMessage {
+            id: id.into(),
+            role: "assistant".into(),
+            content: content.into(),
+            timestamp,
+            error: None,
+            images: vec![],
+            videos: vec![],
+            token_usage: None,
+            tool_calls,
+        }
+    }
+
+    fn sample_tool_calls() -> serde_json::Value {
+        serde_json::json!([
+            { "callId": "call_1", "toolName": "baiyu_file_search", "arguments": "{\"query\":\"x\"}",
+              "status": "done", "result": "{\"display_type\":\"preview\",\"preview\":\"ok\"}", "contentOffset": 14 },
+            { "callId": "call_2", "toolName": "baiyu_file_read", "arguments": "{}",
+              "status": "error", "result": "{\"error\":\"boom\"}", "contentOffset": 14 }
+        ])
+    }
+
+    #[test]
+    fn tool_calls_round_trip_through_save_and_get() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &assistant("m1", 10, "我先搜一下。找到了。", Some(sample_tool_calls()))).unwrap();
+
+        let messages = db.get_messages("s1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tool_calls, Some(sample_tool_calls()), "工具调用记录必须原样取回，包括 contentOffset");
+    }
+
+    #[test]
+    fn messages_without_tool_calls_read_back_as_none() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &assistant("plain", 10, "没有调用工具", None)).unwrap();
+        db.save_message("s1", &assistant("empty", 20, "空数组", Some(serde_json::json!([])))).unwrap();
+        db.save_message("s1", &assistant("null", 30, "null 值", Some(serde_json::Value::Null))).unwrap();
+
+        for message in db.get_messages("s1").unwrap() {
+            assert_eq!(message.tool_calls, None, "{} 不应落库任何工具调用记录", message.id);
+        }
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages WHERE tool_calls IS NOT NULL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 0, "空记录统一存 NULL，不写 \"[]\"");
+    }
+
+    #[test]
+    fn saving_a_message_again_updates_its_tool_calls() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &assistant("m1", 10, "草稿", None)).unwrap();
+        db.save_message("s1", &assistant("m1", 10, "终稿", Some(sample_tool_calls()))).unwrap();
+
+        let messages = db.get_messages("s1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "终稿");
+        assert_eq!(messages[0].tool_calls, Some(sample_tool_calls()));
+    }
+
+    #[test]
+    fn init_adds_tool_calls_column_to_a_legacy_messages_table() {
+        // 模拟升级前的旧库：messages 表没有 tool_calls 列，里面已有历史消息。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                error TEXT,
+                token_usage TEXT
+            );
+            INSERT INTO messages (id, session_id, role, content, timestamp, error, token_usage)
+            VALUES ('old', 's1', 'assistant', '升级前的回复', 5, '', NULL);
+            "#,
+        )
+        .unwrap();
+        let db = Database { path: ":memory:".to_string(), conn };
+
+        db.init().expect("迁移旧库不应失败");
+        db.init().expect("迁移必须可重复执行");
+
+        let messages = db.get_messages("s1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "升级前的回复");
+        assert_eq!(messages[0].tool_calls, None);
+    }
+}
+

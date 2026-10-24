@@ -42,7 +42,7 @@ import logoImg from "../../assets/logo.png";
 import { renderMarkdown, renderMermaidDiagrams } from "@/utils/markdown";
 
 // 导入消息类型
-import type { Message } from "@/stores/chat";
+import type { Message, ToolCallInfo } from "@/stores/chat";
 
 // 导入图标
 import { Copy, Create, Refresh, Checkmark, Close, GlobeOutline } from "@vicons/ionicons5";
@@ -165,9 +165,45 @@ const isUser = computed(() => props.message.role === "user");
 // 是否为 AI 助手消息
 const isAssistant = computed(() => props.message.role === "assistant");
 
-// 渲染后的 Markdown 内容（解析、净化、HTML/Mermaid 预览块生成全部在
-// utils/markdown.ts 的 renderMarkdown 里完成）
-const renderedContent = computed(() => renderMarkdown(props.message.content));
+// 消息体按发生顺序切成交错的片段：正文（已渲染 Markdown）和一组工具卡片。
+// 切分依据是每个工具调用首次出现时的 contentOffset（见 stores/chat.ts）；
+// 同一偏移处的相邻调用（并行调用、或两轮之间没有任何正文）归为同一组。
+// Markdown 解析、净化、HTML/Mermaid 预览块生成全部在 utils/markdown.ts 的
+// renderMarkdown 里完成。没有 contentOffset 的旧数据，卡片排在正文末尾。
+type MessageSegment =
+  | { kind: "text"; key: string; html: string }
+  | { kind: "tools"; key: string; calls: ToolCallInfo[] };
+
+const segments = computed<MessageSegment[]>(() => {
+  const content = props.message.content;
+  const calls = props.message.toolCalls ?? [];
+  const result: MessageSegment[] = [];
+
+  const pushText = (text: string) => {
+    if (!text.trim()) return;
+    result.push({ kind: "text", key: `text-${result.length}`, html: renderMarkdown(text) });
+  };
+
+  // 偏移量规整：夹在 [0, content.length]，且保证不随调用顺序倒退
+  let floor = 0;
+  const offsets = calls.map((tc) => {
+    floor = Math.max(floor, Math.min(tc.contentOffset ?? content.length, content.length));
+    return floor;
+  });
+
+  let cursor = 0;
+  for (let i = 0; i < calls.length; ) {
+    const offset = offsets[i];
+    let j = i;
+    while (j < calls.length && offsets[j] === offset) j++;
+    pushText(content.slice(cursor, offset));
+    result.push({ kind: "tools", key: `tools-${result.length}`, calls: calls.slice(i, j) });
+    cursor = offset;
+    i = j;
+  }
+  pushText(content.slice(cursor));
+  return result;
+});
 
 // ============ 方法函数 ============
 
@@ -343,65 +379,78 @@ const handleRegenerate = async () => {
           </div>
         </div>
 
+        <!-- 正文与工具调用按发生顺序交错展示：正文 → 工具卡片 → 正文…
+             （片段切分见 script 里的 segments）。工具卡片默认折叠，点击展开，
+             与上面的思考过程同一交互。外层容器同时承担 Markdown 点击委托和
+             Mermaid/HTML 预览的查找范围，所以整段都包在里面。 -->
         <div
           v-else
           ref="contentRef"
-          class="markdown-content"
+          class="message-segments"
           @click="handleMarkdownClick"
-          v-html="renderedContent"
-        />
+        >
+          <template
+            v-for="seg in segments"
+            :key="seg.key"
+          >
+            <div
+              v-if="seg.kind === 'text'"
+              class="markdown-content"
+              v-html="seg.html"
+            />
 
-        <!-- Streaming indicator -->
+            <div
+              v-else
+              class="tool-calls"
+            >
+              <details
+                v-for="tc in seg.calls"
+                :key="tc.callId"
+                class="tool-call-item"
+                :class="{ 'tool-call-error': tc.status === 'error' }"
+              >
+                <summary class="tool-call-header">
+                  <n-spin
+                    v-if="tc.status === 'calling'"
+                    :size="12"
+                  />
+                  <span class="tool-call-status-icon">{{ tc.status === "done" ? "✓" : tc.status === "error" ? "✕" : "" }}</span>
+                  <span class="tool-call-name">{{ tc.toolName }}</span>
+                  <span class="tool-call-status-text">{{
+                    tc.status === "calling" ? "调用中" : tc.status === "error" ? "调用失败" : "已完成"
+                  }}</span>
+                </summary>
+                <template v-if="isWebDisplay(tc.result)">
+                  <div class="web-tool-card">
+                    <n-icon :size="18" class="web-tool-icon"><GlobeOutline /></n-icon>
+                    <div class="web-tool-content">
+                      <strong>{{ parseToolDisplay(tc.result)?.title || "网页结果" }}</strong>
+                      <a v-if="parseToolDisplay(tc.result)?.url" :href="parseToolDisplay(tc.result)?.url" target="_blank" rel="noopener noreferrer">
+                        {{ parseToolDisplay(tc.result)?.url }}
+                      </a>
+                      <span v-if="parseToolDisplay(tc.result)?.display_type === 'web_search'">
+                        搜索结果 {{ parseToolDisplay(tc.result)?.result_count ?? 0 }} 条；部分结果已省略
+                      </span>
+                      <span v-else>网页抓取{{ tc.status === "error" ? "失败" : "完成" }}</span>
+                    </div>
+                  </div>
+                </template>
+                <template v-else>
+                  <pre class="tool-call-args">{{ tc.arguments }}</pre>
+                  <pre v-if="tc.result" class="tool-call-result">{{ parseToolDisplay(tc.result)?.preview || tc.result }}</pre>
+                </template>
+              </details>
+            </div>
+          </template>
+        </div>
+
+        <!-- Streaming indicator：放在所有片段之后，随最新内容往下走 -->
         <div
           v-if="message.streaming"
           class="streaming-indicator"
         >
           <n-spin size="small" />
           <span class="streaming-text">思考中...</span>
-        </div>
-
-        <!-- 工具调用列表（默认折叠，点击展开，与上面的思考过程同一交互） -->
-        <div
-          v-if="message.toolCalls && message.toolCalls.length > 0"
-          class="tool-calls"
-        >
-          <details
-            v-for="tc in message.toolCalls"
-            :key="tc.callId"
-            class="tool-call-item"
-            :class="{ 'tool-call-error': tc.status === 'error' }"
-          >
-            <summary class="tool-call-header">
-              <n-spin
-                v-if="tc.status === 'calling'"
-                :size="12"
-              />
-              <span class="tool-call-status-icon">{{ tc.status === "done" ? "✓" : tc.status === "error" ? "✕" : "" }}</span>
-              <span class="tool-call-name">{{ tc.toolName }}</span>
-              <span class="tool-call-status-text">{{
-                tc.status === "calling" ? "调用中" : tc.status === "error" ? "调用失败" : "已完成"
-              }}</span>
-            </summary>
-            <template v-if="isWebDisplay(tc.result)">
-              <div class="web-tool-card">
-                <n-icon :size="18" class="web-tool-icon"><GlobeOutline /></n-icon>
-                <div class="web-tool-content">
-                  <strong>{{ parseToolDisplay(tc.result)?.title || "网页结果" }}</strong>
-                  <a v-if="parseToolDisplay(tc.result)?.url" :href="parseToolDisplay(tc.result)?.url" target="_blank" rel="noopener noreferrer">
-                    {{ parseToolDisplay(tc.result)?.url }}
-                  </a>
-                  <span v-if="parseToolDisplay(tc.result)?.display_type === 'web_search'">
-                    搜索结果 {{ parseToolDisplay(tc.result)?.result_count ?? 0 }} 条；部分结果已省略
-                  </span>
-                  <span v-else>网页抓取{{ tc.status === "error" ? "失败" : "完成" }}</span>
-                </div>
-              </div>
-            </template>
-            <template v-else>
-              <pre class="tool-call-args">{{ tc.arguments }}</pre>
-              <pre v-if="tc.result" class="tool-call-result">{{ parseToolDisplay(tc.result)?.preview || tc.result }}</pre>
-            </template>
-          </details>
         </div>
       </div>
 
@@ -939,13 +988,28 @@ const handleRegenerate = async () => {
   font-size: 13px;
 }
 
+/* 工具卡片组夹在两段正文之间：上下各一条虚线与相邻正文隔开；
+   位于消息体最前/最后时去掉对应一侧的虚线和间距，避免贴着边框悬空 */
 .tool-calls {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 12px;
-  padding-top: 12px;
+  margin: 12px 0;
+  padding: 12px 0;
   border-top: 1px dashed var(--color-line-faint);
+  border-bottom: 1px dashed var(--color-line-faint);
+}
+
+.message-segments > :first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.message-segments > :last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .tool-call-item {

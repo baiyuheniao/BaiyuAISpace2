@@ -82,6 +82,11 @@ pub struct ChatMessage {
     pub videos: Vec<VideoAttachment>,
     #[serde(default)]
     pub token_usage: Option<TokenUsage>,
+    /// 本条助手回复触发的工具调用记录（前端 `ToolCallInfo[]` 的 JSON）。后端
+    /// 不解析其内部结构，只负责原样落库、原样返回，这样界面展示字段以后增减
+    /// 都不用改后端。用户消息和历史上的旧消息没有这个字段。
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1186,6 +1191,253 @@ struct PartialToolCall {
     arguments: String,
 }
 
+/// 一轮流式请求（首轮请求，或工具调用之后的续写请求）读完后的产出。
+#[derive(Debug, Default)]
+struct StreamedTurn {
+    /// 这一轮流出的正文（不含思考过程）。模型常会在发起工具调用的同时先说
+    /// 一段话，这段话必须保留：既要显示给用户，也要在下一轮请求里作为它自己
+    /// 说过的话带回去。
+    text: String,
+    /// 这一轮模型要求执行的工具调用。为空说明这一轮就是最终回答。
+    tool_calls: Vec<ToolCall>,
+    /// 服务端在流末尾回报的 token 用量（不是每家 provider 都会回报）。
+    usage: Option<TokenUsage>,
+    /// 这一轮是否收到过思考增量。部分思考型模型续写时正文为空、只有思考，
+    /// 这种情况不能当成"模型什么都没返回"。
+    saw_thinking: bool,
+}
+
+#[derive(Debug)]
+enum StreamedTurnEnd {
+    Finished(StreamedTurn),
+    /// 用户在流进行期间点了"停止"。
+    Cancelled,
+}
+
+/// 流读取过程中需要立刻转发给界面的增量。
+#[derive(Debug, PartialEq, Eq)]
+enum TurnDelta {
+    Text(String),
+    Thinking(String),
+}
+
+/// 把一批工具调用片段并入累加器。
+///
+/// OpenAI/Anthropic 的片段以 `index` 标识同一个调用，`id`/`name` 只在该 index
+/// 的第一个片段出现，`arguments` 要按序拼接。Gemini 则不同：每个 chunk 里的
+/// `index` 都是从 0 开始的 part 序号，每个调用的 id/name/args 一次给全，而且
+/// 每个调用都带一个全新的 id——同一个 index 上出现不同的 id，就说明是另一个
+/// 调用，必须另起一格，否则两个调用的参数会被拼成一段非法 JSON。
+fn accumulate_tool_deltas(
+    acc: &mut std::collections::BTreeMap<u32, PartialToolCall>,
+    deltas: Vec<ToolCallDelta>,
+) {
+    for delta in deltas {
+        let mut index = delta.index;
+        if let (Some(new_id), Some(existing)) = (delta.id.as_ref(), acc.get(&index)) {
+            if existing.id.as_ref().is_some_and(|old| old != new_id) {
+                index = acc.keys().next_back().map_or(0, |max| max + 1);
+            }
+        }
+        let entry = acc.entry(index).or_default();
+        if let Some(id) = delta.id {
+            entry.id = Some(id);
+        }
+        if let Some(name) = delta.name {
+            entry.name = Some(name);
+        }
+        if let Some(fragment) = delta.arguments_fragment {
+            entry.arguments.push_str(&fragment);
+        }
+    }
+}
+
+/// 把累加器收尾成可以直接执行的工具调用。没有参数的工具，各家 provider 流出
+/// 来的 arguments 都是空串，统一规整成 `{}`——空串既不是合法 JSON，原样回传给
+/// 部分 provider 还会被拒收。
+fn finish_tool_calls(acc: std::collections::BTreeMap<u32, PartialToolCall>) -> Vec<ToolCall> {
+    acc.into_values()
+        .filter_map(|p| {
+            Some(ToolCall {
+                id: p.id?,
+                function: ToolFunction {
+                    name: p.name?,
+                    arguments: if p.arguments.trim().is_empty() { "{}".to_string() } else { p.arguments },
+                },
+            })
+        })
+        .collect()
+}
+
+/// 处理一行完整的 SSE 文本。返回 `true` 表示这一轮已经收到明确的结束信号。
+fn apply_sse_line(
+    provider: &str,
+    line: &str,
+    turn: &mut StreamedTurn,
+    acc: &mut std::collections::BTreeMap<u32, PartialToolCall>,
+    on_delta: &mut (dyn FnMut(TurnDelta) + Send),
+) -> bool {
+    match parse_sse_line(provider, line) {
+        Some(StreamContent::Text(text)) => {
+            turn.text.push_str(&text);
+            on_delta(TurnDelta::Text(text));
+            false
+        }
+        Some(StreamContent::Thinking(text)) => {
+            turn.saw_thinking = true;
+            on_delta(TurnDelta::Thinking(text));
+            false
+        }
+        Some(StreamContent::ToolCallDeltas(deltas)) => {
+            accumulate_tool_deltas(acc, deltas);
+            false
+        }
+        Some(StreamContent::Usage(usage)) => {
+            turn.usage = Some(usage);
+            false
+        }
+        Some(StreamContent::Done) => true,
+        None => false,
+    }
+}
+
+/// 读完一个 SSE 响应：正文/思考增量通过 `on_delta` 实时交出，工具调用片段在
+/// 内部累加，流结束（收到结束信号，或者像 Google 那样直接关闭连接）后一并返回。
+///
+/// 按字节缓冲、遇到换行才整行解码：一个多字节字符（比如汉字）可能恰好被拆
+/// 在两个网络分片之间，按分片逐个解码会把它变成乱码。
+async fn read_turn_stream(
+    provider: &str,
+    response: reqwest::Response,
+    cancel_token: &CancellationToken,
+    on_delta: &mut (dyn FnMut(TurnDelta) + Send),
+) -> Result<StreamedTurnEnd, LLMError> {
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut turn = StreamedTurn::default();
+    let mut acc: std::collections::BTreeMap<u32, PartialToolCall> = std::collections::BTreeMap::new();
+
+    'read: loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => return Ok(StreamedTurnEnd::Cancelled),
+            chunk = stream.next() => match chunk {
+                Some(Ok(bytes)) => {
+                    buffer.extend_from_slice(&bytes);
+                    while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
+                        let raw: Vec<u8> = buffer.drain(..=pos).collect();
+                        let line = String::from_utf8_lossy(&raw);
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        if apply_sse_line(provider, line, &mut turn, &mut acc, on_delta) {
+                            break 'read;
+                        }
+                    }
+                }
+                Some(Err(e)) => return Err(LLMError::StreamError(e.to_string())),
+                None => {
+                    // 流结束了，但最后一行可能没有换行；Google 也从不发明确的结束信号。
+                    let line = String::from_utf8_lossy(&buffer).trim().to_string();
+                    if !line.is_empty() {
+                        apply_sse_line(provider, &line, &mut turn, &mut acc, on_delta);
+                    }
+                    break 'read;
+                }
+            }
+        }
+    }
+
+    turn.tool_calls = finish_tool_calls(acc);
+    Ok(StreamedTurnEnd::Finished(turn))
+}
+
+/// 发出一个流式请求并读完整个响应。流式请求只设读间隔超时、不设总时长
+/// （见 `create_streaming_http_client`），所以工具调用之后的续写即使要想很久，
+/// 只要还在吐数据就不会被掐断。
+///
+/// 用户点"停止"时（无论正在等响应头还是正在读流）都返回 `Cancelled`，而不是
+/// 报错——这和首轮流被取消时的表现一致。
+async fn run_streaming_request(
+    provider: &str,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: &str,
+    retry_count: u32,
+    retry_interval_secs: u32,
+    cancel_token: &CancellationToken,
+    on_delta: &mut (dyn FnMut(TurnDelta) + Send),
+) -> Result<StreamedTurnEnd, LLMError> {
+    let client = create_streaming_http_client(url)?;
+    let headers = build_headers(provider, api_key);
+    let request_builder = client.post(url).headers(headers).json(body);
+    let response = match send_with_retry(&request_builder, retry_count, retry_interval_secs, Some(cancel_token)).await {
+        Ok(response) => response,
+        Err(_) if cancel_token.is_cancelled() => return Ok(StreamedTurnEnd::Cancelled),
+        Err(e) => return Err(e),
+    };
+    read_turn_stream(provider, response, cancel_token, on_delta).await
+}
+
+fn emit_stream_chunk(app_handle: &AppHandle, request: &SendMessageRequest, message_id: &str, content: String, is_thinking: bool, done: bool) {
+    let _ = app_handle.emit("stream-chunk", StreamChunk {
+        session_id: request.session_id.clone(),
+        message_id: message_id.to_string(),
+        content,
+        is_thinking,
+        done,
+    });
+}
+
+/// 带界面事件转发的 `run_streaming_request`：正文/思考增量立刻通过
+/// `stream-chunk` 发给前端。`separate_text` 为 true 表示这条回复里前面已经
+/// 有过正文（工具调用之前的开场白），本轮的第一段正文前补一个段落分隔，免得
+/// 落库后的正文把两轮话直接粘在一起。
+async fn stream_turn(
+    app_handle: &AppHandle,
+    request: &SendMessageRequest,
+    message_id: &str,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: &str,
+    cancel_token: &CancellationToken,
+    separate_text: bool,
+) -> Result<StreamedTurnEnd, LLMError> {
+    let mut separator_pending = separate_text;
+    let mut forward = |delta: TurnDelta| match delta {
+        TurnDelta::Text(text) => {
+            if std::mem::take(&mut separator_pending) {
+                emit_stream_chunk(app_handle, request, message_id, "\n\n".to_string(), false, false);
+            }
+            emit_stream_chunk(app_handle, request, message_id, text, false, false);
+        }
+        TurnDelta::Thinking(text) => emit_stream_chunk(app_handle, request, message_id, text, true, false),
+    };
+    run_streaming_request(
+        &request.provider,
+        url,
+        body,
+        api_key,
+        request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
+        request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS),
+        cancel_token,
+        &mut forward,
+    )
+    .await
+}
+
+fn add_usage(total: &mut Option<TokenUsage>, usage: Option<TokenUsage>) {
+    let Some(usage) = usage else { return };
+    match total {
+        Some(sum) => {
+            sum.prompt_tokens += usage.prompt_tokens;
+            sum.completion_tokens += usage.completion_tokens;
+            sum.total_tokens += usage.total_tokens;
+        }
+        None => *total = Some(usage),
+    }
+}
+
 // 流式发送消息命令
 #[tauri::command]
 pub async fn stream_message(
@@ -1322,6 +1574,7 @@ pub async fn stream_message(
                     images: vec![],
                     videos: vec![],
                     token_usage: None,
+                    tool_calls: None,
                 });
             }
         }
@@ -1346,7 +1599,6 @@ pub async fn stream_message(
         return Err(LLMError::ApiError("Invalid target URL".to_string()));
     }
 
-    let client = create_streaming_http_client(&url)?;
     let mut body = build_stream_request_body(&request.provider, &request.model, &effective_messages, &mcp_tools, request.enable_thinking, request.max_tokens);
     append_skill_tools(&mut body, &request.provider, &autonomous_skills);
     let headers = build_headers(&request.provider, &api_key);
@@ -1369,140 +1621,46 @@ pub async fn stream_message(
 
     log::debug!("Auth header (masked): {}", masked_auth);
 
-    let retry_count = request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT);
-    let retry_interval_secs = request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS);
-    let request_builder = client.post(&url).headers(headers.clone()).json(&body);
-    let response = match send_with_retry(&request_builder, retry_count, retry_interval_secs, Some(&cancel_token)).await {
-        Ok(r) => r,
+    let first_turn = match stream_turn(
+        &app_handle,
+        &request,
+        &message_id,
+        &url,
+        &body,
+        &api_key,
+        &cancel_token,
+        false,
+    )
+    .await
+    {
+        Ok(StreamedTurnEnd::Finished(turn)) => turn,
+        Ok(StreamedTurnEnd::Cancelled) => {
+            log::info!("Stream cancelled for session: {}", session_id);
+            emit_stream_chunk(&app_handle, &request, &message_id, String::new(), false, true);
+            return Ok(());
+        }
         Err(e) => {
             log::error!("LLM request failed for url '{}': {:?}", url, e);
             return Err(e);
         }
     };
 
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall> = std::collections::BTreeMap::new();
-
-    // 主循环
-    loop {
-        tokio::select! {
-            // 检查取消信号
-            _ = cancel_token.cancelled() => {
-                log::info!("Stream cancelled for session: {}", session_id);
-                let _ = app_handle.emit("stream-chunk", StreamChunk {
-                    session_id: request.session_id.clone(),
-                    message_id: message_id.clone(),
-                    content: String::new(),
-                    is_thinking: false,
-                    done: true,
-                });
-                return Ok(());
-            }
-            // 从流里读取下一个数据块
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(chunk)) => {
-                        let text = String::from_utf8_lossy(&chunk);
-                        buffer.push_str(&text);
-
-                        // 处理已经完整的行
-                        while let Some(pos) = buffer.find('\n') {
-                            let line = buffer[..pos].trim().to_string();
-                            buffer = buffer[pos + 1..].to_string();
-
-                            if line.is_empty() {
-                                continue;
-                            }
-
-                            if let Some(content) = parse_sse_line(&request.provider, &line) {
-                                match content {
-                                    StreamContent::Text(text) => {
-                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                            session_id: request.session_id.clone(),
-                                            message_id: message_id.clone(),
-                                            content: text,
-                                            is_thinking: false,
-                                            done: false,
-                                        });
-                                    }
-                                    StreamContent::Thinking(text) => {
-                                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                                            session_id: request.session_id.clone(),
-                                            message_id: message_id.clone(),
-                                            content: text,
-                                            is_thinking: true,
-                                            done: false,
-                                        });
-                                    }
-                                    StreamContent::ToolCallDeltas(deltas) => {
-                                        for delta in deltas {
-                                            let entry = tool_call_acc.entry(delta.index).or_default();
-                                            if let Some(id) = delta.id {
-                                                entry.id = Some(id);
-                                            }
-                                            if let Some(name) = delta.name {
-                                                entry.name = Some(name);
-                                            }
-                                            if let Some(fragment) = delta.arguments_fragment {
-                                                entry.arguments.push_str(&fragment);
-                                            }
-                                        }
-                                    }
-                                    StreamContent::Usage(usage) => {
-                                        let _ = app_handle.emit("token-usage", TokenUsageEvent {
-                                            session_id: request.session_id.clone(),
-                                            message_id: message_id.clone(),
-                                            usage,
-                                        });
-                                    }
-                                    StreamContent::Done => {
-                                        return finalize_turn(
-                                            &app_handle,
-                                            state.clone(),
-                                            &request,
-                                            &message_id,
-                                            &effective_messages,
-                                            &mcp_tools,
-                                            &all_skills,
-                                            std::mem::take(&mut tool_call_acc),
-                                            request.max_tokens,
-                                            &file_rules,
-                                            &api_key,
-                                        )
-                                        .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        return Err(LLMError::StreamError(e.to_string()));
-                    }
-                    None => {
-                        // 流结束了，但没有收到明确的"本轮结束"信号
-                        // （Google 从来不发这个信号）——按照收到明确的
-                        // `StreamContent::Done` 时同样的方式，把目前累积到的
-                        // 工具调用做收尾处理。
-                        return finalize_turn(
-                            &app_handle,
-                            state.clone(),
-                            &request,
-                            &message_id,
-                            &effective_messages,
-                            &mcp_tools,
-                            &all_skills,
-                            std::mem::take(&mut tool_call_acc),
-                            request.max_tokens,
-                            &file_rules,
-                            &api_key,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-    }
+    finalize_turn(
+        &app_handle,
+        state.clone(),
+        &request,
+        &message_id,
+        &effective_messages,
+        &mcp_tools,
+        &all_skills,
+        &autonomous_skills,
+        first_turn,
+        request.max_tokens,
+        &file_rules,
+        &api_key,
+        &cancel_token,
+    )
+    .await
 }
 
 /// 执行一轮工具调用（可能是自主的 Skill 调用，也可能是真正的 MCP 工具调用），
@@ -1597,12 +1755,12 @@ fn tool_display_result(value: &serde_json::Value, tool_name: &str) -> serde_json
     serde_json::json!({ "display_type": "preview", "preview": preview, "truncated": truncated })
 }
 
-fn enforce_round_tool_budget(rounds: &mut [(Vec<ToolCall>, Vec<serde_json::Value>)]) {
+fn enforce_round_tool_budget(rounds: &mut [ToolRound]) {
     let mut used = 0usize;
     let mut seen = std::collections::HashMap::new();
     // 倒序优先保留最近工具结果；较早结果退化为可追溯元信息。
-    for (calls, results) in rounds.iter_mut().rev() {
-        for (call, result) in calls.iter().zip(results.iter_mut()).rev() {
+    for round in rounds.iter_mut().rev() {
+        for (call, result) in round.calls.iter().zip(round.results.iter_mut()).rev() {
             // 只合并完全相同的只读调用结果，保留每次调用 ID 和最近一份正文。
             if ["search","read","list","fetch"].iter().any(|word|call.function.name.contains(word)) {
                 let key=(call.function.name.clone(),call.function.arguments.clone(),result.to_string());
@@ -1718,14 +1876,22 @@ async fn execute_tool_calls(
     tool_results
 }
 
-/// 对本轮结束时累积到的工具调用片段做收尾处理（每个 index 的 id/name 取自
-/// 该 index 的第一个片段，arguments 是该 index 所有片段拼接的结果）：如果
-/// 有工具调用就执行它们，把结果交给模型继续，最后发出终止的 `done: true`
-/// 数据块。
+/// 一轮已经执行完的工具调用：模型随调用一起说的话、它发起的调用、以及各调用
+/// （已压缩过的）结果。
+#[derive(Debug)]
+struct ToolRound {
+    text: String,
+    calls: Vec<ToolCall>,
+    results: Vec<serde_json::Value>,
+}
+
+/// 首轮流结束后的收尾：如果模型要求调用工具，就执行它们，把结果交给模型继续
+/// ——续写请求同样是流式的，模型在两次工具调用之间说的话会实时显示出来——
+/// 直到模型给出最终回答，最后发出终止的 `done: true` 数据块。
 ///
 /// 这个函数同时被"明确的本轮结束信号"（OpenAI 的 `[DONE]`、Anthropic 的
 /// `message_stop`）和"流直接关闭、没有任何结束信号"（Google 就是这样）两种
-/// 情况共用——两者都需要完全一样的收尾-继续逻辑。
+/// 情况共用——它们在 `read_turn_stream` 里已经被统一成一个 `StreamedTurn`。
 async fn finalize_turn(
     app_handle: &AppHandle,
     state: tauri::State<'_, DbState>,
@@ -1734,151 +1900,142 @@ async fn finalize_turn(
     effective_messages: &[ChatMessage],
     mcp_tools: &[MCPTool],
     all_skills: &[Skill],
-    tool_call_acc: std::collections::BTreeMap<u32, PartialToolCall>,
+    autonomous_skills: &[Skill],
+    first_turn: StreamedTurn,
     max_tokens: Option<u32>,
     file_rules: &[FileAccessRule],
     api_key: &str,
+    cancel_token: &CancellationToken,
 ) -> Result<(), LLMError> {
-    let tool_calls: Vec<ToolCall> = tool_call_acc
-        .into_values()
-        .filter_map(|p| {
-            Some(ToolCall {
-                id: p.id?,
-                function: ToolFunction {
-                    name: p.name?,
-                    arguments: p.arguments,
-                },
-            })
-        })
-        .collect();
+    // 模型在同一轮里确实可能合理地需要不止一次工具调用（比如先"列出允许访问的
+    // 目录"，再"列出该目录下的文件"）。循环处理，每次续写请求都把模型自己的
+    // 工具重新带上，直到它返回纯文本，或者达到轮次上限为止——没有这个上限的话，
+    // 一个行为异常的模型可能会无限循环下去。
+    let max_tool_rounds = request.max_tool_rounds
+        .map(|value| value.clamp(1, MAX_TOOL_ROUNDS as u32) as usize)
+        .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
+    let url = build_url(&request.provider, &request.base_url, &request.model, true);
 
-    if !tool_calls.is_empty() {
-        // 模型在同一轮里确实可能合理地需要不止一次工具调用（比如先"列出
-        // 允许访问的目录"，再"列出该目录下的文件"）。循环处理，每次续写
-        // 请求都把模型自己的工具重新带上，直到它返回纯文本，或者达到轮次
-        // 上限为止——没有这个上限的话，一个行为异常的模型可能会无限循环下去。
-        let max_tool_rounds = request.max_tool_rounds
-            .map(|value| value.clamp(1, MAX_TOOL_ROUNDS as u32) as usize)
-            .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
-        let mut rounds: Vec<(Vec<ToolCall>, Vec<serde_json::Value>)> = Vec::new();
-        let mut current_calls = tool_calls;
+    let mut usage_total: Option<TokenUsage> = None;
+    let mut turn = first_turn;
+    let mut rounds: Vec<ToolRound> = Vec::new();
+    let mut emitted_text = !turn.text.trim().is_empty();
+    report_usage(app_handle, request, message_id, &mut usage_total, turn.usage.take());
 
-        for round in 0..max_tool_rounds {
-            let tool_results = execute_tool_calls(app_handle, state.clone(), &request.session_id, message_id, &current_calls, mcp_tools, all_skills, file_rules, request.working_directory.as_deref(), &request.terminal_shell).await;
-            rounds.push((current_calls, tool_results));
-            enforce_round_tool_budget(&mut rounds);
+    while !turn.tool_calls.is_empty() {
+        if cancel_token.is_cancelled() {
+            emit_stream_chunk(app_handle, request, message_id, String::new(), false, true);
+            return Ok(());
+        }
 
-            match continue_after_tool_calls(
-                &request.provider,
-                &request.model,
-                api_key,
-                &request.base_url,
-                effective_messages,
-                &rounds,
+        // 已经执行满 `max_tool_rounds` 轮、模型却还想继续调用工具：不再执行，
+        // 改发一次禁用工具的续写，要求它基于已有结果收尾。
+        let force_final = rounds.len() >= max_tool_rounds;
+        if force_final {
+            log::warn!("Tool-call round limit ({}) reached; requesting a final answer without tools", max_tool_rounds);
+        } else {
+            let tool_calls = std::mem::take(&mut turn.tool_calls);
+            let results = execute_tool_calls(
+                app_handle,
+                state.clone(),
+                &request.session_id,
+                message_id,
+                &tool_calls,
                 mcp_tools,
                 all_skills,
-                max_tokens,
-                request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
-                request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS),
-                false,
+                file_rules,
+                request.working_directory.as_deref(),
+                &request.terminal_shell,
             )
-            .await
-            {
-                Ok(ContinuationResult::Text { text, thinking }) => {
-                    if let Some(th) = thinking.filter(|t| !t.is_empty()) {
-                        let _ = app_handle.emit("stream-chunk", StreamChunk {
-                            session_id: request.session_id.clone(),
-                            message_id: message_id.to_string(),
-                            content: th,
-                            is_thinking: true,
-                            done: false,
-                        });
-                    }
-                    let _ = app_handle.emit("stream-chunk", StreamChunk {
-                        session_id: request.session_id.clone(),
-                        message_id: message_id.to_string(),
-                        content: text,
-                        is_thinking: false,
-                        done: false,
-                    });
-                    break;
-                }
-                Ok(ContinuationResult::ToolCalls(next_calls)) => {
-                    if round == max_tool_rounds - 1 {
-                        log::warn!("Tool-call round limit ({}) reached; requesting a final answer without tools", max_tool_rounds);
-                        match continue_after_tool_calls(
-                            &request.provider, &request.model, api_key, &request.base_url,
-                            effective_messages, &rounds, mcp_tools, all_skills, max_tokens,
-                            request.retry_count.unwrap_or(DEFAULT_LLM_RETRY_COUNT),
-                            request.retry_interval_secs.unwrap_or(DEFAULT_LLM_RETRY_INTERVAL_SECS), true,
-                        ).await {
-                            Ok(ContinuationResult::Text { text, thinking }) => {
-                                if let Some(th) = thinking.filter(|t| !t.is_empty()) {
-                                    let _ = app_handle.emit("stream-chunk", StreamChunk { session_id: request.session_id.clone(), message_id: message_id.to_string(), content: th, is_thinking: true, done: false });
-                                }
-                                let _ = app_handle.emit("stream-chunk", StreamChunk { session_id: request.session_id.clone(), message_id: message_id.to_string(), content: text, is_thinking: false, done: false });
-                                break;
-                            }
-                            Ok(ContinuationResult::ToolCalls(_)) => return Err(LLMError::ApiError("达到工具调用上限后，模型仍试图调用工具，无法生成最终回答".to_string())),
-                            Err(err) => return Err(LLMError::ApiError(format!("达到工具调用上限后的强制收尾失败: {}", err))),
-                        }
-                    } else {
-                        current_calls = next_calls;
-                        continue;
-                    }
-                }
-                Err(err) => {
-                    log::error!("Failed to continue reasoning after tool calls: {}", err);
-                    return Err(LLMError::ApiError(format!("工具调用后的续写失败: {}", err)));
-                }
+            .await;
+            rounds.push(ToolRound { text: std::mem::take(&mut turn.text), calls: tool_calls, results });
+            enforce_round_tool_budget(&mut rounds);
+        }
+
+        let body = build_continuation_body(
+            &request.provider,
+            &request.model,
+            effective_messages,
+            &rounds,
+            mcp_tools,
+            autonomous_skills,
+            max_tokens,
+            force_final,
+        );
+        match stream_turn(app_handle, request, message_id, &url, &body, api_key, cancel_token, emitted_text).await {
+            Ok(StreamedTurnEnd::Finished(next)) => turn = next,
+            Ok(StreamedTurnEnd::Cancelled) => {
+                emit_stream_chunk(app_handle, request, message_id, String::new(), false, true);
+                return Ok(());
             }
+            Err(err) => {
+                log::error!("Failed to continue reasoning after tool calls: {}", err);
+                return Err(LLMError::ApiError(if force_final {
+                    format!("达到工具调用上限后的强制收尾失败: {}", err)
+                } else {
+                    format!("工具调用后的续写失败: {}", err)
+                }));
+            }
+        }
+        emitted_text |= !turn.text.trim().is_empty();
+        report_usage(app_handle, request, message_id, &mut usage_total, turn.usage.take());
+
+        if turn.tool_calls.is_empty() {
+            // 最终回答。既没有正文、也没有思考，说明模型什么都没给出来。
+            if turn.text.trim().is_empty() && !turn.saw_thinking {
+                return Err(LLMError::ApiError("LLM did not return content".to_string()));
+            }
+        } else if force_final {
+            return Err(LLMError::ApiError("达到工具调用上限后，模型仍试图调用工具，无法生成最终回答".to_string()));
         }
     }
 
     log::info!("[LLM] stream_message 完成: session={}", request.session_id);
-    let _ = app_handle.emit("stream-chunk", StreamChunk {
-        session_id: request.session_id.clone(),
-        message_id: message_id.to_string(),
-        content: String::new(),
-        is_thinking: false,
-        done: true,
-    });
+    emit_stream_chunk(app_handle, request, message_id, String::new(), false, true);
     Ok(())
 }
 
-/// 一次工具调用续写请求可能得到的两种结果：模型已经完成，给出了文本回复
-/// （思考型模型可能附带甚至只有思考内容——qwen3.5 经 Ollama 续写时会把回答
-/// 埋进 reasoning、content 留空，这时思考内容是仅有的可展示产出）；或者它
-/// 还想继续调用工具。`finalize_turn` 会对后一种情况循环处理。
-enum ContinuationResult {
-    Text { text: String, thinking: Option<String> },
-    ToolCalls(Vec<ToolCall>),
+/// 把这一轮回报的 token 用量并入整条回复的累计值，并把累计值发给前端——一条
+/// 带工具调用的回复会发起多次模型请求，用户关心的是整条回复实际消耗的总量。
+fn report_usage(
+    app_handle: &AppHandle,
+    request: &SendMessageRequest,
+    message_id: &str,
+    total: &mut Option<TokenUsage>,
+    usage: Option<TokenUsage>,
+) {
+    if usage.is_none() {
+        return;
+    }
+    add_usage(total, usage);
+    if let Some(sum) = total.clone() {
+        let _ = app_handle.emit("token-usage", TokenUsageEvent {
+            session_id: request.session_id.clone(),
+            message_id: message_id.to_string(),
+            usage: sum,
+        });
+    }
 }
 
-/// 在一个或多个工具调用执行完之后，发送一次非流式的续写请求，把调用了什么、
-/// 返回了什么告诉模型，从而继续这段对话。这里要重新附上模型自己的工具定义
-/// （一次全新的 API 调用并不会记得原始请求里的 `tools` 字段），因为没有这些
-/// 定义的话，一个想再次调用工具的模型没有原生方式可以这么做，只能试图用
-/// 纯文本假装调用一次。每家 provider 对"我调用了什么"/"这是结果"以及工具
-/// 调用响应本身的表达形状都不一样，所以请求体构造和响应解析都要按 provider
-/// 分支处理。
-async fn continue_after_tool_calls(
+/// 构造工具调用之后的续写请求体（流式）：把原始对话、之前每一轮"模型说了什么
+/// ＋调用了什么＋返回了什么"一并告诉模型，从而继续这段对话。这里要重新附上
+/// 模型自己的工具定义（一次全新的 API 调用并不会记得原始请求里的 `tools`
+/// 字段），因为没有这些定义的话，一个想再次调用工具的模型没有原生方式可以这么
+/// 做，只能试图用纯文本假装调用一次。每家 provider 对"我调用了什么"/"这是
+/// 结果"的表达形状都不一样，所以按分支分别构造。
+///
+/// 模型随工具调用一起说的话（`ToolRound::text`）会原样放回它自己那条 assistant
+/// 消息里，这样模型看到的是完整的上下文，而不是一串没有任何说明的工具调用。
+fn build_continuation_body(
     provider: &str,
     model: &str,
-    api_key: &str,
-    base_url: &str,
     original_messages: &[ChatMessage],
-    rounds: &[(Vec<ToolCall>, Vec<serde_json::Value>)],
+    rounds: &[ToolRound],
     mcp_tools: &[MCPTool],
     autonomous_skills: &[Skill],
     max_tokens: Option<u32>,
-    retry_count: u32,
-    retry_interval_secs: u32,
     force_final: bool,
-) -> Result<ContinuationResult, LLMError> {
-    let url = build_url(provider, base_url, model, false);
-    let client = create_http_client(&url)?;
-
+) -> serde_json::Value {
     // 和 `build_stream_request_body` 一样的"空消息"防护：一条因为流在收到
     // 任何 token 之前就被取消而变成空内容的消息，同样不能在这里被当作历史
     // 重放，否则同样的 "message ... must not be empty" 400 会在第一次工具
@@ -1889,6 +2046,8 @@ async fn continue_after_tool_calls(
         .cloned()
         .collect();
     let original_messages = non_empty.as_slice();
+
+    const FINAL_NOTICE: &str = "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。";
 
     let mut body = match provider {
         "anthropic" => {
@@ -1907,24 +2066,26 @@ async fn continue_after_tool_calls(
             // Anthropic 要求 tool_use/tool_result 块必须每轮恰好打包成一条
             // assistant 消息和一条 user 消息（它强制要求 user/assistant 严格
             // 交替），不像下面 OpenAI 那种一个结果对应一条工具消息的形状。
-            for (tool_calls, tool_results) in rounds {
-                let tool_use_blocks: Vec<_> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.function.name,
-                            "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                .unwrap_or_else(|_| serde_json::json!({})),
-                        })
+            for round in rounds {
+                let mut assistant_blocks: Vec<serde_json::Value> = Vec::new();
+                if !round.text.trim().is_empty() {
+                    assistant_blocks.push(serde_json::json!({ "type": "text", "text": round.text.trim() }));
+                }
+                assistant_blocks.extend(round.calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "input": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
                     })
-                    .collect();
-                msgs.push(serde_json::json!({ "role": "assistant", "content": tool_use_blocks }));
+                }));
+                msgs.push(serde_json::json!({ "role": "assistant", "content": assistant_blocks }));
 
-                let tool_result_blocks: Vec<_> = tool_calls
+                let mut content: Vec<serde_json::Value> = round
+                    .calls
                     .iter()
-                    .zip(tool_results.iter())
+                    .zip(round.results.iter())
                     .map(|(tc, result)| {
                         serde_json::json!({
                             "type": "tool_result",
@@ -1933,9 +2094,8 @@ async fn continue_after_tool_calls(
                         })
                     })
                     .collect();
-                let mut content = tool_result_blocks;
                 if force_final {
-                    content.push(serde_json::json!({ "type": "text", "text": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+                    content.push(serde_json::json!({ "type": "text", "text": FINAL_NOTICE }));
                 }
                 msgs.push(serde_json::json!({ "role": "user", "content": content }));
             }
@@ -1948,7 +2108,7 @@ async fn continue_after_tool_calls(
                 "model": model,
                 "messages": msgs,
                 "max_tokens": max_tokens_val,
-                "stream": false,
+                "stream": true,
             });
             if let Some(sys) = system_msg {
                 b["system"] = serde_json::json!(sys);
@@ -1979,24 +2139,28 @@ async fn continue_after_tool_calls(
                 })
                 .collect();
 
-            for (tool_calls, tool_results) in rounds {
-                let call_parts: Vec<_> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "functionCall": {
-                                "name": tc.function.name,
-                                "args": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                    .unwrap_or_else(|_| serde_json::json!({})),
-                            }
-                        })
+            for round in rounds {
+                let mut call_parts: Vec<serde_json::Value> = Vec::new();
+                if !round.text.trim().is_empty() {
+                    call_parts.push(serde_json::json!({ "text": round.text.trim() }));
+                }
+                call_parts.extend(round.calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "functionCall": {
+                            "name": tc.function.name,
+                            "args": serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        }
                     })
-                    .collect();
+                }));
                 contents.push(serde_json::json!({ "role": "model", "parts": call_parts }));
 
-                let response_parts: Vec<_> = tool_calls
+                // Gemini REST API 要求 functionResponse 部分的 role 必须是
+                // "user"，不能是 "function"——模型角色是 "model"，用户输入是 "user"。
+                let mut parts: Vec<serde_json::Value> = round
+                    .calls
                     .iter()
-                    .zip(tool_results.iter())
+                    .zip(round.results.iter())
                     .map(|(tc, result)| {
                         serde_json::json!({
                             "functionResponse": {
@@ -2006,11 +2170,8 @@ async fn continue_after_tool_calls(
                         })
                     })
                     .collect();
-                // Gemini REST API 要求 functionResponse 部分的 role 必须是
-                // "user"，不能是 "function"——模型角色是 "model"，用户输入是 "user"。
-                let mut parts = response_parts;
                 if force_final {
-                    parts.push(serde_json::json!({ "text": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+                    parts.push(serde_json::json!({ "text": FINAL_NOTICE }));
                 }
                 contents.push(serde_json::json!({ "role": "user", "parts": parts }));
             }
@@ -2045,8 +2206,9 @@ async fn continue_after_tool_calls(
                 .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
                 .collect();
 
-            for (tool_calls, tool_results) in rounds {
-                let tool_calls_json: Vec<_> = tool_calls
+            for round in rounds {
+                let tool_calls_json: Vec<_> = round
+                    .calls
                     .iter()
                     .map(|tc| {
                         serde_json::json!({
@@ -2062,11 +2224,15 @@ async fn continue_after_tool_calls(
 
                 msgs.push(serde_json::json!({
                     "role": "assistant",
-                    "content": serde_json::Value::Null,
+                    "content": if round.text.trim().is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(round.text.trim())
+                    },
                     "tool_calls": tool_calls_json,
                 }));
 
-                for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
+                for (tc, result) in round.calls.iter().zip(round.results.iter()) {
                     msgs.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -2075,13 +2241,14 @@ async fn continue_after_tool_calls(
                 }
             }
             if force_final {
-                msgs.push(serde_json::json!({ "role": "user", "content": "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。" }));
+                msgs.push(serde_json::json!({ "role": "user", "content": FINAL_NOTICE }));
             }
 
             let mut b = serde_json::json!({
                 "model": model,
                 "messages": msgs,
-                "stream": false,
+                "stream": true,
+                "stream_options": { "include_usage": true },
             });
             if let Some(v) = max_tokens {
                 b["max_tokens"] = serde_json::json!(v);
@@ -2104,144 +2271,7 @@ async fn continue_after_tool_calls(
         }
     };
     append_skill_tools(&mut body, provider, autonomous_skills);
-
-    let headers = build_headers(provider, api_key);
-
-    log::debug!("Constructed URL for provider {} (tool-call continuation): {}", provider, url);
-
-    let masked_auth = if let Some(h) = headers.get(reqwest::header::AUTHORIZATION) {
-        match h.to_str() {
-            Ok(s) => mask_auth_header_value(s),
-            Err(_) => "<non-utf8>".to_string(),
-        }
-    } else if let Some(h) = headers.get("x-api-key") {
-        match h.to_str() {
-            Ok(s) => mask_auth_header_value(s),
-            Err(_) => "<non-utf8>".to_string(),
-        }
-    } else {
-        "<none>".to_string()
-    };
-    log::debug!("Tool-call continuation auth header (masked): {}", masked_auth);
-
-    let request_builder = client.post(&url).headers(headers).json(&body);
-    let response = match send_with_retry(&request_builder, retry_count, retry_interval_secs, None).await {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("LLM request failed (tool-call continuation) for url '{}': {:?}", url, e);
-            return Err(e);
-        }
-    };
-
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(LLMError::RequestError)?;
-
-    match provider {
-        "anthropic" => {
-            let blocks = json.get("content").and_then(|c| c.as_array());
-            let tool_use_calls: Vec<ToolCall> = blocks
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                        .filter_map(|b| {
-                            let id = b.get("id")?.as_str()?.to_string();
-                            let name = b.get("name")?.as_str()?.to_string();
-                            let arguments = b.get("input").map(|i| i.to_string()).unwrap_or_else(|| "{}".to_string());
-                            Some(ToolCall { id, function: ToolFunction { name, arguments } })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !tool_use_calls.is_empty() {
-                return Ok(ContinuationResult::ToolCalls(tool_use_calls));
-            }
-            let thinking = blocks
-                .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking")))
-                .and_then(|b| b.get("thinking"))
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string());
-            blocks
-                .and_then(|arr| arr.iter().find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")))
-                .and_then(|b| b.get("text"))
-                .and_then(|t| t.as_str())
-                .map(|s| ContinuationResult::Text { text: s.to_string(), thinking })
-                .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
-        }
-        "google" => {
-            let parts = json
-                .get("candidates")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|cand| cand.get("content"))
-                .and_then(|content| content.get("parts"))
-                .and_then(|parts| parts.as_array());
-            let call_parts: Vec<ToolCall> = parts
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|part| {
-                            let call = part.get("functionCall")?;
-                            let name = call.get("name")?.as_str()?.to_string();
-                            let arguments = call.get("args").map(|a| a.to_string()).unwrap_or_else(|| "{}".to_string());
-                            // Gemini 不会给 functionCall 部分回传 id；
-                            // 这里合成一个，好让下游做工具结果匹配时能用上。
-                            Some(ToolCall { id: format!("gemini-{}", name), function: ToolFunction { name, arguments } })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !call_parts.is_empty() {
-                return Ok(ContinuationResult::ToolCalls(call_parts));
-            }
-            parts
-                .and_then(|arr| arr.first())
-                .and_then(|part| part.get("text"))
-                .and_then(|t| t.as_str())
-                .map(|s| ContinuationResult::Text { text: s.to_string(), thinking: None })
-                .ok_or_else(|| LLMError::ApiError("LLM did not return content".to_string()))
-        }
-        _ => {
-            if let Some(choices) = json["choices"].as_array() {
-                if let Some(first_choice) = choices.first() {
-                    if let Some(tool_calls) = first_choice["message"]["tool_calls"].as_array() {
-                        let calls: Vec<ToolCall> = tool_calls
-                            .iter()
-                            .filter_map(|tc| {
-                                let id = tc.get("id")?.as_str()?.to_string();
-                                let name = tc.get("function")?.get("name")?.as_str()?.to_string();
-                                let arguments = tc.get("function")?.get("arguments")?.as_str()?.to_string();
-                                Some(ToolCall { id, function: ToolFunction { name, arguments } })
-                            })
-                            .collect();
-                        if !calls.is_empty() {
-                            return Ok(ContinuationResult::ToolCalls(calls));
-                        }
-                    }
-                    // 思考型模型的非流式响应同样把思考放在 reasoning_content
-                    // （DeepSeek 系）/ reasoning（Ollama）字段；qwen3.5 经
-                    // Ollama 续写时甚至会 content 留空、只给 reasoning——这时
-                    // 思考内容是仅有的可展示产出，不能连同空 content 一起丢弃。
-                    let thinking = first_choice["message"]["reasoning_content"]
-                        .as_str()
-                        .or_else(|| first_choice["message"]["reasoning"].as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    let content_text = first_choice["message"]["content"].as_str().unwrap_or("");
-                    if !content_text.is_empty() || thinking.is_some() {
-                        return Ok(ContinuationResult::Text {
-                            text: content_text.to_string(),
-                            thinking,
-                        });
-                    }
-                    if let Some(text) = first_choice["text"].as_str() {
-                        return Ok(ContinuationResult::Text { text: text.to_string(), thinking: None });
-                    }
-                }
-            }
-            Err(LLMError::ApiError("LLM did not return content".to_string()))
-        }
-    }
+    body
 }
 
 /// 模型想要执行的一次工具调用，已经完整解析好、可以直接派发。和上面私有的、
@@ -2339,7 +2369,7 @@ pub fn build_native_messages(provider: &str, messages: &[ChatMessage]) -> Vec<se
 
 /// 把一轮工具调用（模型的调用请求 + 已执行的结果）追加到原生消息数组上，
 /// 用的是每家 provider 期望在下一轮历史里看到的那种回放形状。和
-/// `continue_after_tool_calls` 里已经确立的各 provider 形状保持一致。
+/// `build_continuation_body` 里已经确立的各 provider 形状保持一致。
 pub fn append_tool_round(
     provider: &str,
     native_messages: &mut Vec<serde_json::Value>,
@@ -2425,10 +2455,10 @@ pub fn append_text_reply(provider: &str, native_messages: &mut Vec<serde_json::V
 }
 
 /// 一次非流式的往返：把目前为止的对话 + 可用工具发出去，返回模型的最终
-/// 文本回复，或者它想要执行的工具调用。和 `continue_after_tool_calls`
-/// （只发一次续写请求，从不重新提供 `tools`，只会返回文本）不同，这个函数
-/// 总是会重新提供 `tools`，也可能再次返回 `ToolCalls`——正是这一点让
-/// Workspace Agent 循环能够连续多轮调用工具，而不只是一轮。
+/// 文本回复，或者它想要执行的工具调用。Workspace Agent 走的是这条非流式路径，
+/// 它总是会重新提供 `tools`，也可能再次返回 `ToolCalls`——正是这一点让
+/// Workspace Agent 循环能够连续多轮调用工具，而不只是一轮。（普通聊天页的
+/// 工具循环走的是流式路径，见 `finalize_turn`。）
 /// 从 OpenAI 兼容响应中提取压缩摘要。正文优先；只有正文为空时，才退回服务端
 /// 已返回的 reasoning 字段。
 fn extract_compaction_response_text(message: &serde_json::Value) -> (String, bool) {
@@ -2850,7 +2880,7 @@ fn append_memory_prompt(messages: &mut Vec<ChatMessage>, prompt: String) {
     if let Some(system) = messages.iter_mut().find(|m|m.role=="system") {
         system.content.push_str("\n\n"); system.content.push_str(&prompt);
     } else {
-        messages.insert(0, ChatMessage {id:Uuid::new_v4().to_string(),role:"system".into(),content:prompt,timestamp:0,error:None,images:vec![],videos:vec![],token_usage:None});
+        messages.insert(0, ChatMessage {id:Uuid::new_v4().to_string(),role:"system".into(),content:prompt,timestamp:0,error:None,images:vec![],videos:vec![],token_usage:None, tool_calls: None});
     }
 }
 
@@ -2904,6 +2934,7 @@ pub(crate) fn apply_context_compaction(
             images: vec![],
             videos: vec![],
             token_usage: None,
+            tool_calls: None,
         });
     }
     messages
@@ -3132,6 +3163,7 @@ mod provider_tool_calling_tests {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
+            tool_calls: None,
         }];
         let body = build_stream_request_body("anthropic", "claude-3-5-sonnet", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -3145,6 +3177,7 @@ mod provider_tool_calling_tests {
         ChatMessage {
             id: content.into(), role: role.into(), content: content.into(),
             timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
+            tool_calls: None,
         }
     }
 
@@ -3189,6 +3222,7 @@ mod provider_tool_calling_tests {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
+            tool_calls: None,
         }];
         let body = build_stream_request_body("google", "gemini-1.5-pro", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -3271,6 +3305,7 @@ mod provider_tool_calling_tests {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
+            tool_calls: None,
         }];
         let body = build_stream_request_body("openai", "gpt-4o", &messages, &[sample_tool()], false, None);
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -3348,6 +3383,7 @@ mod provider_tool_calling_tests {
         let messages = vec![ChatMessage {
             id: "1".into(), role: "user".into(), content: "hi".into(),
             timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None,
+            tool_calls: None,
         }];
 
         // 本地服务 + 思考关闭：显式关思考（LM Studio 上 qwen3.5 这类默认思考
@@ -3379,6 +3415,7 @@ mod provider_tool_calling_tests {
             images: vec![ImageAttachment { data: "AAAA".into(), media_type: "image/png".into() }],
             videos: vec![],
             token_usage: None,
+            tool_calls: None,
         }
     }
 
@@ -3463,9 +3500,9 @@ mod provider_tool_calling_tests {
     #[test]
     fn build_native_messages_matches_provider_shapes() {
         let messages = vec![
-            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
-            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
-            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None },
+            ChatMessage { id: "0".into(), role: "system".into(), content: "be nice".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None, tool_calls: None },
+            ChatMessage { id: "1".into(), role: "user".into(), content: "hi".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None, tool_calls: None },
+            ChatMessage { id: "2".into(), role: "assistant".into(), content: "hello".into(), timestamp: 0, error: None, images: vec![], videos: vec![], token_usage: None, tool_calls: None },
         ];
 
         let anthropic = build_native_messages("anthropic", &messages);
@@ -3495,14 +3532,13 @@ mod provider_tool_calling_tests {
     }
 
     // -----------------------------------------------------------------
-    // `continue_after_tool_calls` 是*常规聊天流程*（不是上面用
-    // `append_tool_round` 的 Workspace Agent 循环）在 MCP 工具调用之后发给
-    // 模型的内容。上面的测试都没有覆盖到它。下面这些测试用一个真实的本地
-    // HTTP 服务器充当 provider，配合一个真实的 MCP 工具结果（而不是手写的
-    // 测试夹具），来证明工具的输出确实以模型期望的形状发到了网络上，并且
-    // 模型的最终回复能正确地流回来。
     // -----------------------------------------------------------------
-
+    // 常规聊天流程（不是上面用 `append_tool_round` 的 Workspace Agent 循环）在
+    // MCP 工具调用之后发给模型的续写请求，现在也是流式的。下面这些测试用真实的
+    // 本地 HTTP 服务器充当 provider，配合真实的 MCP 工具结果（而不是手写的
+    // 测试夹具），来证明工具的输出确实以模型期望的形状发到了网络上，并且
+    // 模型的最终回复能一段一段正确地流回来。
+    // -----------------------------------------------------------------
     /// 极简的 HTTP/1.1 服务器，用来充当 OpenAI 兼容端点。依次接受
     /// `responses.len()` 个连接，捕获每个请求解析后的 JSON body，并回复
     /// 对应的预置 JSON 响应。
@@ -3625,8 +3661,385 @@ mod provider_tool_calling_tests {
         assert!(captured.lock().await[0].to_string().contains("海豚-418"));
     }
 
+    // ---- 流式续写：下面的测试用真实的本地 SSE 服务器验证 `run_streaming_request` ----
+
+    /// 读出一个 HTTP 请求的 JSON body（SSE mock 服务器共用）。
+    async fn read_mock_request(socket: &mut tokio::net::TcpStream) -> Option<serde_json::Value> {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let headers_end = loop {
+            let n = socket.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+        };
+        let header_str = String::from_utf8_lossy(&buf[..headers_end]).to_string();
+        let content_length: usize = header_str
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                if k.trim().eq_ignore_ascii_case("content-length") { v.trim().parse().ok() } else { None }
+            })
+            .unwrap_or(0);
+        let mut body = buf[headers_end + 4..].to_vec();
+        while body.len() < content_length {
+            let n = socket.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        serde_json::from_slice(&body).ok()
+    }
+
+    /// 流式（SSE）mock 服务器：每个连接按脚本依次写出若干个分片（分片之间留一点
+    /// 间隔，让客户端真的分多次读到），然后关闭连接。同时捕获每个请求的 JSON body。
+    async fn mock_sse_server(scripts: Vec<Vec<Vec<u8>>>) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock sse server");
+        let addr = listener.local_addr().expect("local_addr");
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        tokio::spawn(async move {
+            for script in scripts {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                if let Some(body) = read_mock_request(&mut socket).await {
+                    captured_clone.lock().await.push(body);
+                }
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                    .await;
+                for chunk in script {
+                    let _ = socket.write_all(&chunk).await;
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{}", addr), captured)
+    }
+
+    /// 发出第一个分片后就不再写任何数据、也不关闭连接的服务器，用来模拟"模型还在想"。
+    async fn mock_stalling_sse_server(first_chunk: Vec<u8>) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind stalling server");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let _ = read_mock_request(&mut socket).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = socket.write_all(&first_chunk).await;
+            let _ = socket.flush().await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        format!("http://{}", addr)
+    }
+
+    /// 每个事件一个分片：`data: ...\n\n`。
+    fn sse_chunks(events: &[&str]) -> Vec<Vec<u8>> {
+        events.iter().map(|event| format!("{event}\n\n").into_bytes()).collect()
+    }
+
+    async fn collect_turn(provider: &str, url: &str, body: &serde_json::Value) -> (StreamedTurn, Vec<TurnDelta>) {
+        let mut deltas: Vec<TurnDelta> = Vec::new();
+        let mut on_delta = |delta: TurnDelta| deltas.push(delta);
+        let result = run_streaming_request(provider, url, body, "test-key", 0, 0, &CancellationToken::new(), &mut on_delta).await;
+        match result {
+            Ok(StreamedTurnEnd::Finished(turn)) => (turn, deltas),
+            other => panic!("expected a finished turn, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
-    async fn continue_after_tool_calls_embeds_real_mcp_result_and_returns_final_text() {
+    async fn streaming_request_collects_text_tool_calls_and_usage_for_openai_shape() {
+        let (url, captured) = mock_sse_server(vec![sse_chunks(&[
+            r#"data: {"choices":[{"delta":{"content":"我先算一下。"}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"demo_calculator","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":3,"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b\":4}"}}]}}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+            "data: [DONE]",
+        ])])
+        .await;
+
+        let body = serde_json::json!({ "model": "m", "stream": true });
+        let (turn, deltas) = collect_turn("custom", &url, &body).await;
+
+        assert_eq!(deltas, vec![TurnDelta::Text("我先算一下。".into())]);
+        assert_eq!(turn.text, "我先算一下。", "模型随工具调用一起说的话必须保留下来");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "call_1");
+        assert_eq!(turn.tool_calls[0].function.name, "demo_calculator");
+        assert_eq!(turn.tool_calls[0].function.arguments, "{\"a\":3,\"b\":4}");
+        assert_eq!(turn.usage, Some(TokenUsage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }));
+        assert_eq!(captured.lock().await[0], body, "请求体必须原样发给服务器");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_does_not_garble_a_multibyte_char_split_across_network_chunks() {
+        let line = r#"data: {"choices":[{"delta":{"content":"你好世界"}}]}"#.to_string() + "\n\n";
+        let bytes = line.into_bytes();
+        // 在"好"的 3 个字节中间切开，模拟一个汉字被拆在两个网络分片之间。
+        let good = "好".as_bytes();
+        let at = bytes.windows(good.len()).position(|w| w == good).expect("find 好") + 1;
+        let (url, _) = mock_sse_server(vec![vec![
+            bytes[..at].to_vec(),
+            bytes[at..].to_vec(),
+            b"data: [DONE]\n\n".to_vec(),
+        ]])
+        .await;
+
+        let (turn, deltas) = collect_turn("custom", &url, &serde_json::json!({})).await;
+
+        assert_eq!(turn.text, "你好世界");
+        assert!(!turn.text.contains('\u{FFFD}'), "不能出现乱码替换符");
+        assert_eq!(deltas, vec![TurnDelta::Text("你好世界".into())]);
+    }
+
+    #[tokio::test]
+    async fn streaming_request_parses_anthropic_text_and_tool_use() {
+        let (url, _) = mock_sse_server(vec![sse_chunks(&[
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"让我算一下。"}}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"demo_calculator","input":{}}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":1"}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":",\"b\":2}"}}"#,
+            r#"event: message_stop
+data: {"type":"message_stop"}"#,
+        ])])
+        .await;
+
+        let (turn, _) = collect_turn("anthropic", &url, &serde_json::json!({})).await;
+
+        assert_eq!(turn.text, "让我算一下。");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "toolu_1");
+        assert_eq!(turn.tool_calls[0].function.arguments, "{\"a\":1,\"b\":2}");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_keeps_gemini_calls_that_arrive_in_separate_chunks_apart() {
+        // Gemini 每个 chunk 里的 part 序号都从 0 开始；不能因此把两个调用的参数拼到一起。
+        // 这个流也没有任何结束信号，靠连接关闭收尾。
+        let (url, _) = mock_sse_server(vec![sse_chunks(&[
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"先查两个。"}]}}]}"#,
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{"x":1}}}]}}]}"#,
+            r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_b","args":{"y":2}}}]}}]}"#,
+        ])])
+        .await;
+
+        let (turn, _) = collect_turn("google", &url, &serde_json::json!({})).await;
+
+        assert_eq!(turn.text, "先查两个。");
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[0].function.name, "tool_a");
+        assert_eq!(turn.tool_calls[0].function.arguments, "{\"x\":1}");
+        assert_eq!(turn.tool_calls[1].function.name, "tool_b");
+        assert_eq!(turn.tool_calls[1].function.arguments, "{\"y\":2}");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_turns_empty_tool_arguments_into_an_empty_object() {
+        let (url, _) = mock_sse_server(vec![sse_chunks(&[
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"no_args_tool","arguments":""}}]}}]}"#,
+            "data: [DONE]",
+        ])])
+        .await;
+
+        let (turn, _) = collect_turn("custom", &url, &serde_json::json!({})).await;
+
+        assert_eq!(turn.tool_calls[0].function.arguments, "{}");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_forwards_thinking_separately_and_flags_it() {
+        let (url, _) = mock_sse_server(vec![sse_chunks(&[
+            r#"data: {"choices":[{"delta":{"reasoning_content":"先想一想"}}]}"#,
+            "data: [DONE]",
+        ])])
+        .await;
+
+        let (turn, deltas) = collect_turn("custom", &url, &serde_json::json!({})).await;
+
+        assert_eq!(deltas, vec![TurnDelta::Thinking("先想一想".into())]);
+        assert!(turn.saw_thinking);
+        assert!(turn.text.is_empty(), "思考内容不能混进正文");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_returns_cancelled_when_stopped_mid_stream() {
+        let first = format!("data: {}\n\n", r#"{"choices":[{"delta":{"content":"写到一半"}}]}"#).into_bytes();
+        let url = mock_stalling_sse_server(first).await;
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        let mut deltas: Vec<TurnDelta> = Vec::new();
+        let mut on_delta = |delta: TurnDelta| {
+            deltas.push(delta);
+            canceller.cancel(); // 用户在收到第一段文字之后点了"停止"
+        };
+        let body = serde_json::json!({ "stream": true });
+        let run = run_streaming_request("custom", &url, &body, "test-key", 0, 0, &cancel, &mut on_delta);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("点停止后必须及时返回，而不是等到服务器关闭连接");
+
+        assert!(matches!(result, Ok(StreamedTurnEnd::Cancelled)), "{:?}", result);
+        assert_eq!(deltas, vec![TurnDelta::Text("写到一半".into())]);
+    }
+
+    #[test]
+    fn accumulate_tool_deltas_merges_fragments_and_splits_calls_with_different_ids() {
+        let delta = |index, id: Option<&str>, name: Option<&str>, fragment: Option<&str>| ToolCallDelta {
+            index,
+            id: id.map(str::to_string),
+            name: name.map(str::to_string),
+            arguments_fragment: fragment.map(str::to_string),
+        };
+        let mut acc = std::collections::BTreeMap::new();
+        // 同一个 index 的后续片段不带 id；个别 provider 会在每个片段里重复同一个 id，也不能被拆开。
+        accumulate_tool_deltas(&mut acc, vec![delta(0, Some("a"), Some("first"), Some("{\"k\":"))]);
+        accumulate_tool_deltas(&mut acc, vec![delta(0, None, None, Some("1"))]);
+        accumulate_tool_deltas(&mut acc, vec![delta(0, Some("a"), None, Some("}"))]);
+        // 同一个 index 上换了 id，是另一个调用。
+        accumulate_tool_deltas(&mut acc, vec![delta(0, Some("b"), Some("second"), Some("{}"))]);
+
+        let calls = finish_tool_calls(acc);
+        assert_eq!(calls.len(), 2);
+        assert_eq!((calls[0].id.as_str(), calls[0].function.name.as_str(), calls[0].function.arguments.as_str()), ("a", "first", "{\"k\":1}"));
+        assert_eq!((calls[1].id.as_str(), calls[1].function.name.as_str(), calls[1].function.arguments.as_str()), ("b", "second", "{}"));
+    }
+
+    #[test]
+    fn add_usage_sums_every_round_of_a_reply() {
+        let mut total = None;
+        add_usage(&mut total, None);
+        assert_eq!(total, None);
+        add_usage(&mut total, Some(TokenUsage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }));
+        add_usage(&mut total, Some(TokenUsage { prompt_tokens: 30, completion_tokens: 8, total_tokens: 38 }));
+        assert_eq!(total, Some(TokenUsage { prompt_tokens: 40, completion_tokens: 13, total_tokens: 53 }));
+    }
+
+    #[test]
+    fn enforce_round_tool_budget_keeps_the_newest_results_and_elides_older_ones() {
+        let call = |id: &str| ToolCall { id: id.into(), function: ToolFunction { name: "baiyu_file_write".into(), arguments: "{}".into() } };
+        let big = |tag: &str| serde_json::json!({ "content": format!("{}{}", tag, "x".repeat(30_000)) });
+        let mut rounds = vec![
+            ToolRound { text: String::new(), calls: vec![call("old")], results: vec![big("OLD")] },
+            ToolRound { text: String::new(), calls: vec![call("new")], results: vec![big("NEW")] },
+        ];
+
+        enforce_round_tool_budget(&mut rounds);
+
+        assert!(rounds[1].results[0].to_string().contains("NEW"), "最近一轮的结果要完整保留");
+        assert_eq!(rounds[0].results[0]["_truncated"], true, "超出预算时较早的结果要退化成元信息");
+        assert_eq!(rounds[0].results[0]["tool"], "baiyu_file_write");
+    }
+
+    // ---- 续写请求体：每家 provider 的形状 ----
+
+    fn sample_round(text: &str) -> ToolRound {
+        ToolRound {
+            text: text.to_string(),
+            calls: vec![ToolCall {
+                id: "call_1".into(),
+                function: ToolFunction { name: "demo_calculator".into(), arguments: "{\"a\":3,\"b\":4}".into() },
+            }],
+            results: vec![serde_json::json!({ "result": 7.0 })],
+        }
+    }
+
+    #[test]
+    fn continuation_body_openai_shape_is_streaming_and_replays_the_models_own_words() {
+        let original = vec![msg("user", "3加4等于多少")];
+        let body = build_continuation_body("custom", "m", &original, &[sample_round("我来算一下。")], &[], &[], Some(512), false);
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["max_tokens"], 512);
+        let messages = body["messages"].as_array().unwrap();
+        let assistant = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+        assert_eq!(assistant["content"], "我来算一下。", "模型随工具调用说的话要放回它自己那条消息里");
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+        let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+        assert_eq!(tool["tool_call_id"], "call_1");
+        assert!(body.get("tool_choice").is_none());
+
+        // 模型这一轮没说话：content 必须是 null，而不是空字符串。
+        let silent = build_continuation_body("custom", "m", &original, &[sample_round("  ")], &[], &[], None, false);
+        let assistant = silent["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap().clone();
+        assert!(assistant["content"].is_null());
+    }
+
+    #[test]
+    fn continuation_body_force_final_forbids_tools_for_every_provider() {
+        let original = vec![msg("user", "hi")];
+        let rounds = [sample_round("")];
+
+        let openai = build_continuation_body("custom", "m", &original, &rounds, &[], &[], None, true);
+        assert_eq!(openai["tool_choice"], "none");
+        assert!(openai["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("工具调用次数已达上限"));
+
+        let anthropic = build_continuation_body("anthropic", "claude", &original, &rounds, &[], &[], None, true);
+        assert_eq!(anthropic["tool_choice"]["type"], "none");
+
+        let google = build_continuation_body("google", "gemini", &original, &rounds, &[], &[], None, true);
+        assert_eq!(google["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
+    }
+
+    #[test]
+    fn continuation_body_anthropic_puts_the_text_block_before_tool_use_and_streams() {
+        let original = vec![msg("system", "你是助手"), msg("user", "算一下")];
+        let body = build_continuation_body("anthropic", "claude", &original, &[sample_round("我来算一下。")], &[], &[], None, false);
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["system"], "你是助手");
+        let messages = body["messages"].as_array().unwrap();
+        let assistant = messages.iter().rev().find(|m| m["role"] == "assistant").unwrap();
+        assert_eq!(assistant["content"][0]["type"], "text");
+        assert_eq!(assistant["content"][0]["text"], "我来算一下。");
+        assert_eq!(assistant["content"][1]["type"], "tool_use");
+        assert_eq!(assistant["content"][1]["id"], "call_1");
+        let result_message = messages.last().unwrap();
+        assert_eq!(result_message["role"], "user");
+        assert_eq!(result_message["content"][0]["type"], "tool_result");
+
+        // 这一轮没说话：不能出现空文本块（Anthropic 会拒收）。
+        let silent = build_continuation_body("anthropic", "claude", &original, &[sample_round("")], &[], &[], None, false);
+        let assistant = silent["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "assistant").unwrap().clone();
+        assert_eq!(assistant["content"].as_array().unwrap().len(), 1);
+        assert_eq!(assistant["content"][0]["type"], "tool_use");
+    }
+
+    #[test]
+    fn continuation_body_google_replays_text_then_function_call_and_has_no_stream_field() {
+        let original = vec![msg("user", "算一下")];
+        let body = build_continuation_body("google", "gemini", &original, &[sample_round("我来算一下。")], &[], &[], None, false);
+
+        // Gemini 靠 URL（streamGenerateContent）区分流式，请求体里没有 stream 字段。
+        assert!(body.get("stream").is_none());
+        let contents = body["contents"].as_array().unwrap();
+        let model_turn = contents.iter().rev().find(|c| c["role"] == "model").unwrap();
+        assert_eq!(model_turn["parts"][0]["text"], "我来算一下。");
+        assert_eq!(model_turn["parts"][1]["functionCall"]["name"], "demo_calculator");
+        assert_eq!(contents.last().unwrap()["parts"][0]["functionResponse"]["name"], "demo_calculator");
+        assert!(build_url("google", "", "gemini", true).contains("streamGenerateContent?alt=sse"));
+    }
+
+    // ---- 流式续写的完整往返（配合真实的 MCP 工具结果） ----
+
+    #[tokio::test]
+    async fn streaming_continuation_embeds_real_mcp_result_and_streams_the_final_answer() {
         // 使用真实的生产环境工具执行路径（而不是手写的测试夹具），这样这个
         // 测试才能捕捉到 MCP 工具实际返回内容的漂移，而不只是我们以为它会
         // 返回什么。
@@ -3639,62 +4052,61 @@ mod provider_tool_calling_tests {
         .expect("demo tool should succeed");
         assert_eq!(real_result["result"], 7.0, "sanity: demo_calculator actually computed 3+4");
 
-        let (base_url, captured) = mock_llm_server(vec![
-            serde_json::json!({ "choices": [{ "message": { "content": "3加4等于7。" } }] }),
-        ])
+        let (base_url, captured) = mock_sse_server(vec![sse_chunks(&[
+            r#"data: {"choices":[{"delta":{"content":"3加4"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"等于7。"}}]}"#,
+            "data: [DONE]",
+        ])])
         .await;
 
-        let original_messages = vec![
-            msg("system", "你是一个助手"),
-            msg("user", "3加4等于多少？用计算器工具算一下"),
-        ];
-        let calls = vec![ToolCall {
-            id: "call_1".to_string(),
-            function: ToolFunction {
-                name: "demo_calculator".to_string(),
-                arguments: serde_json::json!({ "a": 3, "b": 4, "operation": "add" }).to_string(),
-            },
-        }];
-        let rounds = vec![(calls, vec![real_result.clone()])];
+        let original_messages = vec![msg("system", "你是一个助手"), msg("user", "3加4等于多少？用计算器工具算一下")];
+        let round = ToolRound {
+            text: "好，我用计算器算一下。".to_string(),
+            calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                function: ToolFunction {
+                    name: "demo_calculator".to_string(),
+                    arguments: serde_json::json!({ "a": 3, "b": 4, "operation": "add" }).to_string(),
+                },
+            }],
+            results: vec![real_result.clone()],
+        };
+        let body = build_continuation_body("custom", "test-model", &original_messages, &[round], &[], &[], None, false);
 
-        let outcome = continue_after_tool_calls(
-            "custom", "test-model", "test-key", &base_url,
-            &original_messages, &rounds, &[], &[], None, 0, 0, false,
-        ).await.expect("continuation call should succeed");
+        let (turn, deltas) = collect_turn("custom", &base_url, &body).await;
 
-        match outcome {
-            ContinuationResult::Text { text, .. } => assert_eq!(text, "3加4等于7。"),
-            ContinuationResult::ToolCalls(_) => panic!("expected final text, got another tool-call request"),
-        }
+        assert_eq!(turn.text, "3加4等于7。");
+        assert!(turn.tool_calls.is_empty(), "这一轮是最终回答");
+        assert_eq!(deltas.len(), 2, "最终回答是一段一段流出来的，而不是一次性返回");
 
-        // 精确检查第二轮请求实际发到网络上的内容——这才是证明工具的真实输出
+        // 精确检查续写请求实际发到网络上的内容——这才是证明工具的真实输出
         // 确实到达了模型上下文，而不只是我们的代码自己以为它到达了。
         let sent = captured.lock().await;
+        assert_eq!(sent[0]["stream"], true);
         let sent_messages = sent[0]["messages"].as_array().expect("messages array");
 
         let assistant_msg = sent_messages
             .iter()
             .find(|m| m["role"] == "assistant" && m["tool_calls"].is_array())
             .expect("assistant tool_calls message present");
+        assert_eq!(assistant_msg["content"], "好，我用计算器算一下。");
         assert_eq!(assistant_msg["tool_calls"][0]["id"], "call_1");
         assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "demo_calculator");
 
-        let tool_msg = sent_messages
-            .iter()
-            .find(|m| m["role"] == "tool")
-            .expect("tool result message present");
+        let tool_msg = sent_messages.iter().find(|m| m["role"] == "tool").expect("tool result message present");
         assert_eq!(tool_msg["tool_call_id"], "call_1");
         let embedded_result: serde_json::Value = serde_json::from_str(
             tool_msg["content"].as_str().expect("tool content must be a string for OpenAI-shape providers"),
-        ).expect("tool content must be valid JSON");
+        )
+        .expect("tool content must be valid JSON");
         assert_eq!(embedded_result, real_result, "the exact MCP tool result must round-trip into the model context untouched");
     }
 
     #[tokio::test]
-    async fn continue_after_tool_calls_supports_a_second_round_after_more_tool_calls() {
+    async fn streaming_continuation_supports_a_second_round_after_more_tool_calls() {
         // 模型在看到第一个结果之后，确实可能合理地要求再调用一个工具
         // （finalize_turn 会循环最多 MAX_TOOL_ROUNDS 次）；这里验证第二次
-        // 续写请求能正确把两轮结果都叠加进去。
+        // 续写请求能正确把两轮结果、以及两轮里模型说过的话都叠加进去。
         let result_1 = crate::commands::mcp::handle_demo_tool_call(
             "demo_calculator", serde_json::json!({"a": 3, "b": 4, "operation": "add"}), "r1",
         ).await.unwrap();
@@ -3702,13 +4114,16 @@ mod provider_tool_calling_tests {
             "demo_calculator", serde_json::json!({"a": 7, "b": 5, "operation": "multiply"}), "r2",
         ).await.unwrap();
 
-        let (base_url, captured) = mock_llm_server(vec![
-            serde_json::json!({
-                "choices": [{ "message": { "content": null, "tool_calls": [
-                    { "id": "call_2", "type": "function", "function": { "name": "demo_calculator", "arguments": "{\"a\":7,\"b\":5,\"operation\":\"multiply\"}" } }
-                ] } }]
-            }),
-            serde_json::json!({ "choices": [{ "message": { "content": "3+4=7，再乘以5等于35。" } }] }),
+        let (base_url, captured) = mock_sse_server(vec![
+            sse_chunks(&[
+                r#"data: {"choices":[{"delta":{"content":"加法是7，再乘以5。"}}]}"#,
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"demo_calculator","arguments":"{\"a\":7,\"b\":5,\"operation\":\"multiply\"}"}}]}}]}"#,
+                "data: [DONE]",
+            ]),
+            sse_chunks(&[
+                r#"data: {"choices":[{"delta":{"content":"3+4=7，再乘以5等于35。"}}]}"#,
+                "data: [DONE]",
+            ]),
         ])
         .await;
 
@@ -3717,25 +4132,19 @@ mod provider_tool_calling_tests {
             id: "call_1".into(),
             function: ToolFunction { name: "demo_calculator".into(), arguments: "{\"a\":3,\"b\":4,\"operation\":\"add\"}".into() },
         };
-        let mut rounds = vec![(vec![call_1], vec![result_1])];
+        let mut rounds = vec![ToolRound { text: "先做加法。".into(), calls: vec![call_1], results: vec![result_1] }];
 
-        let outcome = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0, false)
-            .await
-            .expect("round 1 continuation");
-        let next_calls = match outcome {
-            ContinuationResult::ToolCalls(calls) => calls,
-            ContinuationResult::Text { .. } => panic!("expected another tool call round"),
-        };
-        assert_eq!(next_calls[0].id, "call_2");
+        let body_1 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false);
+        let (turn_1, _) = collect_turn("custom", &base_url, &body_1).await;
+        assert_eq!(turn_1.text, "加法是7，再乘以5。", "带着工具调用一起说的话不能丢");
+        assert_eq!(turn_1.tool_calls.len(), 1);
+        assert_eq!(turn_1.tool_calls[0].id, "call_2");
 
-        rounds.push((next_calls, vec![result_2]));
-        let outcome_2 = continue_after_tool_calls("custom", "test-model", "test-key", &base_url, &original_messages, &rounds, &[], &[], None, 0, 0, false)
-            .await
-            .expect("round 2 continuation");
-        match outcome_2 {
-            ContinuationResult::Text { text, .. } => assert_eq!(text, "3+4=7，再乘以5等于35。"),
-            ContinuationResult::ToolCalls(_) => panic!("expected final text after 2 rounds"),
-        }
+        rounds.push(ToolRound { text: turn_1.text, calls: turn_1.tool_calls, results: vec![result_2] });
+        let body_2 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false);
+        let (turn_2, _) = collect_turn("custom", &base_url, &body_2).await;
+        assert_eq!(turn_2.text, "3+4=7，再乘以5等于35。");
+        assert!(turn_2.tool_calls.is_empty());
 
         let sent = captured.lock().await;
         let second_request_messages = sent[1]["messages"].as_array().expect("messages array");
@@ -3743,6 +4152,12 @@ mod provider_tool_calling_tests {
         assert_eq!(tool_msgs.len(), 2, "both rounds' tool results must both be present in the second follow-up request");
         assert_eq!(tool_msgs[0]["tool_call_id"], "call_1");
         assert_eq!(tool_msgs[1]["tool_call_id"], "call_2");
+        let assistant_texts: Vec<_> = second_request_messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .map(|m| m["content"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(assistant_texts, vec!["先做加法。", "加法是7，再乘以5。"]);
     }
 
     fn native_msg(role: &str, text: &str) -> serde_json::Value {
@@ -3907,6 +4322,7 @@ mod provider_tool_calling_tests {
             images: vec![],
             videos: vec![],
             token_usage: None,
+            tool_calls: None,
         }];
         for index in 1..=8 {
             messages.push(ChatMessage {
@@ -3918,6 +4334,7 @@ mod provider_tool_calling_tests {
                 images: vec![],
                 videos: vec![],
                 token_usage: None,
+                tool_calls: None,
             });
         }
 

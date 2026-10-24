@@ -63,6 +63,11 @@ export interface ToolCallInfo {
   arguments: string; // 调用参数（JSON 字符串）
   status: "calling" | "done" | "error"; // 当前状态
   result?: string; // 调用结果（JSON 字符串，仅 done/error 时有）
+  /**
+   * 该调用首次出现时，所属消息 content 已累积的长度。ChatMessage.vue 按它把
+   * 正文切成"正文 → 工具卡片 → 正文"交错展示；缺省（旧数据）时卡片排在正文末尾。
+   */
+  contentOffset?: number;
 }
 
 /**
@@ -136,6 +141,36 @@ interface DbMessage {
   timestamp: number;
   error?: string;
   token_usage?: TokenUsage;
+  /** 工具调用记录（落盘用，后端按不透明 JSON 存储，结构即 ToolCallInfo[]）。 */
+  tool_calls?: ToolCallInfo[] | null;
+}
+
+/** 落盘时单个工具调用的参数/结果最多保留的字符数，防止大文件内容撑爆数据库。 */
+const TOOL_CALL_PERSIST_LIMIT = 4000;
+
+function truncateForPersist(text: string | undefined): string | undefined {
+  if (text === undefined || text.length <= TOOL_CALL_PERSIST_LIMIT) return text;
+  let end = TOOL_CALL_PERSIST_LIMIT;
+  // 切点若落在 emoji 等增补字符的两半之间，会留下孤立代理项，序列化给后端时反序列化会失败
+  const lastUnit = text.charCodeAt(end - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+  return text.slice(0, end) + "…（已截断）";
+}
+
+/** 把工具调用记录整理成可落盘的形态；没有记录时返回 undefined（不写该字段）。 */
+function toolCallsForPersist(toolCalls: ToolCallInfo[] | undefined): ToolCallInfo[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) return undefined;
+  return toolCalls.map((call) => ({
+    ...call,
+    arguments: truncateForPersist(call.arguments) ?? "",
+    result: truncateForPersist(call.result),
+  }));
+}
+
+/** 从数据库恢复工具调用记录：重启前没来得及结束的调用不会再有结果，标为失败而不是一直转圈。 */
+function toolCallsFromDb(toolCalls: ToolCallInfo[] | null | undefined): ToolCallInfo[] | undefined {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return undefined;
+  return toolCalls.map((call) => (call.status === "calling" ? { ...call, status: "error" as const } : call));
 }
 
 /**
@@ -238,6 +273,7 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: message.timestamp,
         error: message.error,
         tokenUsage: message.token_usage,
+        toolCalls: toolCallsFromDb(message.tool_calls),
       }))
     ),
   });
@@ -410,6 +446,8 @@ export const useChatStore = defineStore("chat", () => {
           arguments: evt.arguments,
           status: evt.status,
           result: evt.result,
+          // 记下此刻正文已流到哪里，供界面按"消息-调用-消息"的先后顺序展示
+          contentOffset: message.content.length,
         });
       }
       if (evt.status === "error") {
@@ -477,6 +515,7 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: message.timestamp,
         error: message.error,
         token_usage: message.tokenUsage,
+        tool_calls: toolCallsForPersist(message.toolCalls),
       };
       await invoke("save_message_cmd", {
         sessionId,
