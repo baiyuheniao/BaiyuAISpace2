@@ -141,6 +141,32 @@ interface DbMessage {
   timestamp: number;
   error?: string;
   token_usage?: TokenUsage;
+  /** 工具调用记录（落盘用，后端按不透明 JSON 存储，结构即 ToolCallInfo[]）。 */
+  tool_calls?: ToolCallInfo[] | null;
+}
+
+/** 落盘时单个工具调用的参数/结果最多保留的字符数，防止大文件内容撑爆数据库。 */
+const TOOL_CALL_PERSIST_LIMIT = 4000;
+
+function truncateForPersist(text: string | undefined): string | undefined {
+  if (text === undefined || text.length <= TOOL_CALL_PERSIST_LIMIT) return text;
+  return text.slice(0, TOOL_CALL_PERSIST_LIMIT) + "…（已截断）";
+}
+
+/** 把工具调用记录整理成可落盘的形态；没有记录时返回 undefined（不写该字段）。 */
+function toolCallsForPersist(toolCalls: ToolCallInfo[] | undefined): ToolCallInfo[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) return undefined;
+  return toolCalls.map((call) => ({
+    ...call,
+    arguments: truncateForPersist(call.arguments) ?? "",
+    result: truncateForPersist(call.result),
+  }));
+}
+
+/** 从数据库恢复工具调用记录：重启前没来得及结束的调用不会再有结果，标为失败而不是一直转圈。 */
+function toolCallsFromDb(toolCalls: ToolCallInfo[] | null | undefined): ToolCallInfo[] | undefined {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return undefined;
+  return toolCalls.map((call) => (call.status === "calling" ? { ...call, status: "error" as const } : call));
 }
 
 /**
@@ -243,6 +269,7 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: message.timestamp,
         error: message.error,
         tokenUsage: message.token_usage,
+        toolCalls: toolCallsFromDb(message.tool_calls),
       }))
     ),
   });
@@ -484,6 +511,7 @@ export const useChatStore = defineStore("chat", () => {
         timestamp: message.timestamp,
         error: message.error,
         token_usage: message.tokenUsage,
+        tool_calls: toolCallsForPersist(message.toolCalls),
       };
       await invoke("save_message_cmd", {
         sessionId,
