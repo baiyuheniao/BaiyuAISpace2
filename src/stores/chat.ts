@@ -150,7 +150,11 @@ const TOOL_CALL_PERSIST_LIMIT = 4000;
 
 function truncateForPersist(text: string | undefined): string | undefined {
   if (text === undefined || text.length <= TOOL_CALL_PERSIST_LIMIT) return text;
-  return text.slice(0, TOOL_CALL_PERSIST_LIMIT) + "…（已截断）";
+  let end = TOOL_CALL_PERSIST_LIMIT;
+  // 切点若落在 emoji 等增补字符的两半之间，会留下孤立代理项，序列化给后端时反序列化会失败
+  const lastUnit = text.charCodeAt(end - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+  return text.slice(0, end) + "…（已截断）";
 }
 
 /** 把工具调用记录整理成可落盘的形态；没有记录时返回 undefined（不写该字段）。 */
