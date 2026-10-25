@@ -1960,6 +1960,7 @@ async fn finalize_turn(
             mcp_tools,
             autonomous_skills,
             max_tokens,
+            request.enable_thinking,
             force_final,
         );
         match stream_turn(app_handle, request, message_id, &url, &body, api_key, cancel_token, emitted_text).await {
@@ -2018,14 +2019,20 @@ fn report_usage(
 }
 
 /// 构造工具调用之后的续写请求体（流式）：把原始对话、之前每一轮"模型说了什么
-/// ＋调用了什么＋返回了什么"一并告诉模型，从而继续这段对话。这里要重新附上
-/// 模型自己的工具定义（一次全新的 API 调用并不会记得原始请求里的 `tools`
-/// 字段），因为没有这些定义的话，一个想再次调用工具的模型没有原生方式可以这么
-/// 做，只能试图用纯文本假装调用一次。每家 provider 对"我调用了什么"/"这是
-/// 结果"的表达形状都不一样，所以按分支分别构造。
+/// ＋调用了什么＋返回了什么"一并告诉模型，从而继续这段对话。
+///
+/// 底座直接复用首轮的 `build_stream_request_body`，这样历史消息里的图片/视频、
+/// 各 provider 的思考配置（`enable_thinking`）、工具定义等和首轮完全一致，不会
+/// 因为续写走了另一套构造逻辑而悄悄丢东西；这里只负责在其后追加每一轮的工具调用
+/// 与结果（每家 provider 对"我调用了什么"/"这是结果"的表达形状都不一样，所以按
+/// 分支分别追加）。
 ///
 /// 模型随工具调用一起说的话（`ToolRound::text`）会原样放回它自己那条 assistant
 /// 消息里，这样模型看到的是完整的上下文，而不是一串没有任何说明的工具调用。
+///
+/// Anthropic 例外：开启思考时，API 要求带 tool_use 的 assistant 消息必须以上一轮
+/// 的 thinking 块（含签名）开头，而流读取层目前没有保存这些块，所以 Anthropic 的
+/// 续写请求不带思考配置（和改动前一致），否则会被 400 拒绝。
 fn build_continuation_body(
     provider: &str,
     model: &str,
@@ -2034,38 +2041,20 @@ fn build_continuation_body(
     mcp_tools: &[MCPTool],
     autonomous_skills: &[Skill],
     max_tokens: Option<u32>,
+    enable_thinking: bool,
     force_final: bool,
 ) -> serde_json::Value {
-    // 和 `build_stream_request_body` 一样的"空消息"防护：一条因为流在收到
-    // 任何 token 之前就被取消而变成空内容的消息，同样不能在这里被当作历史
-    // 重放，否则同样的 "message ... must not be empty" 400 会在第一次工具
-    // 调用轮次里重新出现。
-    let non_empty: Vec<ChatMessage> = original_messages
-        .iter()
-        .filter(|m| !m.content.trim().is_empty() || !m.images.is_empty() || !m.videos.is_empty())
-        .cloned()
-        .collect();
-    let original_messages = non_empty.as_slice();
-
     const FINAL_NOTICE: &str = "工具调用次数已达上限。现在禁止再调用任何工具；请仅基于已有结果给出最终回答，并明确列出仍未完成或无法确认的工作。";
 
-    let mut body = match provider {
-        "anthropic" => {
-            let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
-            let mut msgs: Vec<serde_json::Value> = original_messages
-                .iter()
-                .filter(|m| m.role != "system")
-                .map(|m| {
-                    serde_json::json!({
-                        "role": if m.role == "assistant" { "assistant" } else { "user" },
-                        "content": m.content
-                    })
-                })
-                .collect();
+    let thinking = enable_thinking && provider != "anthropic";
+    let mut body = build_stream_request_body(provider, model, original_messages, mcp_tools, thinking, max_tokens);
 
+    match provider {
+        "anthropic" => {
             // Anthropic 要求 tool_use/tool_result 块必须每轮恰好打包成一条
             // assistant 消息和一条 user 消息（它强制要求 user/assistant 严格
             // 交替），不像下面 OpenAI 那种一个结果对应一条工具消息的形状。
+            let msgs = body["messages"].as_array_mut().expect("anthropic body has messages");
             for round in rounds {
                 let mut assistant_blocks: Vec<serde_json::Value> = Vec::new();
                 if !round.text.trim().is_empty() {
@@ -2099,46 +2088,10 @@ fn build_continuation_body(
                 }
                 msgs.push(serde_json::json!({ "role": "user", "content": content }));
             }
-
-            // 和 build_stream_request_body 一样的原因：Anthropic 强制要求这个
-            // 字段，所以用户没填的话就退回到一个足够宽裕的默认值，而不是一个
-            // 会截断长回复的数字。
-            let max_tokens_val = max_tokens.unwrap_or(32000);
-            let mut b = serde_json::json!({
-                "model": model,
-                "messages": msgs,
-                "max_tokens": max_tokens_val,
-                "stream": true,
-            });
-            if let Some(sys) = system_msg {
-                b["system"] = serde_json::json!(sys);
-            }
-            if !mcp_tools.is_empty() {
-                let tools_json: Vec<_> = mcp_tools.iter().map(|tool| {
-                    serde_json::json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.input_schema,
-                    })
-                }).collect();
-                b["tools"] = serde_json::json!(tools_json);
-            }
-            if force_final { b["tool_choice"] = serde_json::json!({ "type": "none" }); }
-            b
+            if force_final { body["tool_choice"] = serde_json::json!({ "type": "none" }); }
         }
         "google" => {
-            let system_msg = original_messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
-            let mut contents: Vec<serde_json::Value> = original_messages
-                .iter()
-                .filter(|m| m.role != "system")
-                .map(|m| {
-                    serde_json::json!({
-                        "role": if m.role == "assistant" { "model" } else { "user" },
-                        "parts": [{ "text": m.content }]
-                    })
-                })
-                .collect();
-
+            let contents = body["contents"].as_array_mut().expect("google body has contents");
             for round in rounds {
                 let mut call_parts: Vec<serde_json::Value> = Vec::new();
                 if !round.text.trim().is_empty() {
@@ -2175,37 +2128,10 @@ fn build_continuation_body(
                 }
                 contents.push(serde_json::json!({ "role": "user", "parts": parts }));
             }
-
-            let mut generation_config = serde_json::json!({});
-            if let Some(v) = max_tokens {
-                generation_config["maxOutputTokens"] = serde_json::json!(v);
-            }
-            let mut b = serde_json::json!({
-                "contents": contents,
-                "generationConfig": generation_config,
-            });
-            if let Some(sys) = system_msg {
-                b["systemInstruction"] = serde_json::json!({ "parts": [{ "text": sys }] });
-            }
-            if !mcp_tools.is_empty() {
-                let declarations: Vec<_> = mcp_tools.iter().map(|tool| {
-                    serde_json::json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
-                    })
-                }).collect();
-                b["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
-            }
-            if force_final { b["toolConfig"] = serde_json::json!({ "functionCallingConfig": { "mode": "NONE" } }); }
-            b
+            if force_final { body["toolConfig"] = serde_json::json!({ "functionCallingConfig": { "mode": "NONE" } }); }
         }
         _ => {
-            let mut msgs: Vec<serde_json::Value> = original_messages
-                .iter()
-                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-                .collect();
-
+            let msgs = body["messages"].as_array_mut().expect("openai-shaped body has messages");
             for round in rounds {
                 let tool_calls_json: Vec<_> = round
                     .calls
@@ -2242,34 +2168,11 @@ fn build_continuation_body(
             }
             if force_final {
                 msgs.push(serde_json::json!({ "role": "user", "content": FINAL_NOTICE }));
+                body["tool_choice"] = serde_json::json!("none");
             }
-
-            let mut b = serde_json::json!({
-                "model": model,
-                "messages": msgs,
-                "stream": true,
-                "stream_options": { "include_usage": true },
-            });
-            if let Some(v) = max_tokens {
-                b["max_tokens"] = serde_json::json!(v);
-            }
-            if !mcp_tools.is_empty() {
-                let tools_json: Vec<_> = mcp_tools.iter().map(|tool| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema
-                        }
-                    })
-                }).collect();
-                b["tools"] = serde_json::json!(tools_json);
-            }
-            if force_final { b["tool_choice"] = serde_json::json!("none"); }
-            b
         }
-    };
+    }
+
     append_skill_tools(&mut body, provider, autonomous_skills);
     body
 }
@@ -3962,7 +3865,7 @@ data: {"type":"message_stop"}"#,
     #[test]
     fn continuation_body_openai_shape_is_streaming_and_replays_the_models_own_words() {
         let original = vec![msg("user", "3加4等于多少")];
-        let body = build_continuation_body("custom", "m", &original, &[sample_round("我来算一下。")], &[], &[], Some(512), false);
+        let body = build_continuation_body("custom", "m", &original, &[sample_round("我来算一下。")], &[], &[], Some(512), false, false);
 
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -3976,7 +3879,7 @@ data: {"type":"message_stop"}"#,
         assert!(body.get("tool_choice").is_none());
 
         // 模型这一轮没说话：content 必须是 null，而不是空字符串。
-        let silent = build_continuation_body("custom", "m", &original, &[sample_round("  ")], &[], &[], None, false);
+        let silent = build_continuation_body("custom", "m", &original, &[sample_round("  ")], &[], &[], None, false, false);
         let assistant = silent["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap().clone();
         assert!(assistant["content"].is_null());
     }
@@ -3986,24 +3889,24 @@ data: {"type":"message_stop"}"#,
         let original = vec![msg("user", "hi")];
         let rounds = [sample_round("")];
 
-        let openai = build_continuation_body("custom", "m", &original, &rounds, &[], &[], None, true);
+        let openai = build_continuation_body("custom", "m", &original, &rounds, &[], &[], None, false, true);
         assert_eq!(openai["tool_choice"], "none");
         assert!(openai["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("工具调用次数已达上限"));
 
-        let anthropic = build_continuation_body("anthropic", "claude", &original, &rounds, &[], &[], None, true);
+        let anthropic = build_continuation_body("anthropic", "claude", &original, &rounds, &[], &[], None, false, true);
         assert_eq!(anthropic["tool_choice"]["type"], "none");
 
-        let google = build_continuation_body("google", "gemini", &original, &rounds, &[], &[], None, true);
+        let google = build_continuation_body("google", "gemini", &original, &rounds, &[], &[], None, false, true);
         assert_eq!(google["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
     }
 
     #[test]
     fn continuation_body_anthropic_puts_the_text_block_before_tool_use_and_streams() {
         let original = vec![msg("system", "你是助手"), msg("user", "算一下")];
-        let body = build_continuation_body("anthropic", "claude", &original, &[sample_round("我来算一下。")], &[], &[], None, false);
+        let body = build_continuation_body("anthropic", "claude", &original, &[sample_round("我来算一下。")], &[], &[], None, false, false);
 
         assert_eq!(body["stream"], true);
-        assert_eq!(body["system"], "你是助手");
+        assert_eq!(body["system"][0]["text"], "你是助手");
         let messages = body["messages"].as_array().unwrap();
         let assistant = messages.iter().rev().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(assistant["content"][0]["type"], "text");
@@ -4015,7 +3918,7 @@ data: {"type":"message_stop"}"#,
         assert_eq!(result_message["content"][0]["type"], "tool_result");
 
         // 这一轮没说话：不能出现空文本块（Anthropic 会拒收）。
-        let silent = build_continuation_body("anthropic", "claude", &original, &[sample_round("")], &[], &[], None, false);
+        let silent = build_continuation_body("anthropic", "claude", &original, &[sample_round("")], &[], &[], None, false, false);
         let assistant = silent["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "assistant").unwrap().clone();
         assert_eq!(assistant["content"].as_array().unwrap().len(), 1);
         assert_eq!(assistant["content"][0]["type"], "tool_use");
@@ -4024,7 +3927,7 @@ data: {"type":"message_stop"}"#,
     #[test]
     fn continuation_body_google_replays_text_then_function_call_and_has_no_stream_field() {
         let original = vec![msg("user", "算一下")];
-        let body = build_continuation_body("google", "gemini", &original, &[sample_round("我来算一下。")], &[], &[], None, false);
+        let body = build_continuation_body("google", "gemini", &original, &[sample_round("我来算一下。")], &[], &[], None, false, false);
 
         // Gemini 靠 URL（streamGenerateContent）区分流式，请求体里没有 stream 字段。
         assert!(body.get("stream").is_none());
@@ -4034,6 +3937,65 @@ data: {"type":"message_stop"}"#,
         assert_eq!(model_turn["parts"][1]["functionCall"]["name"], "demo_calculator");
         assert_eq!(contents.last().unwrap()["parts"][0]["functionResponse"]["name"], "demo_calculator");
         assert!(build_url("google", "", "gemini", true).contains("streamGenerateContent?alt=sse"));
+    }
+
+    // ---- 续写请求和首轮请求保持一致：历史附件、思考配置 ----
+
+    fn user_with_image_and_video() -> ChatMessage {
+        let mut m = msg("user", "分析这张图");
+        m.images = vec![ImageAttachment { data: "AAAA".into(), media_type: "image/png".into() }];
+        m.videos = vec![VideoAttachment { data: "BBBB".into(), media_type: "video/mp4".into() }];
+        m
+    }
+
+    #[test]
+    fn continuation_keeps_history_images_for_every_provider_shape() {
+        let original = vec![user_with_image_and_video()];
+        let rounds = [sample_round("")];
+
+        let openai = build_continuation_body("custom", "m", &original, &rounds, &[], &[], None, false, false);
+        let user = &openai["messages"][0];
+        assert_eq!(user["content"][1]["type"], "image_url");
+        assert!(user["content"][1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,AAAA"));
+
+        // Mistral 的 image_url 是字符串而不是对象，续写也必须保持这个形状
+        let mistral = build_continuation_body("mistral", "m", &original, &rounds, &[], &[], None, false, false);
+        assert!(mistral["messages"][0]["content"][1]["image_url"].is_string());
+
+        let anthropic = build_continuation_body("anthropic", "claude", &original, &rounds, &[], &[], None, false, false);
+        assert_eq!(anthropic["messages"][0]["content"][0]["type"], "image");
+        assert_eq!(anthropic["messages"][0]["content"][0]["source"]["data"], "AAAA");
+
+        let google = build_continuation_body("google", "gemini", &original, &rounds, &[], &[], None, false, false);
+        let parts = &google["contents"][0]["parts"];
+        assert!(parts.as_array().unwrap().iter().any(|p| p["inline_data"]["mime_type"] == "image/png"));
+        assert!(parts.as_array().unwrap().iter().any(|p| p["inline_data"]["mime_type"] == "video/mp4"), "Gemini 的视频也要保留");
+    }
+
+    #[test]
+    fn continuation_applies_the_thinking_switch_like_the_first_request() {
+        let original = vec![msg("user", "hi")];
+        let rounds = [sample_round("")];
+
+        // 本地/custom：关闭思考时必须显式发 reasoning_effort=none，续写也一样
+        let off = build_continuation_body("local", "qwen", &original, &rounds, &[], &[], None, false, false);
+        assert_eq!(off["reasoning_effort"], "none");
+        let on = build_continuation_body("local", "qwen", &original, &rounds, &[], &[], None, true, false);
+        assert!(on.get("reasoning_effort").is_none());
+
+        let silicon = build_continuation_body("siliconflow", "qwen", &original, &rounds, &[], &[], None, true, false);
+        assert_eq!(silicon["enable_thinking"], true);
+        assert!(silicon["thinking_budget"].is_number());
+
+        let google = build_continuation_body("google", "gemini-2.5-pro", &original, &rounds, &[], &[], None, true, false);
+        assert!(google["generationConfig"]["thinkingConfig"].is_object());
+    }
+
+    #[test]
+    fn anthropic_continuation_never_enables_thinking_because_thinking_blocks_are_not_replayed() {
+        let original = vec![msg("user", "hi")];
+        let body = build_continuation_body("anthropic", "claude-sonnet-4-5", &original, &[sample_round("")], &[], &[], None, true, false);
+        assert!(body.get("thinking").is_none(), "没有 thinking 块可回放时开启思考会被 API 以 400 拒绝");
     }
 
     // ---- 流式续写的完整往返（配合真实的 MCP 工具结果） ----
@@ -4071,7 +4033,7 @@ data: {"type":"message_stop"}"#,
             }],
             results: vec![real_result.clone()],
         };
-        let body = build_continuation_body("custom", "test-model", &original_messages, &[round], &[], &[], None, false);
+        let body = build_continuation_body("custom", "test-model", &original_messages, &[round], &[], &[], None, false, false);
 
         let (turn, deltas) = collect_turn("custom", &base_url, &body).await;
 
@@ -4134,14 +4096,14 @@ data: {"type":"message_stop"}"#,
         };
         let mut rounds = vec![ToolRound { text: "先做加法。".into(), calls: vec![call_1], results: vec![result_1] }];
 
-        let body_1 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false);
+        let body_1 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false, false);
         let (turn_1, _) = collect_turn("custom", &base_url, &body_1).await;
         assert_eq!(turn_1.text, "加法是7，再乘以5。", "带着工具调用一起说的话不能丢");
         assert_eq!(turn_1.tool_calls.len(), 1);
         assert_eq!(turn_1.tool_calls[0].id, "call_2");
 
         rounds.push(ToolRound { text: turn_1.text, calls: turn_1.tool_calls, results: vec![result_2] });
-        let body_2 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false);
+        let body_2 = build_continuation_body("custom", "test-model", &original_messages, &rounds, &[], &[], None, false, false);
         let (turn_2, _) = collect_turn("custom", &base_url, &body_2).await;
         assert_eq!(turn_2.text, "3+4=7，再乘以5等于35。");
         assert!(turn_2.tool_calls.is_empty());
