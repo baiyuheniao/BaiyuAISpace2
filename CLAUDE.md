@@ -62,6 +62,12 @@ pnpm format                        # prettier
 ## 项目约定
 
 - **提交**：未经用户明确要求不 commit/push。信息风格 `feat:`/`fix:`/`chore:` + 中文摘要。
+- **合并流程**：不要直接往 `main` 提交或推送，所有改动一律走 PR（从 `main` 拉分支，
+  分支名 `claude/<简述>`），这样 Codex 能对 PR 做 Review。PR 由用户审核后自己合并，
+  Agent 不要合并。PR 描述写清改动、验证情况、没验证的部分，并用 `Closes #编号` 关联 Issue。
+  Codex 的 Review 意见按「先核实是否成立，成立就修并补测试，不成立就说明理由」处理。
+  叠在另一个未合并 PR 之上的 PR（堆叠 PR），要在底座 PR 合并后立刻把目标分支改成 `main`，
+  否则会合进已经废弃的分支，改动到不了 `main`。
 - **UI**：严格的黑白编辑设计系统——无彩色、无圆角、指定字体与缓动曲线。
   动 UI 前必读 `design-system` skill；token 权威源是 `src/styles/variables.scss`。
   做布局/交互重构（把页面改成用户想象的样子）用 `ui-refactor` skill。
