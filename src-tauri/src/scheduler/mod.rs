@@ -4,6 +4,7 @@
 
 pub mod types;
 pub mod db;
+pub mod check;
 pub mod commands;
 
 pub use db::init_scheduler_tables;
