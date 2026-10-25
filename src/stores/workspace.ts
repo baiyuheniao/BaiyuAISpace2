@@ -12,7 +12,7 @@
  * 的字段名直接是 camelCase，不像 MCPServer 那样需要 snake_case。
  */
 
-import { ref, computed } from "vue";
+import { ref, shallowRef, computed } from "vue";
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -305,7 +305,10 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const workspaces = ref<Workspace[]>([]);
   const currentWorkspaceId = ref<string | null>(null);
   const agents = ref<WorkspaceAgent[]>([]);
-  const messages = ref<WorkspaceMessage[]>([]);
+  // 浅层响应式：消息是只读记录，更新靠整体替换数组。用户消息可能带多张 base64
+  // 图片（单张可达数 MB），深度 ref 会让 Vue 递归给这些大字符串所在的对象建代理，
+  // 渲染时内存暴涨、GC 频繁（Issue #112）。
+  const messages = shallowRef<WorkspaceMessage[]>([]);
   const logs = ref<WorkspaceLogEntry[]>([]);
 
   // 主 Agent 提议创建子 Agent / 申请休眠 / 向用户提问 / 高危工具审批，都需要
@@ -340,6 +343,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (!items.some((existing) => existing.id === item.id)) items.push(item);
   };
 
+  /** `messages` 是 shallowRef，原地 push 不会触发更新，必须换一个新数组。 */
+  const appendMessageUnique = (item: WorkspaceMessage) => {
+    if (messages.value.some((existing) => existing.id === item.id)) return;
+    messages.value = [...messages.value, item];
+  };
+
   const initListeners = async () => {
     if (unlistenFns.length > 0) return;
     if (initListenersPromise) return initListenersPromise;
@@ -348,7 +357,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     initListenersPromise = Promise.all([
       listen<WorkspaceMessage>("workspace://message", (e) => {
         console.log(`[Workspace] 消息: ${e.payload.fromAgentId} → ${e.payload.toAgentId} | ${e.payload.content.slice(0, 60)}`);
-        if (e.payload.workspaceId === currentWorkspaceId.value) pushUniqueById(messages.value, e.payload);
+        if (e.payload.workspaceId === currentWorkspaceId.value) appendMessageUnique(e.payload);
       }),
       listen<WorkspaceLogEntry>("workspace://log", (e) => {
         console.debug(`[Workspace] 日志 [${e.payload.kind}]: ${e.payload.content.slice(0, 80)}`);
