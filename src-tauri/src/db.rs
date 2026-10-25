@@ -94,42 +94,27 @@ impl Database {
 
     fn remove_message_attachments(&self, message_id: &str) {
         let dir = self.message_attachment_dir(message_id);
-        // 换目录过程中遗留的临时/备份目录一并清掉。
-        for path in [dir.clone(), dir.with_extension("staging"), dir.with_extension("old")] {
-            if path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    log::warn!("删除消息附件目录失败 {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-
-    /// 换附件目录是"旧目录 → .old、.staging → 正式目录"两步改名。如果应用恰好在两步
-    /// 之间退出，正式目录不存在而 `.old` 还在；数据库里的清单仍对应旧内容，所以把
-    /// `.old` 改回正式目录即可恢复。读取和保存前都先做一次。
-    fn recover_interrupted_swap(&self, dir: &std::path::Path) {
-        let backup = dir.with_extension("old");
-        if !dir.exists() && backup.exists() {
-            match std::fs::rename(&backup, dir) {
-                Ok(()) => log::warn!("检测到上次换附件目录被中断，已恢复旧附件: {}", dir.display()),
-                Err(e) => log::warn!("恢复旧附件目录失败 {}: {}", dir.display(), e),
+        if dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log::warn!("删除消息附件目录失败 {}: {}", dir.display(), e);
             }
         }
     }
 
     /// 把消息的图片/视频写成文件，返回要存进数据库的清单 JSON；没有附件返回 None。
     /// 单个附件解码或写入失败只记日志并跳过，不让整条消息保存失败。
+    ///
+    /// 新文件的名字里带一段本次保存独有的随机串，所以永远不会覆盖或删除旧文件：
+    /// 在数据库里的清单更新成功之前，旧清单指向的旧文件原封不动，任何一步失败或
+    /// 应用中途退出，都只会留下多余的新文件，不会让旧附件丢失。多余的文件由
+    /// `prune_message_attachments` 在清单更新成功之后清理。
     fn store_message_attachments(&self, message: &ChatMessage) -> Result<Option<String>, Box<dyn std::error::Error>> {
         if message.images.is_empty() && message.videos.is_empty() {
             return Ok(None);
         }
         let dir = self.message_attachment_dir(&message.id);
-        self.recover_interrupted_swap(&dir);
-        // 先把新附件完整写进旁边的临时目录，全部成功后再换掉旧目录：中途任何一步
-        // 失败，旧附件和数据库里的旧清单都原样保留，不会出现清单指向已删文件的状态。
-        let staging = dir.with_extension("staging");
-        let _ = std::fs::remove_dir_all(&staging);
-        std::fs::create_dir_all(&staging)?;
+        std::fs::create_dir_all(&dir)?;
+        let generation = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
 
         let mut stored: Vec<StoredAttachment> = Vec::new();
         let items = message
@@ -138,7 +123,7 @@ impl Database {
             .map(|a| ("image", "img", &a.data, &a.media_type))
             .chain(message.videos.iter().map(|a| ("video", "vid", &a.data, &a.media_type)));
         for (index, (kind, prefix, data, media_type)) in items.enumerate() {
-            let file = format!("{}{}.{}", prefix, index, extension_for(media_type));
+            let file = format!("{}{}-{}.{}", prefix, index, generation, extension_for(media_type));
             let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -146,35 +131,33 @@ impl Database {
                     continue;
                 }
             };
-            if let Err(e) = std::fs::write(staging.join(&file), bytes) {
+            if let Err(e) = std::fs::write(dir.join(&file), bytes) {
                 log::warn!("附件写入失败，已跳过 (message {}): {}", message.id, e);
+                let _ = std::fs::remove_file(dir.join(&file));
                 continue;
             }
             stored.push(StoredAttachment { kind: kind.to_string(), media_type: media_type.clone(), file });
         }
         if stored.is_empty() {
-            // 一个都没存成：保留旧附件（返回 None 时 SQL 也会保留旧清单）。
-            let _ = std::fs::remove_dir_all(&staging);
+            // 一个都没存成：返回 None，SQL 会保留旧清单，旧文件也没动过。
             return Ok(None);
         }
-        let manifest = serde_json::to_string(&stored)?;
+        Ok(Some(serde_json::to_string(&stored)?))
+    }
 
-        // 换目录：旧目录先挪到备份名，新目录就位后再删备份；就位失败则把旧目录挪回去。
-        let backup = dir.with_extension("old");
-        let _ = std::fs::remove_dir_all(&backup);
-        let had_old = dir.exists();
-        if had_old {
-            std::fs::rename(&dir, &backup)?;
-        }
-        if let Err(e) = std::fs::rename(&staging, &dir) {
-            if had_old {
-                let _ = std::fs::rename(&backup, &dir);
+    /// 清单已经写进数据库之后，删掉该消息目录里清单没有引用的文件（上一版附件、
+    /// 以及此前中断留下的多余文件）。
+    fn prune_message_attachments(&self, message_id: &str, manifest: &str) {
+        let Ok(items) = serde_json::from_str::<Vec<StoredAttachment>>(manifest) else { return };
+        let keep: std::collections::HashSet<String> = items.into_iter().map(|i| i.file).collect();
+        let dir = self.message_attachment_dir(message_id);
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !keep.contains(&name) {
+                let _ = std::fs::remove_file(entry.path());
             }
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e.into());
         }
-        let _ = std::fs::remove_dir_all(&backup);
-        Ok(Some(manifest))
     }
 
     /// 按清单把附件文件读回前端使用的 base64 结构；缺失的文件直接略过。
@@ -185,7 +168,6 @@ impl Database {
             return (images, videos);
         };
         let dir = self.message_attachment_dir(message_id);
-        self.recover_interrupted_swap(&dir);
         for item in items {
             // 清单里的文件名只会是我们自己生成的，这里仍然只认单层文件名。
             if item.file.contains('/') || item.file.contains('\\') || item.file.contains("..") {
@@ -470,7 +452,8 @@ impl Database {
         let mut sessions = Vec::new();
         for row in rows {
             let (id, title, provider, model, api_config_id, working_directory, file_access_mode, created_at, updated_at) = row?;
-            let messages = self.get_messages(&id)?;
+            // 列表不带附件内容；需要附件时用 get_session 单独取某个会话。
+            let messages = self.get_messages_with(&id, false)?;
             
             sessions.push(ChatSession {
                 id,
@@ -491,6 +474,36 @@ impl Database {
             log::debug!("Session {} has {} messages", s.id, s.messages.len());
         }
         Ok(sessions)
+    }
+
+    /// 读取单个会话（含消息及其图片/视频附件）。打开某个会话时用它，而不是把所有
+    /// 会话的附件都读一遍。
+    pub fn get_session(&self, session_id: &str) -> Result<Option<ChatSession>, Box<dyn std::error::Error>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, title, provider, model, api_config_id, working_directory, file_access_mode, created_at, updated_at
+            FROM sessions
+            WHERE id = ?1
+            "#,
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let id: String = row.get(0)?;
+        let messages = self.get_messages(&id)?;
+        Ok(Some(ChatSession {
+            id,
+            title: row.get(1)?,
+            provider: row.get(2)?,
+            model: row.get(3)?,
+            api_config_id: row.get(4)?,
+            working_directory: row.get(5)?,
+            file_access_mode: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+            messages,
+        }))
     }
 
     /**
@@ -544,6 +557,11 @@ impl Database {
             [&chrono::Utc::now().timestamp_millis().to_string(), session_id],
         )?;
 
+        // 清单已经安全落库，这时才清理上一版附件文件。
+        if let Some(manifest) = attachments.as_deref() {
+            self.prune_message_attachments(&message.id, manifest);
+        }
+
         log::info!("[save_message] saved message {} for session {}", message.id, session_id);
         Ok(())
     }
@@ -576,6 +594,16 @@ impl Database {
         &self,
         session_id: &str,
     ) -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
+        self.get_messages_with(session_id, true)
+    }
+
+    /// `include_attachments` 为 false 时不读附件文件（图片/视频留空），用于一次返回
+    /// 所有会话的列表——不能为了列表把整个媒体库都读成 base64 传给前端。
+    pub fn get_messages_with(
+        &self,
+        session_id: &str,
+        include_attachments: bool,
+    ) -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
         log::info!("[get_messages] Querying messages for session_id: {}, db_path: {}", session_id, self.path);
         
         let mut stmt = self.conn.prepare(
@@ -594,8 +622,8 @@ impl Database {
             let attachments_json: Option<String> = row.get(7)?;
             let id: String = row.get(0)?;
             let (images, videos) = match attachments_json.as_deref() {
-                Some(manifest) => self.load_message_attachments(&id, manifest),
-                None => (vec![], vec![]),
+                Some(manifest) if include_attachments => self.load_message_attachments(&id, manifest),
+                _ => (vec![], vec![]),
             };
             Ok(ChatMessage {
                 id,
@@ -1028,6 +1056,16 @@ mod tests {
 
     // ---- 图片/视频附件落盘 ----
 
+    /// 某条消息附件目录下现有的文件名（排序后）。
+    fn attachment_files(db: &Database, message_id: &str) -> Vec<String> {
+        let mut names: Vec<String> = match std::fs::read_dir(db.message_attachment_dir(message_id)) {
+            Ok(entries) => entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(),
+            Err(_) => vec![],
+        };
+        names.sort();
+        names
+    }
+
     fn user_with_attachments(id: &str) -> ChatMessage {
         ChatMessage {
             id: id.into(),
@@ -1061,8 +1099,7 @@ mod tests {
 
         let manifest: String = db.conn.query_row("SELECT attachments FROM messages WHERE id = 'm1'", [], |r| r.get(0)).unwrap();
         assert!(!manifest.contains("iVBORw0KGgo"), "数据库里只能有文件清单，不能有 base64 内容");
-        assert!(db.message_attachment_dir("m1").join("img0.png").exists());
-        assert!(db.message_attachment_dir("m1").join("vid2.mp4").exists());
+        assert_eq!(attachment_files(&db, "m1").len(), 3, "两张图一段视频，各一个文件");
     }
 
     #[test]
@@ -1114,7 +1151,8 @@ mod tests {
         let db = test_db();
         db.save_session(&session("s1")).unwrap();
         db.save_message("s1", &user_with_attachments("m1")).unwrap();
-        std::fs::remove_file(db.message_attachment_dir("m1").join("img0.png")).unwrap();
+        let png = attachment_files(&db, "m1").into_iter().find(|f| f.starts_with("img0-") && f.ends_with(".png")).expect("png file");
+        std::fs::remove_file(db.message_attachment_dir("m1").join(png)).unwrap();
 
         let loaded = &db.get_messages("s1").unwrap()[0];
         assert_eq!(loaded.images.len(), 1);
@@ -1144,6 +1182,7 @@ mod tests {
         let db = test_db();
         db.save_session(&session("s1")).unwrap();
         db.save_message("s1", &user_with_attachments("m1")).unwrap();
+        let before = attachment_files(&db, "m1");
 
         // 新附件全部无法解码 => 没有任何东西可存，旧附件必须原样保留
         let mut broken = user_with_attachments("m1");
@@ -1154,11 +1193,11 @@ mod tests {
         let loaded = &db.get_messages("s1").unwrap()[0];
         assert_eq!(loaded.images.len(), 2, "替换失败不能丢掉原有附件");
         assert_eq!(loaded.videos.len(), 1);
-        assert!(!db.message_attachment_dir("m1").with_extension("staging").exists(), "临时目录要清理干净");
+        assert_eq!(attachment_files(&db, "m1"), before);
     }
 
     #[test]
-    fn replacing_attachments_swaps_in_the_new_set_without_leftovers() {
+    fn replacing_attachments_installs_the_new_set_and_prunes_the_old_files() {
         let db = test_db();
         db.save_session(&session("s1")).unwrap();
         db.save_message("s1", &user_with_attachments("m1")).unwrap();
@@ -1172,30 +1211,50 @@ mod tests {
         assert_eq!(loaded.images.len(), 1);
         assert_eq!(loaded.images[0].media_type, "image/gif");
         assert!(loaded.videos.is_empty());
-        let dir = db.message_attachment_dir("m1");
-        assert!(!dir.join("img0.png").exists() && !dir.join("vid2.mp4").exists(), "旧文件不能残留");
-        assert!(!dir.with_extension("old").exists());
+        let files = attachment_files(&db, "m1");
+        assert_eq!(files.len(), 1, "旧文件不能残留: {:?}", files);
+        assert!(files[0].ends_with(".gif"));
     }
 
     #[test]
-    fn an_interrupted_directory_swap_is_recovered_on_load() {
+    fn old_attachments_survive_until_the_new_manifest_is_committed() {
         let db = test_db();
         db.save_session(&session("s1")).unwrap();
         db.save_message("s1", &user_with_attachments("m1")).unwrap();
 
-        // 模拟换目录时在两次改名之间退出：旧目录已挪成 .old，新目录还没就位
-        let dir = db.message_attachment_dir("m1");
-        std::fs::rename(&dir, dir.with_extension("old")).unwrap();
-        std::fs::create_dir_all(dir.with_extension("staging")).unwrap();
-        assert!(!dir.exists());
+        // 模拟"新文件已写好，但数据库里的清单还没更新就退出/失败"：只做写文件这一步
+        let mut replaced = user_with_attachments("m1");
+        replaced.images = vec![ImageAttachment { data: "R0lGODlh".into(), media_type: "image/gif".into() }];
+        replaced.videos.clear();
+        let new_manifest = db.store_message_attachments(&replaced).unwrap();
+        assert!(new_manifest.is_some());
 
+        // 数据库仍是旧清单，旧文件一个都不能少，读出来还是原来的两张图和一段视频
         let loaded = &db.get_messages("s1").unwrap()[0];
-        assert_eq!(loaded.images.len(), 2, "中断后旧附件必须能读回来");
+        assert_eq!(loaded.images.len(), 2);
+        assert_eq!(loaded.images[0].media_type, "image/png");
         assert_eq!(loaded.videos.len(), 1);
-        assert!(dir.exists() && !dir.with_extension("old").exists());
 
-        // 删除消息时遗留的临时目录也要清掉
-        db.delete_message("m1").unwrap();
-        assert!(!dir.with_extension("staging").exists());
+        // 之后正常保存一次：新清单落库，多余的文件（包括上面遗留的）被清掉
+        db.save_message("s1", &replaced).unwrap();
+        let loaded = &db.get_messages("s1").unwrap()[0];
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(attachment_files(&db, "m1").len(), 1);
+    }
+
+    #[test]
+    fn session_list_skips_attachment_bytes_but_single_session_includes_them() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &user_with_attachments("m1")).unwrap();
+
+        let listed = &db.get_sessions().unwrap()[0].messages[0];
+        assert_eq!(listed.content, "看看这张图和这段视频", "列表照常带文字");
+        assert!(listed.images.is_empty() && listed.videos.is_empty(), "列表不能把所有附件读成 base64");
+
+        let full = db.get_session("s1").unwrap().expect("session exists");
+        assert_eq!(full.messages[0].images.len(), 2);
+        assert_eq!(full.messages[0].videos.len(), 1);
+        assert!(db.get_session("missing").unwrap().is_none());
     }
 }

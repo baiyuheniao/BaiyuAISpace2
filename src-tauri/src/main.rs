@@ -350,6 +350,7 @@ fn main() {
             save_session_cmd,
             save_message_cmd,
             get_sessions_cmd,
+            get_session_cmd,
             delete_session_cmd,
             delete_message_cmd,
             export_text_file_cmd,
@@ -745,6 +746,16 @@ async fn get_sessions_cmd(
 ) -> Result<Vec<ChatSession>, String> {
     let db = db_state.0.lock().await;
     db.get_sessions().map_err(|e| commands::local_model::friendly_err("读取会话列表失败，请重试", e))
+}
+
+/// 读取单个会话（含图片/视频附件）。会话列表 `get_sessions_cmd` 不带附件内容。
+#[tauri::command]
+async fn get_session_cmd(
+    session_id: String,
+    db_state: tauri::State<'_, DbState>,
+) -> Result<Option<ChatSession>, String> {
+    let db = db_state.0.lock().await;
+    db.get_session(&session_id).map_err(|e| commands::local_model::friendly_err("读取会话失败，请重试", e))
 }
 
 #[tauri::command]

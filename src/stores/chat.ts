@@ -344,6 +344,17 @@ export const useChatStore = defineStore("chat", () => {
       // 落库的回复，避免设置页/历史页刷新用旧快照把流式消息覆盖掉。
       if (currentSession.value) {
         const currentId = String(currentSession.value.id);
+        // 会话列表不带图片/视频内容（太大），当前会话要单独取一份完整的，
+        // 否则刷新后聊天里已有的图片会消失。
+        try {
+          const full = await invoke<DbSession | null>("get_session_cmd", { sessionId: currentId });
+          if (full) {
+            const index = sessions.value.findIndex((s) => String(s.id) === currentId);
+            if (index >= 0) sessions.value[index] = toChatSession(full);
+          }
+        } catch (error) {
+          console.warn("Failed to load current session attachments:", error);
+        }
         const freshCurrent = sessions.value.find((s) => String(s.id) === currentId);
         if (freshCurrent) {
           currentSession.value = { ...freshCurrent };
@@ -609,9 +620,8 @@ export const useChatStore = defineStore("chat", () => {
     // 尝试从数据库重新加载会话数据（确保消息最新）
     let sessionWithMessages = session;
     try {
-      const dbSessions = await invoke<DbSession[]>("get_sessions_cmd");
-      console.log("[Chat] Loaded sessions from DB:", dbSessions.length);
-      const freshSession = dbSessions.find((s) => String(s.id) === String(session.id));
+      // 只取这一个会话（含图片/视频），不把所有会话的附件都读一遍
+      const freshSession = await invoke<DbSession | null>("get_session_cmd", { sessionId: String(session.id) });
       console.log(
         "[Chat] Found fresh session:",
         freshSession?.id,
