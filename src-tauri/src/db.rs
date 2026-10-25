@@ -94,9 +94,25 @@ impl Database {
 
     fn remove_message_attachments(&self, message_id: &str) {
         let dir = self.message_attachment_dir(message_id);
-        if dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                log::warn!("删除消息附件目录失败 {}: {}", dir.display(), e);
+        // 换目录过程中遗留的临时/备份目录一并清掉。
+        for path in [dir.clone(), dir.with_extension("staging"), dir.with_extension("old")] {
+            if path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    log::warn!("删除消息附件目录失败 {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
+    /// 换附件目录是"旧目录 → .old、.staging → 正式目录"两步改名。如果应用恰好在两步
+    /// 之间退出，正式目录不存在而 `.old` 还在；数据库里的清单仍对应旧内容，所以把
+    /// `.old` 改回正式目录即可恢复。读取和保存前都先做一次。
+    fn recover_interrupted_swap(&self, dir: &std::path::Path) {
+        let backup = dir.with_extension("old");
+        if !dir.exists() && backup.exists() {
+            match std::fs::rename(&backup, dir) {
+                Ok(()) => log::warn!("检测到上次换附件目录被中断，已恢复旧附件: {}", dir.display()),
+                Err(e) => log::warn!("恢复旧附件目录失败 {}: {}", dir.display(), e),
             }
         }
     }
@@ -108,6 +124,7 @@ impl Database {
             return Ok(None);
         }
         let dir = self.message_attachment_dir(&message.id);
+        self.recover_interrupted_swap(&dir);
         // 先把新附件完整写进旁边的临时目录，全部成功后再换掉旧目录：中途任何一步
         // 失败，旧附件和数据库里的旧清单都原样保留，不会出现清单指向已删文件的状态。
         let staging = dir.with_extension("staging");
@@ -168,6 +185,7 @@ impl Database {
             return (images, videos);
         };
         let dir = self.message_attachment_dir(message_id);
+        self.recover_interrupted_swap(&dir);
         for item in items {
             // 清单里的文件名只会是我们自己生成的，这里仍然只认单层文件名。
             if item.file.contains('/') || item.file.contains('\\') || item.file.contains("..") {
@@ -1157,5 +1175,27 @@ mod tests {
         let dir = db.message_attachment_dir("m1");
         assert!(!dir.join("img0.png").exists() && !dir.join("vid2.mp4").exists(), "旧文件不能残留");
         assert!(!dir.with_extension("old").exists());
+    }
+
+    #[test]
+    fn an_interrupted_directory_swap_is_recovered_on_load() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &user_with_attachments("m1")).unwrap();
+
+        // 模拟换目录时在两次改名之间退出：旧目录已挪成 .old，新目录还没就位
+        let dir = db.message_attachment_dir("m1");
+        std::fs::rename(&dir, dir.with_extension("old")).unwrap();
+        std::fs::create_dir_all(dir.with_extension("staging")).unwrap();
+        assert!(!dir.exists());
+
+        let loaded = &db.get_messages("s1").unwrap()[0];
+        assert_eq!(loaded.images.len(), 2, "中断后旧附件必须能读回来");
+        assert_eq!(loaded.videos.len(), 1);
+        assert!(dir.exists() && !dir.with_extension("old").exists());
+
+        // 删除消息时遗留的临时目录也要清掉
+        db.delete_message("m1").unwrap();
+        assert!(!dir.with_extension("staging").exists());
     }
 }
