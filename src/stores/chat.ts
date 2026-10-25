@@ -143,6 +143,9 @@ interface DbMessage {
   token_usage?: TokenUsage;
   /** 工具调用记录（落盘用，后端按不透明 JSON 存储，结构即 ToolCallInfo[]）。 */
   tool_calls?: ToolCallInfo[] | null;
+  /** 图片/视频附件。后端把它们存成文件，读取时再还原成 base64。 */
+  images?: ImageAttachment[];
+  videos?: VideoAttachment[];
 }
 
 /** 落盘时单个工具调用的参数/结果最多保留的字符数，防止大文件内容撑爆数据库。 */
@@ -274,6 +277,8 @@ export const useChatStore = defineStore("chat", () => {
         error: message.error,
         tokenUsage: message.token_usage,
         toolCalls: toolCallsFromDb(message.tool_calls),
+        images: message.images && message.images.length > 0 ? message.images : undefined,
+        videos: message.videos && message.videos.length > 0 ? message.videos : undefined,
       }))
     ),
   });
@@ -516,6 +521,8 @@ export const useChatStore = defineStore("chat", () => {
         error: message.error,
         token_usage: message.tokenUsage,
         tool_calls: toolCallsForPersist(message.toolCalls),
+        images: message.images,
+        videos: message.videos,
       };
       await invoke("save_message_cmd", {
         sessionId,
