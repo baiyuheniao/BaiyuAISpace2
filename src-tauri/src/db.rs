@@ -108,11 +108,11 @@ impl Database {
             return Ok(None);
         }
         let dir = self.message_attachment_dir(&message.id);
-        // 同一条消息重新保存时以最新的附件集合为准，先清掉旧文件避免残留。
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        std::fs::create_dir_all(&dir)?;
+        // 先把新附件完整写进旁边的临时目录，全部成功后再换掉旧目录：中途任何一步
+        // 失败，旧附件和数据库里的旧清单都原样保留，不会出现清单指向已删文件的状态。
+        let staging = dir.with_extension("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
 
         let mut stored: Vec<StoredAttachment> = Vec::new();
         let items = message
@@ -129,17 +129,35 @@ impl Database {
                     continue;
                 }
             };
-            if let Err(e) = std::fs::write(dir.join(&file), bytes) {
+            if let Err(e) = std::fs::write(staging.join(&file), bytes) {
                 log::warn!("附件写入失败，已跳过 (message {}): {}", message.id, e);
                 continue;
             }
             stored.push(StoredAttachment { kind: kind.to_string(), media_type: media_type.clone(), file });
         }
         if stored.is_empty() {
-            let _ = std::fs::remove_dir_all(&dir);
+            // 一个都没存成：保留旧附件（返回 None 时 SQL 也会保留旧清单）。
+            let _ = std::fs::remove_dir_all(&staging);
             return Ok(None);
         }
-        Ok(Some(serde_json::to_string(&stored)?))
+        let manifest = serde_json::to_string(&stored)?;
+
+        // 换目录：旧目录先挪到备份名，新目录就位后再删备份；就位失败则把旧目录挪回去。
+        let backup = dir.with_extension("old");
+        let _ = std::fs::remove_dir_all(&backup);
+        let had_old = dir.exists();
+        if had_old {
+            std::fs::rename(&dir, &backup)?;
+        }
+        if let Err(e) = std::fs::rename(&staging, &dir) {
+            if had_old {
+                let _ = std::fs::rename(&backup, &dir);
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e.into());
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+        Ok(Some(manifest))
     }
 
     /// 按清单把附件文件读回前端使用的 base64 结构；缺失的文件直接略过。
@@ -1101,5 +1119,43 @@ mod tests {
         db.save_message("s1", &user_with_attachments("m1")).unwrap();
         db.clear_all().unwrap();
         assert!(!db.attachments_dir.exists());
+    }
+
+    #[test]
+    fn a_failed_replacement_keeps_the_previous_attachments_and_manifest() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &user_with_attachments("m1")).unwrap();
+
+        // 新附件全部无法解码 => 没有任何东西可存，旧附件必须原样保留
+        let mut broken = user_with_attachments("m1");
+        broken.images = vec![ImageAttachment { data: "不是base64!!".into(), media_type: "image/png".into() }];
+        broken.videos.clear();
+        db.save_message("s1", &broken).unwrap();
+
+        let loaded = &db.get_messages("s1").unwrap()[0];
+        assert_eq!(loaded.images.len(), 2, "替换失败不能丢掉原有附件");
+        assert_eq!(loaded.videos.len(), 1);
+        assert!(!db.message_attachment_dir("m1").with_extension("staging").exists(), "临时目录要清理干净");
+    }
+
+    #[test]
+    fn replacing_attachments_swaps_in_the_new_set_without_leftovers() {
+        let db = test_db();
+        db.save_session(&session("s1")).unwrap();
+        db.save_message("s1", &user_with_attachments("m1")).unwrap();
+
+        let mut replaced = user_with_attachments("m1");
+        replaced.images = vec![ImageAttachment { data: "R0lGODlh".into(), media_type: "image/gif".into() }];
+        replaced.videos.clear();
+        db.save_message("s1", &replaced).unwrap();
+
+        let loaded = &db.get_messages("s1").unwrap()[0];
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(loaded.images[0].media_type, "image/gif");
+        assert!(loaded.videos.is_empty());
+        let dir = db.message_attachment_dir("m1");
+        assert!(!dir.join("img0.png").exists() && !dir.join("vid2.mp4").exists(), "旧文件不能残留");
+        assert!(!dir.with_extension("old").exists());
     }
 }
