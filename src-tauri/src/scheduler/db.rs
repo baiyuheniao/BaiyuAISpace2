@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use super::types::{Schedule, ScheduleKind};
 
 /// 所有查询共用的列清单（顺序必须和 `row_to_schedule` 一致）。
-const SCHEDULE_COLUMNS: &str = "id,name,workspace_id,target_agent_id,message,kind,interval_minutes,at_time,weekday,once_at,next_run_at,last_run_at,enabled,created_at,updated_at,check_script,check_shell,trigger_mode,cooldown_minutes,last_check_at,last_check_status,last_check_output,last_condition_met,consecutive_errors";
+const SCHEDULE_COLUMNS: &str = "id,name,workspace_id,target_agent_id,message,kind,interval_minutes,at_time,weekday,once_at,next_run_at,last_run_at,enabled,created_at,updated_at,check_script,check_shell,trigger_mode,cooldown_minutes,last_check_at,last_check_status,last_check_output,last_condition_met,consecutive_errors,created_by";
 
 /// 条件任务新增的列。旧库没有，启动时按需补上；已有任务这些列为 NULL/默认值。
 const CONDITION_COLUMNS: [(&str, &str); 8] = [
@@ -66,6 +66,9 @@ fn migrate_schedules_table(conn: &Connection) -> Result<(), rusqlite::Error> {
             conn.execute(&format!("ALTER TABLE schedules ADD COLUMN {column} {definition}"), [])?;
         }
     }
+    if !has_column(conn, "created_by") {
+        conn.execute("ALTER TABLE schedules ADD COLUMN created_by TEXT", [])?;
+    }
     if !has_column(conn, "consecutive_errors") {
         conn.execute("ALTER TABLE schedules ADD COLUMN consecutive_errors INTEGER NOT NULL DEFAULT 0", [])?;
     }
@@ -98,6 +101,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
         last_check_output: row.get(21)?,
         last_condition_met: row.get::<_, i64>(22)? != 0,
         consecutive_errors: row.get(23)?,
+        created_by:       row.get(24)?,
     })
 }
 
@@ -107,13 +111,13 @@ pub fn insert_schedule(conn: &Connection, s: &Schedule) -> Result<(), rusqlite::
            (id, name, workspace_id, target_agent_id, message, kind,
             interval_minutes, at_time, weekday, once_at,
             next_run_at, last_run_at, enabled, created_at, updated_at,
-            check_script, check_shell, trigger_mode, cooldown_minutes)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)"#,
+            check_script, check_shell, trigger_mode, cooldown_minutes, created_by)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)"#,
         params![
             s.id, s.name, s.workspace_id, s.target_agent_id, s.message,
             s.kind.as_str(), s.interval_minutes, s.at_time, s.weekday, s.once_at,
             s.next_run_at, s.last_run_at, s.enabled as i64, s.created_at, s.updated_at,
-            s.check_script, s.check_shell, s.trigger_mode, s.cooldown_minutes
+            s.check_script, s.check_shell, s.trigger_mode, s.cooldown_minutes, s.created_by
         ],
     )?;
     Ok(())
@@ -141,6 +145,15 @@ pub fn list_due_schedules(conn: &Connection, now_ms: i64) -> Result<Vec<Schedule
     )?;
     let result: rusqlite::Result<Vec<Schedule>> = stmt.query_map(params![now_ms], row_to_schedule)?.collect();
     result
+}
+
+/// 某个工作组里由 Agent 创建的定时任务数量（用来限制 Agent 能建多少个）。
+pub fn count_agent_schedules(conn: &Connection, workspace_id: &str) -> Result<i64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM schedules WHERE workspace_id=?1 AND created_by LIKE 'agent:%'",
+        params![workspace_id],
+        |row| row.get(0),
+    )
 }
 
 pub fn delete_schedule(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
@@ -233,7 +246,7 @@ mod tests {
             check_script: Some("df -h".into()), check_shell: Some("sh".into()),
             trigger_mode: Some("repeat".into()), cooldown_minutes: Some(30),
             last_check_at: None, last_check_status: None, last_check_output: None,
-            last_condition_met: false, consecutive_errors: 0,
+            last_condition_met: false, consecutive_errors: 0, created_by: None,
             next_run_at: 100, last_run_at: None, enabled: true, created_at: 1, updated_at: 1,
         }
     }
@@ -255,6 +268,25 @@ mod tests {
         assert_eq!(loaded.trigger_mode.as_deref(), Some("repeat"));
         assert_eq!(loaded.cooldown_minutes, Some(30));
         assert_eq!(list_schedules(&conn, Some("w1")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn created_by_round_trips_and_only_agent_schedules_are_counted_per_workspace() {
+        let conn = conn();
+        let mut by_agent = condition("s1");
+        by_agent.created_by = Some("agent:a1:研究员".into());
+        insert_schedule(&conn, &by_agent).unwrap();
+        let mut other_ws = condition("s2");
+        other_ws.workspace_id = Some("w2".into());
+        other_ws.created_by = Some("agent:a9:别人".into());
+        insert_schedule(&conn, &other_ws).unwrap();
+        insert_schedule(&conn, &condition("s3")).unwrap(); // 用户创建的
+
+        assert_eq!(get_schedule(&conn, "s1").unwrap().unwrap().created_by.as_deref(), Some("agent:a1:研究员"));
+        assert_eq!(get_schedule(&conn, "s3").unwrap().unwrap().created_by, None);
+        assert_eq!(count_agent_schedules(&conn, "w1").unwrap(), 1);
+        assert_eq!(count_agent_schedules(&conn, "w2").unwrap(), 1);
+        assert_eq!(count_agent_schedules(&conn, "none").unwrap(), 0);
     }
 
     #[test]

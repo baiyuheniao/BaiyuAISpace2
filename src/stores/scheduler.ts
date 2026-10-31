@@ -33,6 +33,8 @@ export interface Schedule {
   lastCheckOutput: string | null;
   lastConditionMet: boolean;
   consecutiveErrors: number;
+  /** null = 用户创建；`agent:<id>:<名字>` = Agent 通过工具创建 */
+  createdBy: string | null;
   nextRunAt: number;
   lastRunAt: number | null;
   enabled: boolean;
