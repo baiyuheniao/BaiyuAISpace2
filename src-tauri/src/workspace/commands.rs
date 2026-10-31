@@ -2010,6 +2010,32 @@ fn workspace_tool_defs(workspace: &Workspace, agent: &WorkspaceAgent) -> Vec<MCP
     tools.push(MCPTool {
         server_id: "workspace".to_string(),
         server_name: "workspace".to_string(),
+        name: "workspace_schedule".to_string(),
+        description: "管理定时任务：到点后会给指定 Agent 发一条消息把它唤醒。create 创建（需要用户在界面上批准，\
+            只能创建时间类任务：once 单次 / interval 间隔 / daily 每天 / weekly 每周；interval 最短 5 分钟）；\
+            list 列出本工作组的定时任务；delete / toggle 只能操作由 Agent 创建的任务。\
+            时间一律用用户本地时间。创建前先想清楚触发时要对方做什么，message 要写成对方单独看也能执行的完整指令。"
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["create", "list", "delete", "toggle"], "description": "要执行的操作" },
+                "name": { "type": "string", "description": "create：任务名称" },
+                "message": { "type": "string", "description": "create：触发时发给目标 Agent 的消息" },
+                "kind": { "type": "string", "enum": ["once", "interval", "daily", "weekly"], "description": "create：任务类型" },
+                "once_at": { "type": "string", "description": "kind=once：触发时间，本地时间，格式 YYYY-MM-DD HH:MM，必须在未来" },
+                "interval_minutes": { "type": "integer", "description": "kind=interval：间隔分钟数（≥5）" },
+                "at_time": { "type": "string", "description": "kind=daily/weekly：本地时间，格式 HH:MM" },
+                "weekday": { "type": "integer", "description": "kind=weekly：0=周一 … 6=周日" },
+                "target_agent_id": { "type": "string", "description": "create：触发时发给谁，Agent 的 id 或名字，\"all\" 表示所有人；省略则发给你自己" },
+                "schedule_id": { "type": "string", "description": "delete/toggle：目标任务的 id（用 list 获取）" }
+            },
+            "required": ["action"]
+        }),
+    });
+    tools.push(MCPTool {
+        server_id: "workspace".to_string(),
+        server_name: "workspace".to_string(),
         name: "workspace_meeting".to_string(),
         description: "发起一次工作组会议（每个工作组同时只能有一场）。组内其他 Agent 会被邀请参会，\
             大家轮流发言；轮到某位与会者发言时，它会一次性收到此前错过的全部发言。你是本场会议的\
@@ -2495,6 +2521,125 @@ async fn dispatch_tool_call(
             }
             insert_workspace_log(app_handle, &workspace.id, Some(agent.id.clone()), "agent_note", content).await;
             serde_json::json!({ "status": "logged" })
+        }
+        "workspace_schedule" => {
+            use crate::scheduler::{agent_tool, db as sched_db};
+            let action = call.arguments.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let db_state = app_handle.state::<DbState>();
+            let changed = |what: &str| {
+                let _ = app_handle.emit("scheduler://changed", serde_json::json!({ "workspaceId": workspace.id, "action": what }));
+            };
+            match action {
+                "create" => {
+                    let agents: Vec<(String, String)> = {
+                        let db = db_state.0.lock().await;
+                        match db::open_conn(&db.path) {
+                            Ok(conn) => db::list_agents(&conn, &workspace.id)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|a| (a.id, a.name))
+                                .collect(),
+                            Err(e) => return serde_json::json!({ "error": format!("打开数据库连接失败: {}", e) }),
+                        }
+                    };
+                    let request = match agent_tool::build_create_request(
+                        &call.arguments, &workspace.id, &agent.id, &agents, Utc::now().timestamp_millis(),
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => return serde_json::json!({ "error": e }),
+                    };
+                    let existing = {
+                        let db = db_state.0.lock().await;
+                        rusqlite::Connection::open(&db.path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|conn| sched_db::count_agent_schedules(&conn, &workspace.id).map_err(|e| e.to_string()))
+                    };
+                    match existing {
+                        Ok(n) if n >= agent_tool::MAX_AGENT_SCHEDULES_PER_WORKSPACE => {
+                            return serde_json::json!({
+                                "error": format!("本工作组里 Agent 创建的定时任务已达上限 {} 个，请先 delete 不用的", agent_tool::MAX_AGENT_SCHEDULES_PER_WORKSPACE)
+                            })
+                        }
+                        Ok(_) => {}
+                        Err(e) => return serde_json::json!({ "error": format!("读取定时任务失败: {}", e) }),
+                    }
+
+                    let target_label = match &request.target_agent_id {
+                        None => "工作组内所有 Agent".to_string(),
+                        Some(id) => agents.iter().find(|(aid, _)| aid == id).map(|(_, n)| n.clone()).unwrap_or_else(|| id.clone()),
+                    };
+                    let summary = agent_tool::approval_summary(&request, &target_label);
+
+                    set_agent_status(app_handle, &agent.id, AgentStatus::WaitingApproval).await;
+                    let approved = request_tool_approval(app_handle, &workspace.id, agent, "workspace_schedule", &summary, cancel).await;
+                    set_agent_status(app_handle, &agent.id, AgentStatus::Running).await;
+                    if !approved {
+                        return serde_json::json!({ "status": "rejected", "message": "用户没有批准创建这个定时任务" });
+                    }
+
+                    let created_by = Some(agent_tool::created_by_agent(&agent.id, &agent.name));
+                    match crate::scheduler::commands::create_schedule_record(request, created_by, &db_state).await {
+                        Ok(schedule) => {
+                            insert_workspace_log(
+                                app_handle, &workspace.id, Some(agent.id.clone()), "schedule_created",
+                                format!("{} 创建了定时任务「{}」（{}）", agent.name, schedule.name, summary["触发时间"].as_str().unwrap_or("")),
+                            ).await;
+                            changed("create");
+                            serde_json::json!({ "status": "created", "schedule": agent_tool::schedule_summary(&schedule) })
+                        }
+                        Err(e) => serde_json::json!({ "error": e }),
+                    }
+                }
+                "list" => {
+                    let db = db_state.0.lock().await;
+                    match rusqlite::Connection::open(&db.path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|conn| sched_db::list_schedules(&conn, Some(&workspace.id)).map_err(|e| e.to_string()))
+                    {
+                        Ok(list) => serde_json::json!(list.iter().map(agent_tool::schedule_summary).collect::<Vec<_>>()),
+                        Err(e) => serde_json::json!({ "error": format!("读取定时任务失败: {}", e) }),
+                    }
+                }
+                "delete" | "toggle" => {
+                    let Some(id) = call.arguments.get("schedule_id").and_then(|v| v.as_str()) else {
+                        return serde_json::json!({ "error": "缺少 schedule_id" });
+                    };
+                    let db = db_state.0.lock().await;
+                    let conn = match rusqlite::Connection::open(&db.path) {
+                        Ok(c) => c,
+                        Err(e) => return serde_json::json!({ "error": format!("打开数据库连接失败: {}", e) }),
+                    };
+                    let target = match sched_db::get_schedule(&conn, id) {
+                        Ok(Some(s)) if s.workspace_id.as_deref() == Some(workspace.id.as_str()) => s,
+                        Ok(_) => return serde_json::json!({ "error": "找不到这个定时任务" }),
+                        Err(e) => return serde_json::json!({ "error": format!("读取定时任务失败: {}", e) }),
+                    };
+                    if !agent_tool::is_agent_created(target.created_by.as_deref()) {
+                        return serde_json::json!({ "error": "这个任务是用户自己创建的，Agent 不能修改或删除" });
+                    }
+                    if action == "delete" {
+                        if let Err(e) = sched_db::delete_schedule(&conn, id) {
+                            return serde_json::json!({ "error": format!("删除失败: {}", e) });
+                        }
+                        drop(conn);
+                        drop(db);
+                        changed("delete");
+                        serde_json::json!({ "status": "deleted" })
+                    } else {
+                        match sched_db::toggle_schedule(&conn, id) {
+                            Ok(Some(s)) => {
+                                drop(conn);
+                                drop(db);
+                                changed("toggle");
+                                serde_json::json!({ "status": "ok", "enabled": s.enabled })
+                            }
+                            Ok(None) => serde_json::json!({ "error": "找不到这个定时任务" }),
+                            Err(e) => serde_json::json!({ "error": format!("切换失败: {}", e) }),
+                        }
+                    }
+                }
+                other => serde_json::json!({ "error": format!("未知 action: {}", other) }),
+            }
         }
         "workspace_meeting" => {
             let topic = call.arguments.get("topic").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();

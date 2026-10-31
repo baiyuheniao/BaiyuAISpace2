@@ -74,7 +74,10 @@ watch(filterWorkspaceId, loadSchedules);
 
 // 条件任务每检测一次，后端就发一个事件：刷新列表里的检测状态；被自动停用时提示用户。
 let unlistenChecked: UnlistenFn | null = null;
+let unlistenChanged: UnlistenFn | null = null;
 onMounted(async () => {
+  // Agent 通过工具创建/删除/启停了任务：刷新列表
+  unlistenChanged = await listen("scheduler://changed", () => { void loadSchedules(); });
   unlistenChecked = await listen<ScheduleCheckedEvent>("scheduler://checked", async (event) => {
     await loadSchedules();
     if (event.payload.autoDisabled) {
@@ -82,7 +85,10 @@ onMounted(async () => {
     }
   });
 });
-onBeforeUnmount(() => { unlistenChecked?.(); unlistenChecked = null; });
+onBeforeUnmount(() => {
+  unlistenChecked?.(); unlistenChecked = null;
+  unlistenChanged?.(); unlistenChanged = null;
+});
 
 // ============ 名称解析辅助 ============
 
@@ -276,6 +282,7 @@ const handleDelete = async (id: string) => {
               <n-space align="center" size="small">
                 <span>{{ s.name }}</span>
                 <n-tag size="small" :type="kindTagType(s.kind)">{{ kindLabel[s.kind] }}</n-tag>
+                <n-tag v-if="s.createdBy?.startsWith('agent:')" size="small" type="default">Agent 创建：{{ s.createdBy.split(':').slice(2).join(':') }}</n-tag>
                 <n-tag v-if="!s.enabled" size="small" type="default">已禁用</n-tag>
               </n-space>
             </template>
