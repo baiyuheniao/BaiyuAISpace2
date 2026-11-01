@@ -129,6 +129,17 @@ pub fn build_create_request(
     Ok(request)
 }
 
+/// 用户批准可能是几分钟之后的事（最长等 10 分钟）：单次任务的时间在批准期间可能已经过去，
+/// 创建前要再确认一次，否则调度循环会把它当成过期任务立刻触发。
+pub fn ensure_still_in_future(request: &CreateScheduleRequest, now_ms: i64) -> Result<(), String> {
+    match (&request.kind, request.once_at) {
+        (ScheduleKind::Once, Some(at)) if at <= now_ms => {
+            Err("批准时这个单次任务的触发时间已经过去，没有创建；请重新选一个未来的时间再创建".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// 一个任务的"什么时候触发"的人话描述。
 pub fn describe_timing(request: &CreateScheduleRequest) -> String {
     const WEEKDAYS: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
@@ -293,5 +304,16 @@ mod tests {
         assert!(is_agent_created(Some(&created_by_agent("a1", "研究员"))));
         assert!(!is_agent_created(None), "用户创建的没有 created_by");
         assert!(!is_agent_created(Some("user")));
+    }
+
+    #[test]
+    fn a_once_time_that_passed_while_waiting_for_approval_is_rejected() {
+        let req = build(json!({ "name": "n", "message": "m", "kind": "once", "once_at": "2999-01-01 10:00" })).unwrap();
+        let at = req.once_at.unwrap();
+        assert!(ensure_still_in_future(&req, at - 1).is_ok());
+        assert!(ensure_still_in_future(&req, at).is_err(), "恰好到点也算过期");
+        assert!(ensure_still_in_future(&req, at + 600_000).is_err());
+        let daily = build(json!({ "name": "n", "message": "m", "kind": "daily", "at_time": "09:00" })).unwrap();
+        assert!(ensure_still_in_future(&daily, i64::MAX).is_ok(), "非单次任务不受影响");
     }
 }

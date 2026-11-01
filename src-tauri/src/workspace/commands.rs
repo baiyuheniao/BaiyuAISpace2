@@ -2577,6 +2577,9 @@ async fn dispatch_tool_call(
                         return serde_json::json!({ "status": "rejected", "message": "用户没有批准创建这个定时任务" });
                     }
 
+                    if let Err(e) = agent_tool::ensure_still_in_future(&request, Utc::now().timestamp_millis()) {
+                        return serde_json::json!({ "error": e });
+                    }
                     let created_by = Some(agent_tool::created_by_agent(&agent.id, &agent.name));
                     match crate::scheduler::commands::create_schedule_record(request, created_by, &db_state).await {
                         Ok(schedule) => {
