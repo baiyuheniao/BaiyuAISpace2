@@ -8,7 +8,9 @@
 //! 会附在触发消息后面。脚本的启动、超时、输出截断都收在 [`run_check_script`] 里，
 //! 以后要加审批、白名单或沙箱，只需要改这一处。
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// 单次检测脚本的最长运行时间，超时会被强制结束并按"出错"处理。
@@ -16,6 +18,12 @@ pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 检测输出最多保留的字节数，超出部分截断。
 pub const MAX_OUTPUT_BYTES: usize = 8 * 1024;
+
+/// 管道里最多读进内存的字节数（比输出上限多一点，让 `truncate_output` 能判断是否被截断）。
+const READ_CAP: usize = MAX_OUTPUT_BYTES + 1024;
+
+/// 脚本结束后等管道读完的最长时间。
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -117,25 +125,92 @@ pub async fn run_check_script(shell: &str, script: &str, timeout: Duration) -> C
         command.creation_flags(0x0800_0000);
     }
 
-    let child = match command.spawn() {
+    // 脚本自己放进独立进程组，超时/结束后可以连同它启动的后台子进程一起清理
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => return error_outcome(format!("无法启动 {program}：{e}"), started),
     };
+    let pid = child.id();
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Err(_) => error_outcome(format!("检测脚本运行超过 {} 秒，已被强制结束", timeout.as_secs()), started),
-        Ok(Err(e)) => error_outcome(format!("等待检测脚本结束时出错：{e}"), started),
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+    // 边读边丢：只保留前 READ_CAP 字节，其余读出来直接扔掉，既不撑内存也不让脚本因管道写满而卡住
+    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+    let stdout_task = child.stdout.take().map(|pipe| tokio::spawn(drain_bounded(pipe, stdout_buf.clone())));
+    let stderr_task = child.stderr.take().map(|pipe| tokio::spawn(drain_bounded(pipe, stderr_buf.clone())));
+
+    let waited = tokio::time::timeout(timeout, child.wait()).await;
+    // 不管正常结束还是超时，都把进程树清掉：脚本里 `sleep 600 &` 之类的后台进程不能留下来累积
+    kill_process_tree(pid);
+
+    if waited.is_err() {
+        let _ = child.kill().await;
+        for task in [&stdout_task, &stderr_task].into_iter().flatten() {
+            task.abort();
+        }
+        return error_outcome(format!("检测脚本运行超过 {} 秒，已被强制结束", timeout.as_secs()), started);
+    }
+    // 进程树已清理，管道很快就会 EOF；仍然给个上限，防止个别后台进程把管道攥住
+    for task in [stdout_task, stderr_task].into_iter().flatten() {
+        if tokio::time::timeout(PIPE_DRAIN_GRACE, task).await.is_err() {
+            // 超时的任务在 timeout 里已被丢弃（detach），缓冲区里已有的内容照样可用
+        }
+    }
+
+    match waited.unwrap() {
+        Err(e) => error_outcome(format!("等待检测脚本结束时出错：{e}"), started),
+        Ok(status) => {
+            let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
             let text = if stdout.trim().is_empty() { stderr } else { stdout };
             CheckOutcome {
-                status: if output.status.success() { CheckStatus::Met } else { CheckStatus::NotMet },
+                status: if status.success() { CheckStatus::Met } else { CheckStatus::NotMet },
                 output: truncate_output(&text),
-                exit_code: output.status.code(),
+                exit_code: status.code(),
                 duration_ms: started.elapsed().as_millis() as u64,
             }
         }
+    }
+}
+
+/// 读到 EOF 为止，缓冲区最多保留 `READ_CAP` 字节，多出来的读掉丢弃。
+async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, buf: Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0u8; 4096];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut buf = buf.lock().unwrap();
+                let room = READ_CAP.saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(room)]);
+            }
+        }
+    }
+}
+
+/// 结束脚本进程及其所有后代。Unix 杀整个进程组，Windows 用 `taskkill /T` 杀进程树。
+/// 进程已经退出时是空操作；失败也不影响检测结果。
+fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000)
+            .status();
     }
 }
 
@@ -258,5 +333,43 @@ mod tests {
         let outcome = run_check_script("sh", "head -c 20000 /dev/zero | tr '\\0' 'a'", Duration::from_secs(10)).await;
         assert_eq!(outcome.status, CheckStatus::Met);
         assert!(outcome.output.ends_with("…（已截断）"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_output_is_bounded_and_does_not_hang_the_script() {
+        // yes 不停写 stdout；上限内读够就丢弃，脚本被超时结束，不应把内存撑爆或卡死
+        let outcome = run_check_script("sh", "yes aaaaaaaaaaaaaaaa", Duration::from_secs(1)).await;
+        assert_eq!(outcome.status, CheckStatus::Error);
+        let outcome = run_check_script("sh", "yes aaaaaaaaaaaaaaaa | head -c 5000000; exit 0", Duration::from_secs(10)).await;
+        assert_eq!(outcome.status, CheckStatus::Met);
+        assert!(outcome.output.len() <= MAX_OUTPUT_BYTES + 64, "输出长度 {}", outcome.output.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_descendants_are_killed_on_timeout() {
+        let marker = std::env::temp_dir().join(format!("baiyu-bg-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        // 后台进程 2 秒后写标记文件；超时（1 秒）清理进程树后，它不应该还活着
+        let script = format!("(sleep 2; touch {}) & wait", marker.display());
+        let outcome = run_check_script("sh", &script, Duration::from_secs(1)).await;
+        assert_eq!(outcome.status, CheckStatus::Error);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!marker.exists(), "后台子进程在超时后仍在运行");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_descendants_are_killed_after_normal_exit_too() {
+        let marker = std::env::temp_dir().join(format!("baiyu-bg2-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("(sleep 2; touch {}) >/dev/null 2>&1 & exit 0", marker.display());
+        let outcome = run_check_script("sh", &script, Duration::from_secs(10)).await;
+        assert_eq!(outcome.status, CheckStatus::Met);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!marker.exists(), "脚本正常退出后遗留的后台进程没有被清理");
+        let _ = std::fs::remove_file(&marker);
     }
 }
