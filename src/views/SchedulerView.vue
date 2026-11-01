@@ -193,14 +193,24 @@ const handleTestScript = async () => {
   if (!script) { message.error("请先填写检测脚本"); return; }
   testing.value = true;
   testResult.value = null;
+  const token = ++testToken;
   try {
-    testResult.value = await scheduler.testScript(form.value.checkShell ?? "sh", script);
+    const result = await scheduler.testScript(form.value.checkShell ?? "sh", script);
+    // 试运行期间脚本或解释器被改过：这份结果对应的是旧内容，丢掉
+    if (token === testToken) testResult.value = result;
   } catch (e) {
-    message.error(`试运行失败: ${e}`);
+    if (token === testToken) message.error(`试运行失败: ${e}`);
   } finally {
-    testing.value = false;
+    if (token === testToken) testing.value = false;
   }
 };
+// 脚本或解释器一变，试运行结果就不再对应当前内容：清掉，并让还在途中的试运行作废
+let testToken = 0;
+watch(() => [form.value.checkScript, form.value.checkShell], () => {
+  testToken++;
+  testResult.value = null;
+  testing.value = false;
+});
 
 // 条件任务的检测间隔默认 5 分钟，间隔任务默认 60 分钟：切换类型时跟着换（用户改过就不动）
 watch(() => form.value.kind, (kind, previous) => {
