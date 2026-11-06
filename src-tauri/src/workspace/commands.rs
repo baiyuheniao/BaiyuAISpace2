@@ -2581,7 +2581,9 @@ async fn dispatch_tool_call(
                         return serde_json::json!({ "error": e });
                     }
                     let created_by = Some(agent_tool::created_by_agent(&agent.id, &agent.name));
-                    match crate::scheduler::commands::create_schedule_record(request, created_by, &db_state).await {
+                    match crate::scheduler::commands::create_schedule_record(
+                        request, created_by, Some(agent_tool::MAX_AGENT_SCHEDULES_PER_WORKSPACE), &db_state,
+                    ).await {
                         Ok(schedule) => {
                             insert_workspace_log(
                                 app_handle, &workspace.id, Some(agent.id.clone()), "schedule_created",

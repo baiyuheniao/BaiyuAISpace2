@@ -156,6 +156,24 @@ pub fn count_agent_schedules(conn: &Connection, workspace_id: &str) -> Result<i6
     )
 }
 
+/// 在同一个事务里"数一下 Agent 创建的任务数 + 插入"：数量已达 `cap` 时不插入，返回 `Ok(false)`。
+/// 并发的创建请求各自等批准、批准后再各自插入，上限必须在插入这一刻判断才不会被绕过。
+pub fn insert_schedule_if_agent_capacity(
+    conn: &mut Connection,
+    schedule: &Schedule,
+    cap: i64,
+) -> Result<bool, rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(workspace_id) = schedule.workspace_id.as_deref() {
+        if count_agent_schedules(&tx, workspace_id)? >= cap {
+            return Ok(false);
+        }
+    }
+    insert_schedule(&tx, schedule)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn delete_schedule(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM schedules WHERE id=?1", params![id])?;
     Ok(())
@@ -358,5 +376,24 @@ mod tests {
         let toggled = toggle_schedule(&conn, "s1").unwrap().unwrap();
         assert!(toggled.enabled);
         assert_eq!(toggled.consecutive_errors, 0);
+    }
+
+    #[test]
+    fn capped_insert_refuses_the_task_that_would_exceed_the_cap() {
+        let mut conn = conn();
+        let agent_task = |id: &str| {
+            let mut s = condition(id);
+            s.created_by = Some("agent:a1:研究员".into());
+            s
+        };
+        // 模拟两个并发请求都在数到 1 个（< 上限 2）时通过了预检查，批准后各自插入
+        assert!(insert_schedule_if_agent_capacity(&mut conn, &agent_task("s1"), 2).unwrap());
+        assert!(insert_schedule_if_agent_capacity(&mut conn, &agent_task("s2"), 2).unwrap());
+        assert!(!insert_schedule_if_agent_capacity(&mut conn, &agent_task("s3"), 2).unwrap(), "第三个必须被拒绝");
+        assert_eq!(count_agent_schedules(&conn, "w1").unwrap(), 2);
+        assert!(get_schedule(&conn, "s3").unwrap().is_none());
+        // 用户创建的任务不占 Agent 的名额
+        insert_schedule(&conn, &condition("u1")).unwrap();
+        assert_eq!(count_agent_schedules(&conn, "w1").unwrap(), 2);
     }
 }
