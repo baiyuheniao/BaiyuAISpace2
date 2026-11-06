@@ -134,6 +134,9 @@ pub async fn run_check_script(shell: &str, script: &str, timeout: Duration) -> C
         Err(e) => return error_outcome(format!("无法启动 {program}：{e}"), started),
     };
     let pid = child.id();
+    // Windows：脚本进程放进 Job Object，guard 活到本函数结束，丢弃时杀掉整个进程树
+    #[cfg(windows)]
+    let _job = JobGuard::attach(&child);
 
     // 边读边丢：只保留前 READ_CAP 字节，其余读出来直接扔掉，既不撑内存也不让脚本因管道写满而卡住
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
@@ -190,29 +193,67 @@ async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, buf: Arc<Mu
     }
 }
 
-/// 结束脚本进程及其所有后代。Unix 杀整个进程组，Windows 用 `taskkill /T` 杀进程树。
-/// 进程已经退出时是空操作；失败也不影响检测结果。
+/// 结束脚本进程及其所有后代（Unix：杀整个进程组）。进程已经退出时是空操作。
+/// Windows 不走这里：根进程退出后 `taskkill /T` 找不到它的后代，改用 [`JobGuard`]。
+#[cfg(unix)]
 fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(0x0800_0000)
-            .status();
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+fn kill_process_tree(_pid: Option<u32>) {}
+
+/// Windows 的进程树清理：把脚本进程放进一个 Job Object，设置"句柄关闭时杀掉作业内所有进程"。
+/// Guard 被丢弃（函数结束或超时）时，脚本及其所有后代——即使根进程早已退出——一并结束。
+/// 注意：进程从创建到被放进作业之间有极短的窗口，窗口内启动的子进程不受控；脚本一启动就
+/// fork 后台进程再立刻退出的极端情况不保证清理。
+#[cfg(windows)]
+struct JobGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl JobGuard {
+    fn attach(child: &tokio::process::Child) -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        let process = child.raw_handle()?;
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job as usize == 0 {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if configured == 0 || AssignProcessToJobObject(job, process as _) == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            Some(JobGuard(job))
+        }
     }
 }
+
+#[cfg(windows)]
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe impl Send for JobGuard {}
 
 /// 一次有明确结论的检测之后，这次要不要触发任务。
 ///
