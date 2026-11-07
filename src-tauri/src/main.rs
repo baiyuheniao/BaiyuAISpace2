@@ -456,6 +456,7 @@ fn main() {
             scheduler::commands::schedule_list,
             scheduler::commands::schedule_delete,
             scheduler::commands::schedule_toggle,
+            scheduler::commands::schedule_test_script,
             // 日志相关命令
             copy_log_file,
             // 系统托盘相关命令
