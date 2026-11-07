@@ -191,7 +191,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### 2. 克隆仓库
 
 ```bash
-git clone https://github.com/baiyuheniao/BaiyuAISpace.git
+git clone https://github.com/baiyuheniao/BaiyuAISpace2.git
 cd BaiyuAISpace2
 ```
 
