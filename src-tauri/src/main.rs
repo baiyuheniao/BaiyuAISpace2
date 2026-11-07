@@ -409,15 +409,6 @@ fn main() {
             commands::lmstudio::pull_lmstudio_model,
             commands::lmstudio::load_lmstudio_model,
             commands::lmstudio::unload_lmstudio_model,
-            // Docker 相关命令
-            commands::docker::check_docker_status,
-            commands::docker::list_docker_images,
-            commands::docker::list_docker_containers,
-            commands::docker::pull_docker_image,
-            commands::docker::start_docker_container,
-            commands::docker::stop_docker_container,
-            commands::docker::remove_docker_container,
-            commands::docker::get_docker_profiles_cmd,
             // Skill 相关命令
             commands::skills::save_skill,
             commands::skills::list_skills,

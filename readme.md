@@ -124,7 +124,6 @@
 - [x] **Ollama 全托管**：检测安装 / 一键下载安装（多镜像源）/ 服务启停 / 版本查看
 - [x] **模型管理**：在线搜索（含各尺寸 tag）、下载、删除本地模型
 - [x] **LM Studio**：连接状态检测、模型下载、加载 / 卸载
-- [x] **Docker 部署**：镜像 / 容器管理（拉取、启动、停止、删除），内置 Ollama、LocalAI（CPU/GPU）三个部署预设
 
 ### 其他
 
@@ -250,7 +249,7 @@ BaiyuAISpace2/
 │   │   ├── SkillsView.vue      # Skill 管理 + 预设库
 │   │   ├── KnowledgeBaseView.vue # 知识库管理
 │   │   ├── MCPView.vue         # MCP 管理 + 预设库
-│   │   ├── LocalDeployView.vue # 本地部署（Ollama/LM Studio/Docker 三个 Tab）
+│   │   ├── LocalDeployView.vue # 本地部署（Ollama/LM Studio 两个 Tab）
 │   │   ├── HistoryView.vue     # 历史记录
 │   │   └── SettingsView.vue    # 设置（LLM/Embedding/Reranker API 配置）
 │   ├── stores/
@@ -262,8 +261,7 @@ BaiyuAISpace2/
 │   │   ├── knowledgeBase.ts    # 知识库状态
 │   │   ├── mcp.ts              # MCP 状态
 │   │   ├── localModel.ts       # Ollama 状态
-│   │   ├── lmStudio.ts         # LM Studio 状态
-│   │   └── docker.ts           # Docker 状态
+│   │   └── lmStudio.ts         # LM Studio 状态
 │   ├── styles/                 # 黑白设计系统全局样式与变量
 │   └── router/index.ts
 ├── src-tauri/src/
@@ -276,7 +274,6 @@ BaiyuAISpace2/
 │   │   ├── skills.rs           # Skill 存储 + 资源文件
 │   │   ├── local_model.rs      # Ollama 安装/服务/模型管理
 │   │   ├── lmstudio.rs         # LM Studio 集成
-│   │   ├── docker.rs           # Docker 镜像/容器管理
 │   │   └── app_update.rs       # 应用内自动更新检测
 │   ├── workspace/              # Agent Team 后端
 │   │   ├── commands.rs         # Tauri 命令 + Agent 循环 + 会议逻辑

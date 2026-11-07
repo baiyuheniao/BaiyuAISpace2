@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // 通用错误分类：把英文/底层错误翻译成用户能看懂的中文提示。原本只在
-// chat.ts 的聊天发送路径里用，现在提出来给 Docker/本地部署/LM Studio/MCP
+// chat.ts 的聊天发送路径里用，现在提出来给本地部署/LM Studio/MCP
 // 等模块共用，避免各自裸抛原始错误。
 
 /** 错误分类结果 */

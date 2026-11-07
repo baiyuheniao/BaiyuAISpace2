@@ -26,7 +26,7 @@
 - [6. 知识库（RAG）](#6-知识库rag)
 - [7. MCP 工具](#7-mcp-工具)
 - [8. Skill](#8-skill)
-- [9. 本地部署（Ollama / LM Studio / Docker）](#9-本地部署ollama--lm-studio--docker)
+- [9. 本地部署（Ollama / LM Studio）](#9-本地部署ollama--lm-studio)
 - [10. Agent Team（多 Agent 协作）](#10-agent-team多-agent-协作)
 - [11. 定时任务（Scheduler）](#11-定时任务scheduler)
 - [12. 历史记录](#12-历史记录)
@@ -51,7 +51,7 @@
 - [x] ENV-02 · 至少 1 个可用的云端 LLM API Key（推荐再备 1 个 Anthropic Key 测思考模式/缓存、1 个 Gemini Key 测视频）（环境里已有 Moonshot / 硅基流动 / DeepSeek 三个真实 Key，没有 Anthropic/Gemini Key）
 - [x] ENV-03 · 一个可用的 Embedding API 配置（如硅基流动 bge 系列），用于知识库测试（二轮补测：用户提供硅基流动真实 Key，新建 `Qwen/Qwen3-Embedding-8B` 配置，知识库检索全链路验证通过）
 - [ ] ENV-04 ·（可选）Cohere 兼容 Rerank API，用于精排测试 — 没有可用的 Rerank Key，Reranker 相关用例（SET-22/23、KB-22）未测
-- [x] ENV-05 ·（可选）已安装 Node.js/npx（MCP stdio 预设需要）、Docker Desktop、LM Studio — Node.js/npx 和 Docker Desktop 都已装好且能用；LM Studio 已装但本轮按你的要求没启动它的服务；额外发现环境缺 `uvx`，导致 2 个基于 uvx 的 MCP 预设连不上（细节见 7 节）
+- [x] ENV-05 ·（可选）已安装 Node.js/npx（MCP stdio 预设需要）、LM Studio — Node.js/npx 已装好且能用；LM Studio 已装但本轮按你的要求没启动它的服务；额外发现环境缺 `uvx`，导致 2 个基于 uvx 的 MCP 预设连不上（细节见 7 节）
 - [x] ENV-06 · 准备测试素材（二轮补测：用户在工作区 `test_assets/` 下提供了图片×3、GIF、MP4 视频、csv、旧版 doc、html 等素材，另从 `docs/` 下补充了 md/pdf/docx，覆盖了第 5 节「附件与多模态」的大部分格式；仍缺 >10MB 大文件与真正损坏的文件）
 - [ ] ENV-07 · 记录测试机系统版本、应用版本（设置 → 关于）、测试日期与测试人 — 没有走「设置→关于」页面正式记录这些信息，只在测试过程里零散确认过（如 Windows + release v0.1.0 + 2026-07-07）
 
@@ -287,7 +287,7 @@
 
 ---
 
-## 9. 本地部署（Ollama / LM Studio / Docker）
+## 9. 本地部署（Ollama / LM Studio）
 
 ### 9.1 Ollama Tab
 
@@ -304,14 +304,6 @@
 - [x] 🟠 LOCAL-20 · LM Studio 未运行时检测 → 警告「未检测到正在运行的 LM Studio 服务」，提供官网下载入口（外链能打开浏览器）（用户明确要求本轮跳过 LM Studio 实测，仅验证了未运行状态的提示文案，未点外链）
 - [ ] 🟠 LOCAL-21 · LM Studio 运行中检测 → 列出模型；加载 / 卸载模型按钮生效 — 用户明确要求本轮跳过 LM Studio 实测，LM Studio 服务全程未启动
 - [ ] 🟡 LOCAL-22 · 输入模型 ID 下载 → 开始下载提示；用自定义(OpenAI 兼容)配置指向 LM Studio 地址可对话 — 同上
-
-### 9.3 Docker Tab
-
-- [x] 🟠 LOCAL-30 · Docker 未安装/未启动时检测 → 状态明确提示，页面其余功能不崩溃（Docker 已安装并在线，v29.5.3，本条按"运行中"分支验证）
-- [ ] 🟠 LOCAL-31 · Docker 运行中 → 镜像列表、容器列表正确显示（只看了 Docker 在线状态与部署预设，未实际检查镜像/容器列表内容）
-- [x] 🟠 LOCAL-32 · 三个部署预设可见：Ollama / LocalAI (CPU) / LocalAI (GPU)；选择 Ollama 预设部署 → 镜像拉取有流式进度，容器启动成功（仅验证三预设可见，未实际点击部署——避免在测试环境拉取镜像/占用资源）
-- [ ] 🟡 LOCAL-33 · 停止 / 删除容器 → 状态与列表即时更新 — 没有实际部署容器（见 LOCAL-32），也就无容器可停止/删除
-- [ ] 🟡 LOCAL-34 · 拉取不存在的镜像名 → 报错可理解 — 没有测试拉取不存在镜像的报错
 
 ---
 

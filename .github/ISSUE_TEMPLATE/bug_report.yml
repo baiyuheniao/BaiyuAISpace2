@@ -37,7 +37,7 @@ body:
         - Agent Team（多 Agent 工作组）
         - RAG 知识库
         - MCP 工具
-        - 本地部署（Ollama / LM Studio / Docker）
+        - 本地部署（Ollama / LM Studio）
         - Skill
         - 定时任务
         - 界面 / 交互
