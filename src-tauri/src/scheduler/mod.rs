@@ -4,6 +4,7 @@
 
 pub mod types;
 pub mod db;
+pub mod agent_tool;
 pub mod check;
 pub mod commands;
 

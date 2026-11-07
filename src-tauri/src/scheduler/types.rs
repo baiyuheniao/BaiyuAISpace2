@@ -91,6 +91,9 @@ pub struct Schedule {
     /// 连续检测出错的次数；达到上限会自动停用该任务。
     #[serde(default)]
     pub consecutive_errors: i64,
+    /// 谁创建的：`None` 表示用户在界面上创建；`agent:<agent_id>:<名字>` 表示 Agent 通过工具创建。
+    #[serde(default)]
+    pub created_by: Option<String>,
     /// Unix 毫秒时间戳 —— 调度循环下一次应该触发（条件任务则是检测）该任务的时刻。
     pub next_run_at: i64,
     pub last_run_at: Option<i64>,

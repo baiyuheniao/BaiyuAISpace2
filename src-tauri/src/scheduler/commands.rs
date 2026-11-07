@@ -288,6 +288,17 @@ pub async fn schedule_create(
     request: CreateScheduleRequest,
     db_state: State<'_, DbState>,
 ) -> Result<Schedule, String> {
+    create_schedule_record(request, None, None, &db_state).await
+}
+
+/// 创建并保存一个定时任务。`created_by` 为 `None` 表示用户创建；Agent 通过工具创建时
+/// 传 `agent:<id>:<名字>`；`agent_cap` 是该工作组 Agent 创建任务数的上限，在插入的同一事务里判断。界面命令和 Agent 工具共用这一处，校验和字段补全保持一致。
+pub async fn create_schedule_record(
+    request: CreateScheduleRequest,
+    created_by: Option<String>,
+    agent_cap: Option<i64>,
+    db_state: &DbState,
+) -> Result<Schedule, String> {
     let request = normalize_condition_request(request)?;
     let next_run_at = compute_initial_next_run_at(&request)
         .ok_or_else(|| "无法计算下次运行时间，请检查调度参数".to_string())?;
@@ -313,6 +324,7 @@ pub async fn schedule_create(
         last_check_output: None,
         last_condition_met: false,
         consecutive_errors: 0,
+        created_by,
         next_run_at,
         last_run_at:      None,
         enabled:          true,
@@ -321,8 +333,16 @@ pub async fn schedule_create(
     };
 
     let db = db_state.0.lock().await;
-    let conn = rusqlite::Connection::open(&db.path).map_err(|e| e.to_string())?;
-    db::insert_schedule(&conn, &schedule).map_err(|e| e.to_string())?;
+    let mut conn = rusqlite::Connection::open(&db.path).map_err(|e| e.to_string())?;
+    match agent_cap {
+        Some(cap) => {
+            let inserted = db::insert_schedule_if_agent_capacity(&mut conn, &schedule, cap).map_err(|e| e.to_string())?;
+            if !inserted {
+                return Err(format!("本工作组里 Agent 创建的定时任务已达上限 {cap} 个，请先 delete 不用的"));
+            }
+        }
+        None => db::insert_schedule(&conn, &schedule).map_err(|e| e.to_string())?,
+    }
     Ok(schedule)
 }
 
@@ -419,7 +439,7 @@ mod tests {
             check_script: Some("exit 0".into()), check_shell: Some("sh".into()),
             trigger_mode: Some("edge".into()), cooldown_minutes: None,
             last_check_at: None, last_check_status: None, last_check_output: None,
-            last_condition_met: false, consecutive_errors: 0,
+            last_condition_met: false, consecutive_errors: 0, created_by: None,
             next_run_at: 0, last_run_at: None, enabled: true, created_at: 0, updated_at: 0,
         }
     }
