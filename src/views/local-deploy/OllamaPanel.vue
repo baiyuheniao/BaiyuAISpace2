@@ -1,0 +1,892 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+
+<!--
+  OllamaPanel.vue - Ollama 标签页
+
+  Ollama 的安装检测 / 服务启停 / 模型搜索与下载 / 已有模型与一键部署，以及部署参数弹窗。
+  页面初始化时的探测（安装、服务状态、模型列表）仍在 LocalDeployView.vue 的 onMounted 里，
+  这里只读 store。
+-->
+
+<script setup lang="ts">
+import { ref, computed } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
+import {
+  NCard,
+  NSelect,
+  NInput,
+  NButton,
+  NSpace,
+  NList,
+  NListItem,
+  NThing,
+  NTag,
+  NPopconfirm,
+  NIcon,
+  NText,
+  NEmpty,
+  NProgress,
+  NAlert,
+  NTooltip,
+  NModal,
+  NForm,
+  NFormItem,
+} from "naive-ui";
+import { useMessage } from "@/composables/useNotify";
+import { useLocalModelStore, type ModelSource } from "@/stores/localModel";
+import { useSettingsStore } from "@/stores/settings";
+import {
+  HardwareChipOutline,
+  RefreshOutline,
+  CheckmarkOutline,
+  CloseOutline,
+  PlayOutline,
+  StopOutline,
+  SearchOutline,
+  RocketOutline,
+  DownloadOutline,
+  CloudDownloadOutline,
+  TrashOutline,
+  ChatbubblesOutline,
+} from "@vicons/ionicons5";
+
+// ============ 状态管理 ============
+
+// 本地模型 Store (Ollama)
+const localModel = useLocalModelStore();
+
+// Settings Store（用于读取/管理 API 配置）
+const settings = useSettingsStore();
+const { apiConfigs } = storeToRefs(settings);
+
+// 路由（用于跳转到 Chat）
+const router = useRouter();
+
+// 消息提示 - 用于操作反馈
+const message = useMessage();
+
+// ============ 本地模型相关状态 ============
+
+/** 下载模型表单数据 */
+const pullFormData = ref({
+  modelName: "",
+  sourceId: "ollama",
+});
+
+/** Ollama 地址编辑状态 */
+const ollamaUrlEditing = ref(false);
+
+/** Ollama 地址编辑值 */
+const ollamaUrlEditValue = ref(localModel.ollamaBaseUrl);
+
+/** 下载源选项 */
+const sourceOptions = computed(() =>
+  localModel.modelSources.map((source: ModelSource) => ({
+    label: source.name,
+    value: source.id,
+  }))
+);
+
+/** 镜像源选项 */
+const mirrorOptions = computed(() =>
+  localModel.downloadMirrors.map((m) => ({
+    label: m.name,
+    value: m.id,
+  }))
+);
+
+/** 模型搜索关键词 */
+const modelSearchQuery = ref("");
+
+/** 是否已经执行过搜索（用于区分"未搜索"和"无结果"） */
+const hasSearched = ref(false);
+
+/** 模型搜索防抖定时器 */
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 当前正在下载的搜索结果模型名称 */
+const downloadingSearchResult = ref<string | null>(null);
+
+// ============ 本地模型方法 ============
+
+/** 下载模型 */
+const handlePullModel = async () => {
+  if (!pullFormData.value.modelName.trim()) {
+    message.warning("请输入模型名称");
+    return;
+  }
+  try {
+    await localModel.pullModel(pullFormData.value.modelName, pullFormData.value.sourceId);
+    pullFormData.value.modelName = "";
+    message.success("开始下载模型");
+  } catch (error) {
+    message.error(`下载失败: ${error}`);
+  }
+};
+
+/** 删除本地模型 */
+const handleDeleteModel = async (name: string) => {
+  try {
+    await localModel.deleteModel(name);
+    message.success(`已删除模型: ${name}`);
+  } catch (error) {
+    message.error(`删除失败: ${error}`);
+  }
+};
+
+/** 刷新本地模型列表 */
+const handleRefreshModels = async () => {
+  try {
+    await localModel.loadModels();
+    message.success("已刷新模型列表");
+  } catch (error) {
+    message.error(`刷新失败: ${error}`);
+  }
+};
+
+/** 保存 Ollama 地址 */
+const handleSaveOllamaUrl = () => {
+  localModel.setOllamaBaseUrl(ollamaUrlEditValue.value);
+  ollamaUrlEditing.value = false;
+  message.success("Ollama 地址已更新");
+};
+
+/** 格式化文件大小 */
+const formatSize = (bytes: number): string => {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+};
+
+// ============ Ollama 安装 & 服务管理方法 ============
+
+/** 检测 Ollama 安装 */
+const handleDetectInstallation = async () => {
+  try {
+    await localModel.detectInstallation();
+    if (localModel.ollamaInstalled) {
+      message.success(`检测到 Ollama${localModel.ollamaInstalledVersion ? ' v' + localModel.ollamaInstalledVersion : ''}`);
+    }
+  } catch (error) {
+    message.error(`检测失败: ${error}`);
+  }
+};
+
+/** 启动 Ollama 服务 */
+const handleStartService = async () => {
+  try {
+    const status = await localModel.startService();
+    if (status?.running) {
+      message.success("Ollama 服务已启动");
+    } else {
+      message.error("Ollama 服务启动失败");
+    }
+  } catch (error) {
+    message.error(`启动失败: ${error}`);
+  }
+};
+
+/** 停止 Ollama 服务 */
+const handleStopService = async () => {
+  try {
+    await localModel.stopService();
+    message.success("Ollama 服务已停止");
+  } catch (error) {
+    message.error(`停止失败: ${error}`);
+  }
+};
+
+/** 下载安装 Ollama */
+const handleInstallOllama = async () => {
+  try {
+    await localModel.downloadAndInstallOllama();
+    message.success("Ollama 安装完成并已启动服务");
+  } catch (error) {
+    message.error(`安装失败: ${error}`);
+  }
+};
+
+/** 模型搜索（防抖） */
+const handleModelSearch = (query: string) => {
+  modelSearchQuery.value = query;
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+  }
+  if (query.trim()) {
+    searchDebounceTimer = setTimeout(() => {
+      localModel.searchModels(query);
+      hasSearched.value = true;
+    }, 500);
+  } else {
+    hasSearched.value = false;
+    localModel.modelSearchResults = [];
+  }
+};
+
+/** 选择搜索结果中的模型并下载 */
+const handleSelectSearchResult = async (modelName: string) => {
+  downloadingSearchResult.value = modelName;
+  try {
+    // Search results are from Ollama library, force use "ollama" source
+    await localModel.pullModel(modelName, "ollama");
+    message.success(`模型 ${modelName} 下载完成`);
+  } catch (error) {
+    message.error(`下载失败: ${error}`);
+  } finally {
+    downloadingSearchResult.value = null;
+    modelSearchQuery.value = "";
+    localModel.modelSearchResults = [];
+    hasSearched.value = false;
+  }
+};
+
+// ============ 部署弹窗状态 ============
+
+/** 是否显示部署参数弹窗 */
+const showDeployModal = ref(false);
+
+/** 当前要部署的模型名 */
+const deployTargetModel = ref("");
+
+/** 部署表单数据 */
+const deployForm = ref({ configName: "", baseUrl: "" });
+
+/** 是否正在执行部署 */
+const isDeploying = ref(false);
+
+/** 本地已部署模型的 Map: model.name → ApiConfig */
+const localDeployedConfigMap = computed(() =>
+  Object.fromEntries(
+    apiConfigs.value
+      .filter((c) => c.provider === "local")
+      .map((c) => [c.model, c])
+  )
+);
+
+/** 获取模型对应的已部署 API 配置（无则返回 null） */
+const getDeployedConfig = (modelName: string) =>
+  localDeployedConfigMap.value[modelName] ?? null;
+
+/** 打开部署参数弹窗 */
+const handleOpenDeployModal = (modelName: string) => {
+  deployTargetModel.value = modelName;
+  deployForm.value = {
+    configName: `local-${modelName}`,
+    baseUrl: localModel.ollamaBaseUrl,
+  };
+  showDeployModal.value = true;
+};
+
+/** 确认部署 */
+const handleConfirmDeploy = async () => {
+  isDeploying.value = true;
+  try {
+    await localModel.oneClickDeploy(
+      deployTargetModel.value,
+      deployForm.value.configName.trim() || undefined,
+      deployForm.value.baseUrl.trim() || undefined,
+    );
+    showDeployModal.value = false;
+    message.success(`模型 ${deployTargetModel.value} 部署完成，可在对话中使用`);
+  } catch (error) {
+    message.error(`部署失败: ${error}`);
+  } finally {
+    isDeploying.value = false;
+  }
+};
+
+/** 取消部署（删除对应 API 配置） */
+const handleUndeploy = (modelName: string) => {
+  const config = getDeployedConfig(modelName);
+  if (config) {
+    settings.deleteApiConfig(config.id);
+    message.success(`已取消部署: ${modelName}`);
+  }
+};
+
+/** 切换到该模型并跳转对话 */
+const handleGoToChat = (modelName: string) => {
+  const config = getDeployedConfig(modelName);
+  if (config) {
+    settings.setActiveConfig(config.id);
+    router.push("/");
+  }
+};
+</script>
+
+<template>
+  <!-- 本地部署卡片 -->
+  <n-card
+    class="settings-card"
+    :bordered="false"
+    :segmented="{ content: true, footer: true }"
+  >
+    <template #header>
+      <div class="card-header">
+        <n-icon
+          :size="20"
+          depth="3"
+        >
+          <HardwareChipOutline />
+        </n-icon>
+        <span>Ollama 本地模型</span>
+      </div>
+    </template>
+
+    <template #header-extra>
+      <n-space align="center">
+        <n-button
+          size="small"
+          @click="handleRefreshModels"
+          :loading="localModel.isLoadingModels"
+          :disabled="!localModel.isOnline"
+        >
+          <template #icon>
+            <n-icon><RefreshOutline /></n-icon>
+          </template>
+          刷新模型列表
+        </n-button>
+      </n-space>
+    </template>
+
+    <!-- Step 1: 安装检测 -->
+    <div class="deploy-section">
+      <div class="section-title">
+        <n-text strong>1. Ollama 环境</n-text>
+      </div>
+
+      <!-- 未安装状态 -->
+      <template v-if="!localModel.ollamaInstalled">
+        <n-space
+          vertical
+          align="center"
+          style="padding: 16px 0;"
+        >
+          <n-text depth="3">未检测到 Ollama，需要先安装才能使用本地部署</n-text>
+          <n-space align="center">
+            <n-select
+              v-model:value="localModel.selectedMirrorId"
+              :options="mirrorOptions"
+              size="small"
+              style="width: 200px;"
+              placeholder="选择下载源"
+            />
+            <n-button
+              type="primary"
+              :loading="localModel.isInstallingOllama"
+              @click="handleInstallOllama"
+            >
+              <template #icon>
+                <n-icon><DownloadOutline /></n-icon>
+              </template>
+              一键安装 Ollama
+            </n-button>
+          </n-space>
+
+          <!-- 安装进度 -->
+          <template v-if="localModel.isInstallingOllama && localModel.ollamaInstallProgress">
+            <div style="width: 100%; max-width: 400px;">
+              <n-text depth="3" style="font-size: 12px;">
+                {{ localModel.ollamaInstallProgress.message }}
+              </n-text>
+              <n-progress
+                v-if="localModel.ollamaInstallProgress.progressPercent > 0"
+                type="line"
+                :percentage="localModel.ollamaInstallProgress.progressPercent"
+                :indicator-placement="'inside'"
+                processing
+                style="margin-top: 4px;"
+              />
+            </div>
+          </template>
+        </n-space>
+      </template>
+
+      <!-- 已安装状态 -->
+      <template v-else>
+        <n-space
+          align="center"
+          justify="space-between"
+          style="padding: 8px 0;"
+        >
+          <n-space align="center">
+            <n-icon
+              size="20"
+              :color="localModel.isOnline ? 'var(--color-ink)' : 'var(--color-ink-faint)'"
+            >
+              <HardwareChipOutline />
+            </n-icon>
+            <n-text v-if="localModel.isOnline">
+              Ollama 在线
+              <n-tag
+                v-if="localModel.ollamaVersion"
+                size="small"
+                type="success"
+                style="margin-left: 8px;"
+              >
+                v{{ localModel.ollamaVersion }}
+              </n-tag>
+              <n-tag
+                v-if="localModel.serviceManagedByApp"
+                size="small"
+                type="info"
+                style="margin-left: 4px;"
+              >
+                应用管理
+              </n-tag>
+            </n-text>
+            <n-text
+              v-else
+              type="warning"
+            >
+              Ollama 已安装但未运行
+            </n-text>
+          </n-space>
+          <n-space align="center">
+            <!-- 启动/停止按钮 -->
+            <n-button
+              v-if="!localModel.isOnline"
+              type="primary"
+              size="small"
+              :loading="localModel.isStartingService"
+              @click="handleStartService"
+            >
+              <template #icon>
+                <n-icon><PlayOutline /></n-icon>
+              </template>
+              {{ localModel.isStartingService ? '启动中...' : '启动服务' }}
+            </n-button>
+            <n-button
+              v-else-if="localModel.serviceManagedByApp"
+              size="small"
+              @click="handleStopService"
+            >
+              <template #icon>
+                <n-icon><StopOutline /></n-icon>
+              </template>
+              停止服务
+            </n-button>
+
+            <!-- Ollama 地址编辑 -->
+            <template v-if="ollamaUrlEditing">
+              <n-input
+                v-model:value="ollamaUrlEditValue"
+                size="small"
+                style="width: 250px;"
+                placeholder="http://localhost:11434"
+              />
+              <n-button
+                size="small"
+                type="primary"
+                @click="handleSaveOllamaUrl"
+              >
+                <template #icon>
+                  <n-icon><CheckmarkOutline /></n-icon>
+                </template>
+              </n-button>
+              <n-button
+                size="small"
+                @click="ollamaUrlEditing = false"
+              >
+                <template #icon>
+                  <n-icon><CloseOutline /></n-icon>
+                </template>
+              </n-button>
+            </template>
+            <template v-else>
+              <n-text
+                depth="3"
+                style="font-size: 12px;"
+              >
+                {{ localModel.ollamaBaseUrl }}
+              </n-text>
+              <n-button
+                size="tiny"
+                @click="ollamaUrlEditing = true; ollamaUrlEditValue = localModel.ollamaBaseUrl"
+              >
+                编辑
+              </n-button>
+            </template>
+          </n-space>
+        </n-space>
+      </template>
+    </div>
+
+    <!-- Step 2: 模型下载（仅在 Ollama 在线时显示） -->
+    <div
+      v-if="localModel.isOnline"
+      class="deploy-section"
+      style="margin-top: 16px;"
+    >
+      <div class="section-title">
+        <n-text strong>2. 下载模型</n-text>
+      </div>
+
+      <!-- 搜索输入 -->
+      <n-space
+        vertical
+        style="margin-top: 8px;"
+      >
+        <n-input
+          :value="modelSearchQuery"
+          placeholder="输入模型名称搜索，如 llama3, qwen2, mistral..."
+          @update:value="handleModelSearch"
+        >
+          <template #prefix>
+            <n-icon><SearchOutline /></n-icon>
+          </template>
+        </n-input>
+
+        <!-- 搜索结果 -->
+        <div
+          v-if="localModel.isSearchingModels"
+          style="text-align: center; padding: 12px;"
+        >
+          <n-text depth="3">搜索中...</n-text>
+        </div>
+        <n-empty
+          v-else-if="hasSearched && localModel.modelSearchResults.length === 0"
+          description="没有搜索到结果"
+          style="margin-top: 12px; margin-bottom: 12px;"
+        />
+        <n-list
+          v-else-if="localModel.modelSearchResults.length > 0"
+          bordered
+          size="small"
+          class="search-result-list"
+        >
+          <template
+            v-for="result in localModel.modelSearchResults"
+            :key="result.name"
+          >
+            <!-- 模型系列行 -->
+            <n-list-item class="search-result-series">
+              <n-thing>
+                <template #header>
+                  <n-text strong>{{ result.name }}</n-text>
+                </template>
+                <template v-if="result.description" #description>
+                  <n-text depth="3" style="font-size: 12px;">{{ result.description }}</n-text>
+                </template>
+              </n-thing>
+              <template #suffix>
+                <n-button
+                  size="small"
+                  type="primary"
+                  :loading="downloadingSearchResult === result.name"
+                  :disabled="downloadingSearchResult !== null && downloadingSearchResult !== result.name"
+                  @click="handleSelectSearchResult(result.name)"
+                >
+                  <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                  {{ downloadingSearchResult === result.name ? '下载中...' : '下载' }}
+                </n-button>
+              </template>
+            </n-list-item>
+
+            <!-- 各尺寸版本子行 -->
+            <n-list-item
+              v-for="tag in result.tags"
+              :key="`${result.name}:${tag}`"
+              class="search-result-tag-row"
+            >
+              <n-text style="font-size: 13px;">{{ result.name }}:{{ tag }}</n-text>
+              <template #suffix>
+                <n-button
+                  size="small"
+                  :loading="downloadingSearchResult === `${result.name}:${tag}`"
+                  :disabled="downloadingSearchResult !== null && downloadingSearchResult !== `${result.name}:${tag}`"
+                  @click="handleSelectSearchResult(`${result.name}:${tag}`)"
+                >
+                  <template #icon><n-icon><CloudDownloadOutline /></n-icon></template>
+                  {{ downloadingSearchResult === `${result.name}:${tag}` ? '下载中...' : '下载' }}
+                </n-button>
+              </template>
+            </n-list-item>
+          </template>
+        </n-list>
+
+        <!-- 手动输入模型名下载 -->
+        <n-space align="center" style="margin-top: 4px;">
+          <n-input
+            v-model:value="pullFormData.modelName"
+            size="small"
+            style="width: 250px;"
+            placeholder="或直接输入模型名，如 llama3:8b"
+          />
+          <n-select
+            v-model:value="pullFormData.sourceId"
+            :options="sourceOptions"
+            size="small"
+            style="width: 140px;"
+          />
+          <n-button
+            size="small"
+            type="primary"
+            :loading="localModel.isPulling"
+            :disabled="!pullFormData.modelName.trim()"
+            @click="handlePullModel"
+          >
+            <template #icon>
+              <n-icon><CloudDownloadOutline /></n-icon>
+            </template>
+            下载
+          </n-button>
+        </n-space>
+      </n-space>
+
+      <!-- 下载进度 -->
+      <n-alert
+        v-if="localModel.isPulling"
+        type="info"
+        style="margin-top: 12px;"
+      >
+        <template #icon>
+          <n-icon><CloudDownloadOutline /></n-icon>
+        </template>
+        正在下载: {{ localModel.pullingModelName }}
+        <n-progress
+          v-if="localModel.downloadPercent !== null"
+          type="line"
+          :percentage="localModel.downloadPercent"
+          :indicator-placement="'inside'"
+          processing
+          style="margin-top: 8px;"
+        />
+      </n-alert>
+    </div>
+
+    <!-- Step 3: 已有模型 & 一键部署 -->
+    <div
+      v-if="localModel.isOnline"
+      class="deploy-section"
+      style="margin-top: 16px;"
+    >
+      <div class="section-title">
+        <n-text strong>3. 本地模型</n-text>
+        <n-text
+          depth="3"
+          style="font-size: 12px; margin-left: 8px;"
+        >
+          {{ localModel.localModels.length }} 个
+        </n-text>
+      </div>
+
+      <n-empty
+        v-if="!localModel.isLoadingModels && localModel.localModels.length === 0"
+        description="暂无本地模型，请先下载"
+        style="margin-top: 12px;"
+      />
+
+      <div
+        v-if="localModel.isLoadingModels"
+        style="text-align: center; padding: 20px;"
+      >
+        <n-text depth="3">加载模型列表中...</n-text>
+      </div>
+
+      <n-list
+        v-if="localModel.localModels.length > 0"
+        bordered
+        size="small"
+        style="margin-top: 8px;"
+      >
+        <n-list-item
+          v-for="model in localModel.localModels"
+          :key="model.name"
+        >
+          <n-thing>
+            <template #header>
+              <n-space align="center" :size="6">
+                <n-icon><HardwareChipOutline /></n-icon>
+                {{ model.name }}
+              </n-space>
+            </template>
+            <template #description>
+              <n-space
+                size="small"
+                style="margin-top: 4px;"
+              >
+                <n-tag
+                  v-if="model.details?.parameterSize"
+                  size="small"
+                  type="info"
+                >
+                  {{ model.details.parameterSize }}
+                </n-tag>
+                <n-tag
+                  v-if="model.details?.quantizationLevel"
+                  size="small"
+                >
+                  {{ model.details.quantizationLevel }}
+                </n-tag>
+                <n-tag
+                  v-if="model.size"
+                  size="small"
+                >
+                  {{ formatSize(model.size) }}
+                </n-tag>
+                <n-tag
+                  v-if="model.details?.family"
+                  size="small"
+                  type="success"
+                >
+                  {{ model.details.family }}
+                </n-tag>
+              </n-space>
+            </template>
+          </n-thing>
+          <template #suffix>
+            <n-space :size="4" align="center">
+              <!-- 已部署状态 -->
+              <template v-if="getDeployedConfig(model.name)">
+                <n-tag type="success" size="small">已部署</n-tag>
+                <n-button
+                  size="small"
+                  type="primary"
+                  @click="handleGoToChat(model.name)"
+                >
+                  <template #icon>
+                    <n-icon><ChatbubblesOutline /></n-icon>
+                  </template>
+                  去对话
+                </n-button>
+                <n-popconfirm positive-text="确定" negative-text="取消" @positive-click="handleUndeploy(model.name)">
+                  <template #trigger>
+                    <n-button size="small" secondary>
+                      取消部署
+                    </n-button>
+                  </template>
+                  取消部署将删除对应的 API 配置，确定继续？
+                </n-popconfirm>
+              </template>
+
+              <!-- 未部署状态 -->
+              <template v-else>
+                <n-tooltip trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      size="small"
+                      type="primary"
+                      @click="handleOpenDeployModal(model.name)"
+                    >
+                      <template #icon>
+                        <n-icon><RocketOutline /></n-icon>
+                      </template>
+                      部署
+                    </n-button>
+                  </template>
+                  创建聊天配置以在对话中使用此模型
+                </n-tooltip>
+              </template>
+
+              <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDeleteModel(model.name)">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    type="error"
+                    quaternary
+                  >
+                    <template #icon>
+                      <n-icon><TrashOutline /></n-icon>
+                    </template>
+                  </n-button>
+                </template>
+                确定删除模型 {{ model.name }}？
+              </n-popconfirm>
+            </n-space>
+          </template>
+        </n-list-item>
+      </n-list>
+    </div>
+
+    <!-- 底部：下载源设置 -->
+    <template #footer>
+      <n-space
+        align="center"
+        justify="space-between"
+      >
+        <n-space align="center">
+          <n-text
+            depth="3"
+            style="font-size: 12px;"
+          >
+            模型下载源:
+          </n-text>
+          <n-select
+            :value="localModel.selectedSourceId"
+            :options="sourceOptions"
+            size="small"
+            style="width: 180px;"
+            @update:value="localModel.setSelectedSourceId"
+          />
+        </n-space>
+        <n-button
+          size="tiny"
+          @click="handleDetectInstallation"
+        >
+          重新检测安装状态
+        </n-button>
+      </n-space>
+    </template>
+  </n-card>
+
+  <!-- 部署参数配置弹窗 -->
+  <n-modal
+    v-model:show="showDeployModal"
+    preset="card"
+    title="部署配置"
+    style="width: 420px;"
+    :mask-closable="!isDeploying"
+    :closable="!isDeploying"
+  >
+    <n-form label-placement="left" label-width="80">
+      <n-form-item label="配置名称">
+        <n-input
+          v-model:value="deployForm.configName"
+          placeholder="自定义配置名称"
+        />
+      </n-form-item>
+      <n-form-item label="服务地址">
+        <n-input
+          v-model:value="deployForm.baseUrl"
+          placeholder="http://localhost:11434"
+        />
+      </n-form-item>
+    </n-form>
+    <n-text depth="3" style="font-size: 12px;">
+      部署后将在"设置"中创建对应 API 配置，可直接在对话中切换使用。
+    </n-text>
+    <template #footer>
+      <n-space justify="end">
+        <n-button :disabled="isDeploying" @click="showDeployModal = false">取消</n-button>
+        <n-button type="primary" :loading="isDeploying" @click="handleConfirmDeploy">
+          <template #icon><n-icon><RocketOutline /></n-icon></template>
+          确认部署
+        </n-button>
+      </n-space>
+    </template>
+  </n-modal>
+</template>
+
+<style scoped lang="scss">
+/* 搜索结果列表 */
+.search-result-list {
+  .search-result-series {
+    background: $surface;
+  }
+
+  .search-result-tag-row {
+    padding-left: 28px !important;
+
+    :deep(.n-list-item__main) {
+      display: flex;
+      align-items: center;
+    }
+  }
+}
+</style>
